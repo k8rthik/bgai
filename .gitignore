@@ -1,0 +1,13 @@
+# Data caches and datasets (large, regenerable from sources)
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# OS / editor
+.DS_Store
