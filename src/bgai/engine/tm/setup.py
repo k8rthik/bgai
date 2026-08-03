@@ -37,7 +37,10 @@ import gzip
 import json
 import re
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
+
+import polars as pl
 
 from bgai.engine.tm.tiles import ScoringTile
 
@@ -112,23 +115,26 @@ def _read_raw_game(game_id: str, raw_dir: Path) -> dict[str, object]:
     return data
 
 
-def _load_options_csv_from_meta(game_id: str) -> str:
-    import polars as pl
+@lru_cache(maxsize=1)
+def _games_meta() -> pl.DataFrame:
+    return pl.read_parquet(Path("data/datasets/games_meta.parquet"))
 
-    meta_path = Path("data/datasets/games_meta.parquet")
-    df = pl.read_parquet(meta_path)
+
+def _games_meta_row(game_id: str) -> dict[str, object]:
+    """Fetch one game's fallback metadata row, or raise ValueError."""
+    df = _games_meta()
     rows = df.filter(pl.col("game_id") == game_id)
     if rows.height == 0:
         raise ValueError(f"{game_id}: not found in raw dir or games_meta.parquet fallback")
-    value = rows["options"][0]
-    return str(value) if value is not None else ""
+    return {column: rows[column][0] for column in df.columns}
 
 
 def _resolve_options(game_id: str, raw: dict[str, object]) -> GameOptions:
     raw_options = raw.get("options")
-    if isinstance(raw_options, dict) and raw_options:
+    if isinstance(raw_options, dict):
         return GameOptions.from_csv(",".join(raw_options.keys()))
-    return GameOptions.from_csv(_load_options_csv_from_meta(game_id))
+    value = _games_meta_row(game_id)["options"]
+    return GameOptions.from_csv(str(value) if value is not None else "")
 
 
 def _resolve_player_count(game_id: str, raw: dict[str, object]) -> int:
@@ -141,13 +147,7 @@ def _resolve_player_count(game_id: str, raw: dict[str, object]) -> int:
     if isinstance(top_level, int) and top_level > 0:
         return top_level
 
-    import polars as pl
-
-    df = pl.read_parquet(Path("data/datasets/games_meta.parquet"))
-    rows = df.filter(pl.col("game_id") == game_id)
-    if rows.height == 0:
-        raise ValueError(f"{game_id}: player_count not found in raw JSON or games_meta fallback")
-    value = rows["player_count"][0]
+    value = _games_meta_row(game_id)["player_count"]
     if not isinstance(value, int) or value <= 0:
         raise ValueError(f"{game_id}: invalid fallback player_count {value!r}")
     return value
@@ -160,7 +160,8 @@ def _resolve_seat_order(game_id: str, raw: dict[str, object]) -> tuple[str, ...]
 
     ordered: list[tuple[int, str]] = []
     for name, info in factions.items():
-        if not isinstance(info, dict) or not isinstance(name, str):
+        # `name` is always str: JSON object keys decode to str via json.load.
+        if not isinstance(info, dict):
             raise ValueError(f"{game_id}: malformed 'factions' entry {name!r}")
         start_order = info.get("start_order")
         if not isinstance(start_order, int):
@@ -168,20 +169,26 @@ def _resolve_seat_order(game_id: str, raw: dict[str, object]) -> tuple[str, ...]
         ordered.append((start_order, name))
     ordered.sort()
 
-    seats = tuple(name for _, name in ordered)
-    if not seats:
-        raise ValueError(f"{game_id}: resolved empty seat order")
-    return seats
+    # `factions` was checked non-empty above, so `ordered` (one entry per
+    # faction) is guaranteed non-empty here.
+    return tuple(name for _, name in ordered)
 
 
 def _resolve_score_tiles(game_id: str, raw: dict[str, object]) -> tuple[ScoringTile, ...]:
     raw_tiles = raw.get("score_tiles")
     if not isinstance(raw_tiles, list):
         raise ValueError(f"{game_id}: raw JSON 'score_tiles' is not a list")
-    tiles = tuple(ScoringTile.from_snellman(t) for t in raw_tiles)
+
+    tiles: list[ScoringTile] = []
+    for index, entry in enumerate(raw_tiles):
+        try:
+            tiles.append(ScoringTile.from_snellman(entry))
+        except ValueError as exc:
+            raise ValueError(f"{game_id}: score_tiles[{index}] invalid: {exc}") from exc
+
     if len(tiles) != 6:
         raise ValueError(f"{game_id}: expected 6 score tiles, got {len(tiles)}")
-    return tiles
+    return tuple(tiles)
 
 
 def _resolve_bonus_tiles(
