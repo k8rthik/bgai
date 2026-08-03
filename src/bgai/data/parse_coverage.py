@@ -20,7 +20,7 @@ def check_coverage(raw_dir: Path) -> Counter:
     unknown: Counter = Counter()
     n_games = n_rows = n_moves = 0
     for path in sorted(raw_dir.glob("*.json.gz")):
-        game = orjson.loads(gzip.open(path).read())
+        game = orjson.loads(gzip.decompress(path.read_bytes()))
         n_games += 1
         for row in game.get("ledger", []):
             commands = row.get("commands")

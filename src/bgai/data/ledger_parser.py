@@ -12,9 +12,9 @@ unknowns and fail loudly at corpus level rather than silently skipping.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
-from typing import Callable
 
 
 class Kind(Enum):

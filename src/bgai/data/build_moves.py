@@ -87,7 +87,7 @@ def build(raw_dir: Path, out_dir: Path) -> None:
     paths = sorted(raw_dir.glob("*.json.gz"))
     for i, path in enumerate(paths):
         game_id = path.name.removesuffix(".json.gz")
-        game = orjson.loads(gzip.open(path).read())
+        game = orjson.loads(gzip.decompress(path.read_bytes()))
         moves, deltas, meta = parse_game(game_id, game)
         all_moves.extend(moves)
         all_deltas.extend(deltas)
