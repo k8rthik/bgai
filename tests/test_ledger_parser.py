@@ -106,6 +106,35 @@ def test_real_world_variants() -> None:
     assert cmd("-3CONVERT_W_TO_P").verb == "convert_marker"
 
 
+def test_early_era_variants() -> None:
+    leech = cmd("leech 2")
+    assert (leech.verb, leech.n1, leech.target) == ("leech", 2, None)
+    assert cmd("Decline").verb == "decline"
+    assert cmd("all_income_for_faction").kind == Kind.INCOME
+    assert cmd("Upgrade e7 to Trading Post").building == "TP"
+    assert cmd("Upgrade B3 to Trading post").building == "TP"
+    assert cmd("Upgrade E7 to Sanctuary").building == "SA"
+    assert cmd("Upgrade f4 to Temple").building == "TE"
+    assert cmd("Upgrade G1 to Stronghold").building == "SH"
+    conv = cmd("Convert 1 power to 1c")
+    assert (conv.res1, conv.res2, conv.n2) == ("PW", "C", 1)
+    assert cmd("send priest to earth").cult == "EARTH"
+    assert cmd("Send Priest to Earth for 2").n1 == 2
+    assert cmd("advance ship to 1").n1 == 1
+    assert cmd("Advance dig to 1").reason == "dig"
+    assert cmd("advance dig 1").n1 == 1
+    dig = cmd("DIG 1 I8")
+    assert (dig.n1, dig.loc) == (1, "I8")
+    conn = cmd("connect e4:f2")
+    assert (conn.loc, conn.loc2) == ("E4", "F2")
+    assert cmd("-SPADE").verb == "lose_spade"
+    assert cmd("-2SPADE").n1 == 2
+    assert cmd("-FREE_D").reason == "FREE_D"
+    assert cmd("-BRIDGE").reason == "BRIDGE"
+    lost = cmd("-2c")
+    assert (lost.verb, lost.n1, lost.res1) == ("lose_resource", 2, "C")
+
+
 def test_unknown_command_returns_none() -> None:
     assert parse_command("frobnicate X9") is None
 

@@ -46,6 +46,19 @@ class ParsedCommand:
 
 _CULTS = r"(?:FIRE|WATER|EARTH|AIR)"
 
+_BUILDING_NAMES = {
+    "tp": "TP", "te": "TE", "sh": "SH", "sa": "SA",
+    "trading post": "TP", "temple": "TE", "stronghold": "SH", "sanctuary": "SA",
+}
+
+_RESOURCE_NAMES = {
+    "pw": "PW", "power": "PW", "vp": "VP", "c": "C", "w": "W", "p": "P",
+    "coin": "C", "coins": "C", "worker": "W", "workers": "W",
+    "priest": "P", "priests": "P",
+}
+
+_RES = r"(?:PW|VP|[CWP]|power|coins?|workers?|priests?)"
+
 _Maker = Callable[[re.Match, str], ParsedCommand]
 
 
@@ -59,9 +72,11 @@ _RULES: list[tuple[re.Pattern, _Maker]] = [
         lambda m, raw: ParsedCommand("build", Kind.DECISION, raw, loc=m[1].upper()),
     ),
     _rule(
-        r"^upgrade\s+([a-z]\d+)\s+to\s+(TP|TE|SH|SA)$",
+        r"^upgrade\s+([a-z]\d+)\s+to\s+"
+        r"(TP|TE|SH|SA|trading\s+post|temple|stronghold|sanctuary)$",
         lambda m, raw: ParsedCommand(
-            "upgrade", Kind.DECISION, raw, loc=m[1].upper(), building=m[2].upper()
+            "upgrade", Kind.DECISION, raw, loc=m[1].upper(),
+            building=_BUILDING_NAMES[" ".join(m[2].lower().split())],
         ),
     ),
     _rule(
@@ -75,18 +90,23 @@ _RULES: list[tuple[re.Pattern, _Maker]] = [
         ),
     ),
     _rule(
-        r"^(leech|decline)\s+(\d+)\s+from\s+(\w+)$",
+        # Source faction is optional in early-era logs ("leech 2"); bare
+        # "decline" declines the outstanding offer.
+        r"^(leech|decline)(?:\s+(\d+))?(?:\s+from\s+(\w+))?$",
         lambda m, raw: ParsedCommand(
-            m[1].lower(), Kind.DECISION, raw, n1=int(m[2]), target=m[3].lower()
+            m[1].lower(), Kind.DECISION, raw,
+            n1=int(m[2]) if m[2] else None,
+            target=m[3].lower() if m[3] else None,
         ),
     ),
     _rule(
-        # Amounts default to 1 ("convert pw to c"); VP is a resource for Alchemists.
-        r"^convert\s+(\d+)?\s*(PW|VP|[CWP])\s+to\s+(\d+)?\s*(PW|VP|[CWP])$",
+        # Amounts default to 1 ("convert pw to c"); VP is a resource for
+        # Alchemists; early logs spell resources out ("Convert 1 power to 1c").
+        rf"^convert\s+(\d+)?\s*({_RES})\s+to\s+(\d+)?\s*({_RES})$",
         lambda m, raw: ParsedCommand(
             "convert", Kind.DECISION, raw,
-            n1=int(m[1]) if m[1] else 1, res1=m[2].upper(),
-            n2=int(m[3]) if m[3] else 1, res2=m[4].upper(),
+            n1=int(m[1]) if m[1] else 1, res1=_RESOURCE_NAMES[m[2].lower()],
+            n2=int(m[3]) if m[3] else 1, res2=_RESOURCE_NAMES[m[4].lower()],
         ),
     ),
     _rule(
@@ -94,11 +114,14 @@ _RULES: list[tuple[re.Pattern, _Maker]] = [
         lambda m, raw: ParsedCommand("burn", Kind.DECISION, raw, n1=int(m[1])),
     ),
     _rule(
-        r"^dig\s+(\d+)$",
-        lambda m, raw: ParsedCommand("dig", Kind.DECISION, raw, n1=int(m[1])),
+        r"^dig\s+(\d+)(?:\s+([a-z]\d+))?$",  # rare "DIG 1 I8" carries a location
+        lambda m, raw: ParsedCommand(
+            "dig", Kind.DECISION, raw,
+            n1=int(m[1]), loc=m[2].upper() if m[2] else None,
+        ),
     ),
     _rule(
-        rf"^send\s+p\s+to\s+({_CULTS})(?:\s+for\s+(\d+))?$",
+        rf"^send\s+(?:p|priest)\s+to\s+({_CULTS})(?:\s+for\s+(\d+))?$",
         lambda m, raw: ParsedCommand(
             "send", Kind.DECISION, raw,
             cult=m[1].upper(), n1=int(m[2]) if m[2] else None,
@@ -118,15 +141,21 @@ _RULES: list[tuple[re.Pattern, _Maker]] = [
         ),
     ),
     _rule(
-        r"^advance\s+(ship|shipping|dig|digging)$",
+        # Optional explicit target level in early logs: "advance ship to 1".
+        r"^advance\s+(ship|shipping|dig|digging)(?:\s+(?:to\s+)?(\d+))?$",
         lambda m, raw: ParsedCommand(
             "advance", Kind.DECISION, raw,
             reason={"shipping": "ship", "digging": "dig"}.get(m[1].lower(), m[1].lower()),
+            n1=int(m[2]) if m[2] else None,
         ),
     ),
     _rule(
-        r"^connect\s+([a-z]\d+)$",  # mermaids: place town-connecting river marker
-        lambda m, raw: ParsedCommand("connect", Kind.DECISION, raw, loc=m[1].upper()),
+        # Mermaids town connection: single river hex, or an early-era hex pair.
+        r"^connect\s+([a-z]\d+|r\d+)(?::([a-z]\d+|r\d+))?$",
+        lambda m, raw: ParsedCommand(
+            "connect", Kind.DECISION, raw,
+            loc=m[1].upper(), loc2=m[2].upper() if m[2] else None,
+        ),
     ),
     _rule(
         r"^(wait|done|resign)$",
@@ -172,8 +201,27 @@ _RULES: list[tuple[re.Pattern, _Maker]] = [
         ),
     ),
     _rule(
-        r"^(other_income_for_faction|cult_income_for_faction)$",
+        r"^(other_income_for_faction|cult_income_for_faction|all_income_for_faction)$",
         lambda m, raw: ParsedCommand(m[1].lower(), Kind.INCOME, raw),
+    ),
+    _rule(
+        r"^-(\d+)?spade$",
+        lambda m, raw: ParsedCommand(
+            "lose_spade", Kind.BOOKKEEPING, raw, n1=int(m[1]) if m[1] else 1
+        ),
+    ),
+    _rule(
+        r"^-(FREE_D|FREE_TP|FREE_TF|BRIDGE)$",
+        lambda m, raw: ParsedCommand(
+            "lose_marker", Kind.BOOKKEEPING, raw, reason=m[1].upper()
+        ),
+    ),
+    _rule(
+        rf"^-(\d+)\s*({_RES})$",
+        lambda m, raw: ParsedCommand(
+            "lose_resource", Kind.BOOKKEEPING, raw,
+            n1=int(m[1]), res1=_RESOURCE_NAMES[m[2].lower()],
+        ),
     ),
     _rule(
         r"^score_resources$",

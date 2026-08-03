@@ -33,7 +33,7 @@ def check_coverage(raw_dir: Path) -> Counter:
                 unknown[u] += 1
     print(f"games: {n_games}, command rows: {n_rows}, parsed moves: {n_moves}")
     print(f"unknown commands: {sum(unknown.values())} occurrences, {len(unknown)} distinct")
-    for text, count in unknown.most_common(40):
+    for text, count in unknown.most_common():
         print(f"  {count:6d}  {text!r}")
     return unknown
 
