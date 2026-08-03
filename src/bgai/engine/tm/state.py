@@ -137,6 +137,7 @@ class GameState:
     towns_pool: Mapping[str, int]
     bonus_coins: Mapping[str, int]
     power_actions_taken: frozenset[str]
+    founded_towns: Mapping[str, tuple[frozenset[str], ...]]
 
     @classmethod
     def initial(cls, setup: GameSetup) -> GameState:
@@ -161,6 +162,7 @@ class GameState:
             towns_pool=_initial_towns_pool(setup),
             bonus_coins={bon: 0 for bon in setup.bonus_tiles},
             power_actions_taken=frozenset(),
+            founded_towns={name: () for name in setup.factions},
         )
 
 
