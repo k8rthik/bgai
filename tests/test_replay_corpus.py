@@ -61,6 +61,28 @@ REGRESSION_SET: tuple[str, ...] = (
     "4pLeague_S27_D1L1_G1",
 )
 
+# Task 14 phase 4: games investigated at length (Perl-source citations +
+# raw-ledger evidence trails in that phase's report section) that still
+# replay with a genuine, unresolved delta-oracle mismatch or hard error --
+# not silently skipped, deliberately tracked here so the full-corpus check
+# below can assert *exactly* this set (no more, no fewer) rather than an
+# open-ended "some games still fail."
+KNOWN_ANOMALIES: dict[str, str] = {
+    "4pLeague_S53_D1L1_G3": (
+        "row 429: cultists receive two `score_vp reason=FIRE` ledger rows "
+        "within the same 'Scoring FIRE cult' block (2 VP at row 429, then "
+        "8 VP at row 431) -- scoring.pm's score_type_rankings (traced "
+        "directly) computes its ranking snapshot once per call and should "
+        "only ever emit one row per faction per cult type. No dropped "
+        "faction in this game (verified against the raw game JSON's own "
+        "factions.*.dropped -- all four show `None`), ruling out the "
+        "user's own drop-lens hypothesis for this specific anomaly. "
+        "Task-14 report, Phase 4, USER QUESTIONS Q3 has the full trace, "
+        "including the ruled-out hypotheses, so this is not "
+        "re-investigated identically."
+    ),
+}
+
 # 4 non-overlapping stress outliers from the corpus-prep report's "longest
 # games" (S34_D3L1_G2 545 rows, S40_D1L1_G2 541 rows, S72_D2L2_G4 532
 # rows) and "most leech/decline rows" (S62_D2L1_G4, 111) lists -- picked
@@ -177,3 +199,77 @@ def test_regression_set_final_vp_matches_games_meta(
             if faction in state.setup.dropped_at_row:
                 continue
             assert state.factions[faction].vp == vp, f"{game_id}/{faction}"
+
+
+# --------------------------------------------------------------------------
+# Task 14 phase 4: known anomalies (fast, single-game pins) + full-corpus
+# exclusion assertion (slow, opt-in).
+# --------------------------------------------------------------------------
+
+
+def test_known_anomaly_s53_d1l1_g3_shape_is_unchanged(
+    frames: tuple[pl.DataFrame, pl.DataFrame],
+) -> None:
+    """Pins ``4pLeague_S53_D1L1_G3``'s exact documented anomaly
+    (``KNOWN_ANOMALIES``) so a future engine change that alters this
+    game's failure shape -- fixing it, or breaking it differently -- gets
+    noticed here rather than silently drifting. Fast (a single game, not
+    the full corpus) so it runs in normal CI weight alongside this file's
+    other pins.
+    """
+    moves_df, deltas_df = frames
+    result = replay_game("4pLeague_S53_D1L1_G3", moves_df, deltas_df)
+    assert result.error is not None
+    assert "cultists score_vp for FIRE: engine computed 8, row says 2" in result.error
+    assert "row 429" in result.error
+
+
+@pytest.mark.slow
+def test_full_corpus_has_only_documented_exclusions() -> None:
+    """Every loadable game in the full 3563-game corpus replays clean
+    *except* the 10 known-bad ``nofaction*`` games (``load_setup`` raises
+    ``ValueError`` for them -- a pre-existing, unrelated exclusion, not a
+    replay failure) and ``KNOWN_ANOMALIES`` above. Asserts the corpus
+    count precisely (3553 loadable - len(KNOWN_ANOMALIES) clean) so any
+    *new* failure, anywhere in the corpus, fails this test loudly instead
+    of silently joining an open-ended "still some failures" bucket.
+
+    Slow (~70s, the full corpus, module docstring's own "unlike the full
+    3563-game corpus run" note) -- excluded from normal ``pytest``/
+    ``pytest -q`` runs by ``pyproject.toml``'s default ``-m "not slow"``.
+    Run explicitly: ``uv run pytest tests/test_replay_corpus.py -m slow``.
+    """
+    moves_df = pl.read_parquet("data/datasets/moves.parquet")
+    deltas_df = pl.read_parquet("data/datasets/deltas.parquet")
+    games_meta = pl.read_parquet("data/datasets/games_meta.parquet")
+
+    game_ids = games_meta["game_id"].sort().to_list()
+    unexpected_failures: list[str] = []
+    nofaction_count = 0
+    anomaly_hits: set[str] = set()
+    clean_count = 0
+
+    for game_id in game_ids:
+        result = replay_game(game_id, moves_df, deltas_df)
+        failed = result.error is not None or bool(result.mismatches)
+        if not failed:
+            clean_count += 1
+            continue
+        if result.error is not None and "missing int 'start_order'" in result.error:
+            nofaction_count += 1
+            continue
+        if game_id in KNOWN_ANOMALIES:
+            anomaly_hits.add(game_id)
+            continue
+        unexpected_failures.append(f"{game_id}: error={result.error} mismatches={result.mismatches}")
+
+    assert unexpected_failures == [], (
+        f"{len(unexpected_failures)} undocumented failure(s):\n" + "\n".join(unexpected_failures)
+    )
+    assert anomaly_hits == set(KNOWN_ANOMALIES), (
+        f"KNOWN_ANOMALIES drifted -- expected exactly {set(KNOWN_ANOMALIES)}, "
+        f"got {anomaly_hits} (a game either started passing -- remove it from "
+        f"KNOWN_ANOMALIES -- or a documented anomaly is missing from this run)"
+    )
+    assert nofaction_count == 10
+    assert clean_count == len(game_ids) - nofaction_count - len(KNOWN_ANOMALIES)
