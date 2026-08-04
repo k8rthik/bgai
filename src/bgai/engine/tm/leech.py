@@ -203,27 +203,36 @@ def queue_leech(
 
 def _find_leech_pending(state: GameState, faction: str, cmd: ParsedCommand) -> int:
     """Locate the queued ``leech`` offer a ``leech``/``decline`` row
-    answers. ``cmd.target`` (the ``from X`` clause), when present, fully
-    disambiguates which offer -- ``queue_leech`` never pushes more than
-    one offer per source per faction -- so ``cmd.n1`` is *not* also
-    required to equal the offer's cached ``amount`` in that case: a
-    ``leech N from X`` row's ``N`` is a *request*, capped down by
-    ``handle_leech`` itself (``gainable()``/VP-floor/the offer's own
-    amount, module docstring) if it exceeds what the faction can actually
-    still take -- which is exactly what an offer's ``amount`` (capped at
-    *offer-creation* time) can diverge from by the time it's answered
-    (task-13 report, reference-game row 155: nomads' F3+G2 dwellings
-    together raise 2 raw power against engineers' F4 build, but nomads'
-    ``gainable()`` had already dropped to 1 by offer-creation time, so the
-    queued offer's ``amount`` is 1 while the ledger row still reads
-    ``leech 2 from engineers`` -- the corpus's own "greedy" request
-    number, not a promise). Only a bare ``leech N`` with no ``from``
-    clause (early-era logs) still needs ``amount`` to disambiguate between
-    multiple simultaneous offers.
+    answers. ``cmd.n1`` (the requested amount) is a *request*, not a
+    promise -- ``handle_leech`` itself caps the actual gain down
+    (``gainable()``/VP-floor/the offer's own amount, module docstring) if
+    it exceeds what the faction can actually still take, which is exactly
+    what an offer's ``amount`` (capped at *offer-creation* time) can
+    diverge from by the time it's answered. So ``cmd.n1``/``cmd.target``
+    only need to *disambiguate* which offer a row means, never match it
+    exactly:
+
+    - Exactly one queued offer for ``faction``: that's the answer,
+      regardless of what ``cmd.n1``/``cmd.target`` say (task-13 report,
+      reference-game row 282: nomads' only offer is capped to amount 1,
+      but the bare ``leech 4`` row -- no ``from`` clause at all -- still
+      names 4, the corpus's own "greedy" request number).
+    - Multiple queued offers: ``cmd.target`` (the ``from X`` clause), when
+      present, disambiguates by source alone -- ``queue_leech`` never
+      pushes more than one offer per source per faction (reference-game
+      row 155: nomads' F3+G2 dwellings raise 2 raw power against
+      engineers' build, but nomads' ``gainable()`` had already dropped to
+      1 by offer-creation time, so the offer's cached ``amount`` is 1
+      while the row reads ``leech 2 from engineers``). With no ``target``
+      either (early-era logs), ``cmd.n1`` disambiguates by amount instead.
     """
-    for i, p in enumerate(state.pending):
-        if p.faction != faction or p.kind != "leech":
-            continue
+    matches = [
+        i for i, p in enumerate(state.pending) if p.faction == faction and p.kind == "leech"
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    for i in matches:
+        p = state.pending[i]
         if cmd.target is not None:
             if p.source != cmd.target:
                 continue

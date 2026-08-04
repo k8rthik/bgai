@@ -188,6 +188,19 @@ def test_accept_leech_amount_defaults_to_offer_amount() -> None:
     assert s2.factions["darklings"].vp == 19
 
 
+def test_accept_bare_leech_matches_the_sole_offer_regardless_of_requested_amount() -> None:
+    """Reference-game row 282: nomads' only outstanding offer is capped
+    to amount 1 (module docstring), but the bare ``leech 4`` row (no
+    ``from`` clause at all, early-era style) still names the corpus's own
+    greedy request, 4. With exactly one queued offer for the faction,
+    that's the answer regardless of what ``cmd.n1`` says."""
+    s = _seeded()  # offer amount 2 (opponent TP, power 2)
+    s = queue_leech(s, "engineers", TARGET)
+    s2 = handle_leech(s, "darklings", _cmd("leech", n1=4))
+    assert s2.pending == ()
+    assert s2.factions["darklings"].power.as_str() == "3/9/0"  # capped to the offer's own 2
+
+
 def test_accept_leech_with_target_matches_regardless_of_requested_amount() -> None:
     """Reference-game row 155: nomads' offer amount is capped to 1 at
     offer-creation time (``gainable()`` had already dropped), but the
