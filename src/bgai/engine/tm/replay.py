@@ -407,6 +407,86 @@ def _ensure_actions_phase_started(state: GameState, cmds: tuple[ParsedCommand, .
     return state
 
 
+def _cult_income_pending_later(income_rows: list[tuple[int, str, str]], row: int, faction: str) -> bool:
+    """Scans ``income_rows`` (precomputed once per game: every
+    ``(row, faction, verb)`` for the three income verbs, sorted by row)
+    forward from just past ``row`` for ``faction``'s own
+    ``cult_income_for_faction``/``all_income_for_faction`` entry, stopping
+    at the first *any-faction* ``other_income_for_faction``/
+    ``all_income_for_faction`` row (proof, per ``_ensure_actions_phase_
+    started``'s own reasoning, that the cult-income batch has ended).
+    Returns ``True`` the moment ``faction``'s own entry is found -- a real,
+    just-not-yet-reached row, not a genuinely missing one.
+    """
+    for r, f, verb in income_rows:
+        if r <= row:
+            continue
+        if verb in _CULT_INCOME_VERBS and f == faction:
+            return True
+        if verb in _OTHER_INCOME_VERBS:
+            return False
+    return False
+
+
+def _ensure_cult_income_landed(
+    state: GameState,
+    apply_faction: str,
+    cmds: tuple[ParsedCommand, ...],
+    cult_income_done: set[str],
+    row: int,
+    income_rows: list[tuple[int, str, str]],
+) -> tuple[GameState, set[str]]:
+    """Mirror image of ``_ensure_actions_phase_started``'s INCOME-side
+    check, scoped to a *single* faction rather than the whole-batch
+    ``Phase.CLEANUP`` -> ``Phase.INCOME`` transition: a faction's own
+    genuinely-missing ``cult_income_for_faction`` row (module docstring,
+    ``4pLeague_S11_D3L1_G5``'s darklings precedent) can grant a SPADE that
+    forces an immediate out-of-turn ``transform`` *within the same
+    cult-income batch*, before any other faction's row would prove the
+    whole batch is over -- ``_grant_missing_cult_income`` alone only
+    catches this once ``end_of_round`` fires, too late for a `transform`
+    stranded mid-batch waiting on a spade nothing has granted yet. Corpus
+    ``4pLeague_S7_D3L3_G4`` row 147: darklings never gets a round 2 -> 3
+    ``cult_income_for_faction`` row at all (confirmed absent, not just
+    reordered, by scanning every darklings row between the prior round's
+    income and the next), yet row 147 is darklings' own ``transform H7``
+    forced by exactly that missing grant's SPADE.
+
+    ``_cult_income_pending_later`` (look-ahead, required -- task-14 fix)
+    guards against double-granting: a main-track verb landing on
+    ``apply_faction`` during ``Phase.CLEANUP`` isn't *always* proof this
+    faction's own income is missing -- corpus ``4pLeague_S49_D3L1_G7`` row
+    323, darklings' own ``transform H8`` lands 6 rows *before* their very
+    real row 329 ``cult_income_for_faction`` (some other, unrelated spade
+    source, not investigated further), which an earlier, unguarded
+    revision of this function double-granted by assuming any not-yet-seen
+    faction was missing outright.
+
+    Row order is provably irrelevant to a cult-income amount (module
+    docstring, "Step 1: ... row order is provably irrelevant") -- granting
+    a faction's income a few rows early changes nothing about the amount,
+    since only that faction's own cult-track position (unaffected by any
+    other faction's actions) determines it.
+    """
+    if state.phase != Phase.CLEANUP or apply_faction in cult_income_done:
+        return state, cult_income_done
+    if state.factions[apply_faction].dropped:
+        return state, cult_income_done
+    # This same row's own cult_income_for_faction command (if any) must be
+    # left to apply normally -- proactively granting here too would
+    # double-grant it (real row, not missing; just bundled with the
+    # main-track command it unblocks in the same ledger row).
+    if any(cmd.verb in _CULT_INCOME_VERBS for cmd in cmds):
+        return state, cult_income_done
+    if not any(cmd.verb in _MAIN_TRACK_VERBS for cmd in cmds):
+        return state, cult_income_done
+    if _cult_income_pending_later(income_rows, row, apply_faction):
+        return state, cult_income_done
+    state = grant_missing_cult_income(state, apply_faction)
+    cult_income_done = cult_income_done | {apply_faction}
+    return state, cult_income_done
+
+
 def _grant_missing_cult_income(state: GameState, all_factions: set[str], cult_income_done: set[str]) -> GameState:
     """Retroactively grant ``cult_income_for_faction`` (``round_flow.
     grant_missing_cult_income``) to any *live* faction not yet in
@@ -512,6 +592,12 @@ def replay_game(
 
     game_moves = moves_df.filter(pl.col("game_id") == game_id).sort(["row", "seq"])
     delta_lookup = _delta_lookup(deltas_df, game_id)
+    income_rows: list[tuple[int, str, str]] = [
+        (r["row"], r["faction"], r["verb"])
+        for r in game_moves.filter(
+            pl.col("verb").is_in(_CULT_INCOME_VERBS | _OTHER_INCOME_VERBS)
+        ).iter_rows(named=True)
+    ]
 
     mismatches: list[Mismatch] = []
     rows_checked = 0
@@ -567,6 +653,9 @@ def replay_game(
                 state = _ensure_actions_phase_started(state, cmds)
                 if was_income and state.phase != Phase.INCOME:
                     other_income_done = set()
+                state, cult_income_done = _ensure_cult_income_landed(
+                    state, apply_faction, cmds, cult_income_done, row, income_rows
+                )
                 apply_cmds = _dedupe_income_commands(cmds)
                 state = _apply_row_commands(state, apply_faction, apply_cmds, oracle_cult=oracle_cult)
                 state, other_income_done, cult_income_done = _advance_after_row(
