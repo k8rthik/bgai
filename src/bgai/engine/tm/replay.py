@@ -232,6 +232,18 @@ def _skip_dropped_factions(state: GameState, faction: str) -> GameState:
     queued up back to back. A non-dropped active faction is left alone;
     that mismatch is a real engine bug and should still raise loudly from
     ``apply()``'s own gate.
+
+    Also releases any bonus tile the dropped faction was holding back to
+    the pool (``bonus=None``) -- ``commands.pm``'s own ``drop-faction``
+    handler does this immediately as part of the drop event itself
+    (``find_bonus_to_discard``/``adjust_resource($faction, $discard,
+    -1)``, commands.pm ~1593-1596), which this ledger grammar has no verb
+    for either. Safe to repeat every round this function reactively
+    detects the drop (``passed`` resets every round, so this fires again
+    each time) -- once ``bonus`` is already ``None`` the second and later
+    calls are no-ops. Corpus: ``4pLeague_S12_D2L1_G7`` row 149, witches
+    can't take BON3 because darklings (dropped at row 39's setup pick,
+    never releasing it) still shows as holding it.
     """
     if state.phase != Phase.ACTIONS:
         return state
@@ -243,8 +255,8 @@ def _skip_dropped_factions(state: GameState, faction: str) -> GameState:
         if current == faction or current not in dropped:
             return state
         fs = state.factions[current]
-        if not fs.passed:
-            state = with_faction(state, current, replace(fs, passed=True))
+        if not fs.passed or fs.bonus is not None:
+            state = with_faction(state, current, replace(fs, passed=True, bonus=None))
         state = advance_turn(state)
     return state
 
