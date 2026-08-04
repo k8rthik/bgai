@@ -474,3 +474,29 @@ def test_final_scoring_applies_cult_network_and_resource_vp_and_stays_finished()
     assert result.factions["engineers"].vp == before_engineers_vp + 18
     assert result.factions["engineers"].coins == 2
     assert result.factions["engineers"].workers == 0
+
+
+# --------------------------------------------------------------------------
+# Deferred: full-corpus reference-game reproduction (needs Task 13)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.skip(reason="needs Task 13 replay harness")
+def test_replayed_final_vp_matches_games_meta_final_vp() -> None:
+    """End-to-end cross-check against ``games_meta.parquet``'s
+    ``final_vp`` column: replay a full reference game's ledger
+    (``moves.parquet``) through ``apply()`` start to finish -- including
+    round 6's ``score_vp``/``score_resources`` rows dispatched to
+    ``handle_score_vp``/``handle_score_resources`` above -- and assert
+    each faction's resulting ``FactionState.vp`` equals its
+    ``games_meta.final_vp`` entry for that game. This task's tests
+    validate the scoring *arithmetic* (tie-split rules, network geometry,
+    resource conversion) against corpus row values directly; this
+    specific assertion additionally requires a row-grouping replay
+    harness that sequences every verb through the full setup ->
+    income -> actions -> cleanup -> ... -> final-scoring pipeline
+    (``round_flow.py``'s "Task 12 contract" docstring, step 7's replay
+    mode) -- that harness is Task 13's own deliverable, not this one's.
+    Un-skip once it exists.
+    """
+    raise NotImplementedError("blocked on Task 13's replay harness")

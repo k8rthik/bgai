@@ -240,11 +240,37 @@ Task 12 contract (the replay harness)
    ``Phase.INCOME`` (loop back to step 4) or, after round 6,
    ``Phase.FINISHED`` with ``round`` left at 6.
 7. ``Phase.FINISHED`` is a deliberate hand-off point: no final/area/
-   resource-conversion scoring has been applied yet (Task 12's own job).
-   ``round_flow.py`` guarantees only that every faction's resources,
-   board, and VP total reflect the end of round 6's cleanup -- Task 12
-   reads ``GameState`` at that point and computes final scoring purely as
-   a read (no further ``apply()`` calls expected once ``Phase.FINISHED``).
+   resource-conversion scoring has been applied yet. ``round_flow.py``
+   guarantees only that every faction's resources, board, and VP total
+   reflect the end of round 6's cleanup. What happens next is Task 12's
+   two-mode contract (``scoring.py``'s own module docstring has the full
+   citation trail -- summarized here so this contract doesn't go stale):
+
+   - **Replay** (this harness, reproducing a real ledger): the corpus's
+     final-scoring block is itself made of ordinary ledger rows --
+     ``score_vp`` (cult/network grants) and ``score_resources``
+     (leftover-resource conversion) -- that arrive **after**
+     ``end_of_round`` has already set ``Phase.FINISHED``. Keep applying
+     them via ``apply()`` exactly like every other row (both verbs are
+     gate-exempt in ``apply.py``, so ``active_faction``/``turn_order`` are
+     irrelevant here too, same as income/cleanup); ``apply()`` dispatches
+     them to ``scoring.handle_score_vp``/``scoring.handle_score_resources``,
+     which validate each grant against the engine's own recomputation
+     before applying it. So, contrary to an earlier draft of this
+     contract, ``apply()`` calls are still expected once
+     ``Phase.FINISHED`` -- just no *other* state-machine calls from this
+     module (``advance_turn``/``begin_actions``/``end_of_round``): the
+     round/turn machinery's job is done, only the scoring verbs remain.
+   - **Simulation** (an agent playing out a game with no ledger to
+     replay against): call ``scoring.final_scoring(state)`` once instead
+     -- a pure computation that derives and applies the same cult/network/
+     resource grants in one shot, with no ``apply()``/ledger rows
+     involved at all.
+
+   These two modes are mutually exclusive on a given state (replaying the
+   rows and then also calling ``final_scoring``, or vice versa, would
+   double-apply every VP/resource delta) -- see ``scoring.py``'s module
+   docstring for the full contract and the double-apply hazard.
 """
 
 from __future__ import annotations

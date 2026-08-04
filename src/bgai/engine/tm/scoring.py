@@ -53,10 +53,9 @@ mermaids=2 (engineers omitted -- FIRE=0), confirming the "position 0
 scores nothing" rule and the untied 8/4/2 base case; WATER rows
 nomads=4, darklings=8, mermaids=2 confirm rank is by level, not seat
 order; NETWORK rows nomads=6, darklings=6, engineers=18, mermaids=6 --
-three factions tied at some lower network level splitting the "4/12/6"... 3-way
-tie among the bottom three sharing the "12 + 6 = 18" bucket
-(``18 // 3 == 6``) while engineers alone at the top level keeps the whole
-18.
+engineers alone at the top network level keeps the whole 18, while
+nomads/darklings/mermaids are a 3-way tie at some lower level, splitting
+the "12 + 6 = 18" bucket three ways (``18 // 3 == 6`` each).
 
 --------------------------------------------------------------------------
 Network connectivity for final scoring
