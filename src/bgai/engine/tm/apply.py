@@ -56,7 +56,23 @@ def register_handler(verb: str, handler: Handler) -> None:
 
 
 # Verbs that may be applied even when `faction` is not `active_faction(state)`.
-_ORDER_EXEMPT_VERBS = frozenset({"wait", "annotation"})
+# `setup` (SETUP_DWELLINGS's per-faction acknowledgment rows, seat order,
+# ahead of the snake-order dwelling builds) and the three income-phase
+# verbs (Task 11's `round_flow.py`: each row's own `faction` field is the
+# grantee, independent of turn_order/active_index -- see that module's
+# docstring for the empirical evidence that cleanup's cult-income rows in
+# particular arrive in a different order each round) are bookkeeping
+# anchors, not turns, so they never need the active_faction() gate.
+_ORDER_EXEMPT_VERBS = frozenset(
+    {
+        "wait",
+        "annotation",
+        "setup",
+        "other_income_for_faction",
+        "cult_income_for_faction",
+        "all_income_for_faction",
+    }
+)
 _LEECH_ANSWER_VERBS = frozenset({"leech", "decline"})
 # `+CULT` answering an outstanding `cult_choice` pending (Cultists'
 # leech_effect "taken" cult step, pushed mid-batch by leech.py -- see that
@@ -438,22 +454,26 @@ register_handler("convert_marker", handle_convert_marker)
 # --------------------------------------------------------------------------
 # Side-effect imports: modules that register additional verbs into
 # HANDLERS on import (Task 8's build/upgrade/bridge/favor/town/leech/
-# decline; Task 9's dig/transform/lose_spade; Task 10's action/lose_marker).
+# decline; Task 9's dig/transform/lose_spade; Task 10's action/lose_marker;
+# Task 11's pass/advance/connect and the three income verbs).
 # Placed at the bottom, after every symbol those modules import from here
 # (EngineError, push_pending, pop_pending, register_handler, state helpers)
 # is already defined, so this is not a circular import:
-# `actions_build`/`leech`/`actions_terraform`/`actions_power` import *from*
-# this module at their own top, and by the time Python reaches these lines
-# this module's own top-to-bottom execution has already bound everything
-# they need. `actions_terraform`'s real `lose_spade` handler is registered
-# here too, replacing the placeholder entry this module never installs
-# anymore (see `handle_lose_resource`'s neighbours above -- the no-op stub
-# used to live here, Task 9 owns it). `actions_power`'s real `lose_marker`
-# handler similarly replaces `handle_lose_marker` above (Task 10) -- import
-# order among these four doesn't matter for correctness (only
-# `actions_power` ever registers "lose_marker"; none of the others touch
-# it), so they are kept alphabetical for the import-sorter.
+# `actions_build`/`leech`/`actions_terraform`/`actions_power`/`actions_pass`/
+# `round_flow` import *from* this module at their own top, and by the time
+# Python reaches these lines this module's own top-to-bottom execution has
+# already bound everything they need. `actions_terraform`'s real
+# `lose_spade` handler is registered here too, replacing the placeholder
+# entry this module never installs anymore (see `handle_lose_resource`'s
+# neighbours above -- the no-op stub used to live here, Task 9 owns it).
+# `actions_power`'s real `lose_marker` handler similarly replaces
+# `handle_lose_marker` above (Task 10) -- import order among these six
+# doesn't matter for correctness (only `actions_power` ever registers
+# "lose_marker"; none of the others touch it), so they are kept
+# alphabetical for the import-sorter.
 from bgai.engine.tm import actions_build as _actions_build  # noqa: E402,F401
+from bgai.engine.tm import actions_pass as _actions_pass  # noqa: E402,F401
 from bgai.engine.tm import actions_power as _actions_power  # noqa: E402,F401
 from bgai.engine.tm import actions_terraform as _actions_terraform  # noqa: E402,F401
 from bgai.engine.tm import leech as _leech  # noqa: E402,F401
+from bgai.engine.tm import round_flow as _round_flow  # noqa: E402,F401
