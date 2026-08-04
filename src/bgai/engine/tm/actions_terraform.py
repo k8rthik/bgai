@@ -97,8 +97,8 @@ from dataclasses import replace
 
 from bgai.data.ledger_parser import ParsedCommand
 from bgai.engine.tm.apply import EngineError, pop_pending, register_handler
-from bgai.engine.tm.board import RIVER
-from bgai.engine.tm.connectivity import directly_adjacent, reachable
+from bgai.engine.tm.board import RIVER, base_board
+from bgai.engine.tm.connectivity import reachable
 from bgai.engine.tm.factions.hooks import HOOKS, FactionHooks, hooks_for
 from bgai.engine.tm.factions_data import COLOR_WHEEL, FACTIONS
 from bgai.engine.tm.state import FactionState, GameState, with_faction
@@ -308,22 +308,33 @@ def _find_pending_optional(state: GameState, faction: str, kind: str) -> int | N
 
 def _directly_adjacent_to_own_building(state: GameState, faction: str, hex_key: str) -> bool:
     """``TF_NEED_HEX_ADJACENCY`` (module docstring, ACTN): ``hex_key`` must
-    be directly adjacent (bridges included) to at least one of ``faction``'s
-    own building hexes -- a strictly narrower test than ``reachable()``,
-    which also allows shipping/teleport range.
+    be directly adjacent to at least one of ``faction``'s own building
+    hexes -- **plain board adjacency only, bridges explicitly excluded**
+    (``map.pm`` 641-651: ``for my $from (@{$faction->{locations}}) { next
+    if $map{$where}{bridge}{$from}; if ($map{$where}{adjacent}{$from}) {
+    $ok = 1; last } } die "Direct non-bridge adjacency required for
+    transforming\n" if !$ok`` -- the ``next if ...bridge...`` explicitly
+    *skips* any ``$from`` reached only via a bridge before checking plain
+    ``{adjacent}``). This is why this helper uses ``base_board().adjacent``
+    directly rather than ``connectivity.directly_adjacent`` (which folds
+    bridge endpoints in, per that function's own docstring, and is correct
+    for ``reachable()``/leech but wrong here).
     """
     fs = state.factions[faction]
     own = frozenset().union(*fs.buildings.values()) if fs.buildings else frozenset()
-    return any(hex_key in directly_adjacent(state, b) for b in own)
+    board = base_board()
+    return any(hex_key in board.adjacent.get(b, frozenset()) for b in own)
 
 
 def handle_transform(state: GameState, faction: str, cmd: ParsedCommand) -> GameState:
     """``transform HEX[ to COLOR]``: spend ``spades_available`` to recolor
     an unoccupied, non-river, reachable hex (module docstring). A live
     ``free_tf`` pending (Nomads ACTN, Task 10 -- ``actions_power.py``'s
-    module docstring) instead requires direct hex adjacency to one of
-    ``faction``'s own buildings, forces the target to home color, costs 0
-    spades, and is consumed (popped) rather than ``spades_available``.
+    module docstring) instead requires direct **plain-board, non-bridge**
+    adjacency to one of ``faction``'s own buildings
+    (``_directly_adjacent_to_own_building``), forces the target to home
+    color, costs 0 spades, and is consumed (popped) rather than
+    ``spades_available``.
     """
     assert cmd.loc is not None
     hex_key = cmd.loc

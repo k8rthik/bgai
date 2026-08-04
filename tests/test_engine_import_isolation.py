@@ -12,9 +12,13 @@ initialized, missing ``offers_for_build`` yet) -> ``ImportError``.
 The existing test suite only ever imported ``bgai.engine.tm.apply``
 first (directly or transitively via ``bgai.engine.tm.state``), which
 happens to sidestep the cycle -- masking the bug ("import-order
-accident"). This test imports each of the three modules **first**, in a
-fresh interpreter (subprocess), so no earlier import in the test process
-can hide the failure.
+accident"). This test imports each module below **first**, in a fresh
+interpreter (subprocess), so no earlier import in the test process can
+hide the failure. ``_MODULES`` must be kept in sync with every module
+``apply.py`` bottom-imports for its handler-registration side effects
+(``actions_build``/``actions_terraform``/``leech``/``actions_power`` as
+of Task 10) -- each is a fresh potential cycle root, same as the
+original ``leech``/``actions_build`` pair.
 """
 
 from __future__ import annotations
@@ -27,6 +31,8 @@ import pytest
 _MODULES = [
     "bgai.engine.tm.leech",
     "bgai.engine.tm.actions_build",
+    "bgai.engine.tm.actions_terraform",
+    "bgai.engine.tm.actions_power",
     "bgai.engine.tm.apply",
 ]
 
@@ -44,7 +50,7 @@ def test_module_imports_cleanly_as_the_first_tm_import(module: str) -> None:
     )
 
 
-def test_all_three_verb_families_register_regardless_of_import_order() -> None:
+def test_all_verb_families_register_regardless_of_import_order() -> None:
     result = subprocess.run(
         [
             sys.executable,
@@ -53,7 +59,8 @@ def test_all_three_verb_families_register_regardless_of_import_order() -> None:
                 "import bgai.engine.tm.leech\n"
                 "from bgai.engine.tm.apply import HANDLERS\n"
                 "for verb in ('leech', 'decline', 'build', 'upgrade', 'bridge', "
-                "'gain_favor', 'gain_town'):\n"
+                "'gain_favor', 'gain_town', 'dig', 'transform', 'lose_spade', "
+                "'action', 'lose_marker'):\n"
                 "    assert verb in HANDLERS, verb\n"
             ),
         ],

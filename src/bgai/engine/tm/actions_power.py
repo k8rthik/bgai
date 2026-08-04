@@ -16,16 +16,38 @@ Ported from the reference implementation (jsnell/terra-mystica, MIT):
   ``_pay_simple`` for ACTE's ``{W=>2}`` -- the only nonzero faction-special
   cost); ``gain $faction, $ar->{gain}, $name`` (``_apply_action_gain``);
   blocks the action space (``$map{$action}{blocked} = 1 unless
-  $ar->{dont_block}``) -- for ACT1-6 the map key is the bare action id (line
-  853-855: ``$action .= "/$faction_name"`` only runs when ``$action !~
-  /^ACT/``), i.e. **global** across every faction (``GameState.power_actions_taken``);
-  for every other action id (ACTA/ACTC/ACTG/ACTN/ACTS/ACTW and the
-  non-``ACT``-prefixed BON1/BON2/FAV6) the map key gets the faction name
-  appended, i.e. **per-faction** (``FactionState.actions_used``). ACTE alone
-  sets ``dont_block => 1`` (Constants.pm line 67) so it is **never** blocked
-  by ``actions_used`` -- reusable every turn, gated only by
-  ``BRIDGE_COUNT`` (``handle_bridge`` in ``actions_build.py``) same as any
-  other bridge placement.
+  $ar->{dont_block}``, line 857) keyed by ``$action`` **after** line 853-855's
+  ``$action .= "/$faction_name" if $action !~ /^ACT/``. Read literally,
+  that regex only appends the per-faction suffix to the **non**-``ACT``-
+  prefixed ids -- BON1/BON2/FAV6 -- so those alone get a genuinely
+  per-faction blocking key; every ``ACT``-prefixed id, ACT1-6 *and*
+  ACTA/ACTC/ACTE/ACTG/ACTN/ACTS/ACTW alike, keeps the bare id and so
+  shares Perl's literal blocking *mechanism* with ACT1-6. That said, each
+  faction-special id (ACTA/ACTC/ACTG/ACTN/ACTS/ACTW) is only ever grantable
+  to exactly one faction per game (each base faction's stronghold grants a
+  distinct, unique id -- ``factions_data.py``'s ``FACTIONS`` table has no
+  two factions sharing an SH ``build_gain`` ACT-key), so a bare-id
+  "global" key and a per-faction key are **observably identical** for
+  those six ids: nobody else can ever reach the ``$faction->{$action}``
+  gate to contend for the same key regardless of which scheme is used.
+  This port therefore tracks ACT1-6 on ``GameState.power_actions_taken``
+  (a literal, observable global, since multiple factions genuinely *can*
+  contend for the same ACT1-6 tile) and ACTA/ACTC/ACTG/ACTN/ACTS/ACTW on
+  ``FactionState.actions_used`` (per-faction storage for a fact that
+  happens to be per-faction-exclusive already) -- purely a data-modeling
+  convenience, not a behavioral divergence from Perl. BON1/BON2/FAV6 also
+  use ``actions_used``, this time matching Perl's per-faction key exactly
+  (a bonus/favor tile *can* pass between factions across rounds, or exist
+  as several favor copies held by different factions at once, so
+  per-faction blocking is both correct and load-bearing there). ACTE
+  alone sets ``dont_block => 1`` (Constants.pm line 67) so it is **never**
+  blocked at all -- reusable every turn, gated only by ``BRIDGE_COUNT``
+  (``handle_bridge`` in ``actions_build.py``) same as any other bridge
+  placement. Every ``{blocked}`` flag, global-keyed and per-faction-keyed
+  alike, is reset uniformly at the start of each round by ``commands.pm``
+  ``command_start`` (line 900, ``$map{$_}{blocked} = 0 for keys %map``) --
+  the reset itself is Task 11's, not this task's; this module only sets
+  the flags, never clears them.
 - ``resources.pm`` ``adjust_resource``'s generic branch (lines ~327-331):
   ``if (exists $faction->{"MAX_$type"}) { ... if ($faction->{$type} >
   $max) { $faction->{$type} = $max } }`` -- a gain that would exceed a
@@ -67,11 +89,17 @@ Ported from the reference implementation (jsnell/terra-mystica, MIT):
   consumed by ``actions_terraform.handle_transform`` (see that module's
   updated docstring/diff): forces the target to home color
   (``map.pm`` 511-514, "FREE_TF short-circuits straight to home"), requires
-  direct hex adjacency to one of the faction's own building hexes instead
-  of the usual ``reachable()`` (``map.pm`` 641-650, ``TF_NEED_HEX_ADJACENCY``),
-  and costs 0 spades (``map.pm`` 635-636: ``$cost->{FREE_TF} += 1`` *instead
-  of* ``$cost->{SPADE} += ...``) rather than touching
-  ``spades_available``. Real corpus rows for ACTN show both an explicit
+  direct **plain board** adjacency to one of the faction's own building
+  hexes instead of the usual ``reachable()`` (``map.pm`` 641-651,
+  ``TF_NEED_HEX_ADJACENCY`` -- ``next if $map{$where}{bridge}{$from}``
+  explicitly *excludes* a ``$from`` reached only via a bridge before
+  checking plain ``{adjacent}``, then ``die "Direct non-bridge adjacency
+  required for transforming\n" if !$ok`` -- bridge-only adjacency does
+  **not** satisfy this check, unlike ``reachable()``/leech, which do fold
+  bridges in), and costs 0 spades (``map.pm`` 635-636:
+  ``$cost->{FREE_TF} += 1`` *instead of* ``$cost->{SPADE} += ...``) rather
+  than touching ``spades_available``. Real corpus rows for ACTN show both
+  an explicit
   ``transform X to color`` row before the ``build`` (when the target needs
   recoloring) and a bare ``build X`` with no transform text at all (when X
   already happens to be home-colored, e.g. from an earlier turn's dig) --
@@ -157,10 +185,13 @@ from bgai.engine.tm.tiles import BONUS_TILES, FAVOR_TILES, POWER_ACTIONS
 
 _COST_RES: dict[str, str] = {"W": "workers", "C": "coins", "P": "priests"}
 
-# commands.pm command_action (853-855): only ACT1-6 keep the bare id as the
-# blocking key (global); every other action id -- faction specials and the
-# non-ACT BON1/BON2/FAV6 -- gets the faction name appended (per-faction).
-# ACTE alone opts out of blocking entirely (Constants.pm "dont_block => 1").
+# FactionState.actions_used tracks ACTA/ACTC/ACTG/ACTN/ACTS/ACTW and
+# BON1/BON2/FAV6 per-faction (module docstring: literally correct for the
+# non-ACT BON/FAV ids per commands.pm 853-855's "/$faction_name" suffix;
+# an observably-equivalent modeling choice for the ACT-prefixed faction
+# specials, which Perl's own regex keys the same bare way as ACT1-6 but
+# which are single-faction-exclusive in practice anyway). ACTE alone opts
+# out of blocking entirely (Constants.pm "dont_block => 1", line 67).
 _UNBLOCKED_SPECIAL_ACTIONS = frozenset({"ACTE"})
 
 # Marker gain keys that fold into a one-shot PendingDecision, consumed by a

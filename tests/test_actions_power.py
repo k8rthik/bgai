@@ -14,7 +14,7 @@ from dataclasses import replace
 import pytest
 
 from bgai.data.ledger_parser import Kind, ParsedCommand
-from bgai.engine.tm.actions_build import handle_build, handle_upgrade
+from bgai.engine.tm.actions_build import _bridgable_pairs, handle_build, handle_upgrade
 from bgai.engine.tm.actions_power import handle_action, handle_lose_marker
 from bgai.engine.tm.actions_terraform import handle_transform
 from bgai.engine.tm.apply import EngineError, apply
@@ -391,6 +391,35 @@ def test_actn_transform_rejects_non_adjacent_hex() -> None:
     s = handle_action(s, "nomads", _cmd("action", tile="ACTN"))
     with pytest.raises(EngineError):
         handle_transform(s, "nomads", _cmd("transform", loc=far))
+
+
+def test_actn_transform_rejects_bridge_only_adjacency() -> None:
+    """map.pm 641-651: ``TF_NEED_HEX_ADJACENCY`` explicitly excludes
+    bridge-only adjacency (``next if $map{$where}{bridge}{$from}``) and
+    dies "Direct non-bridge adjacency required for transforming" -- unlike
+    ``reachable()``/leech, which do fold bridges into adjacency.
+    """
+
+    def _clashes_with_sh_stub(pair: frozenset[str]) -> bool:
+        if _SH_STUB_HEX in pair:
+            return True
+        return any(_SH_STUB_HEX in BOARD.adjacent.get(h, frozenset()) for h in pair)
+
+    pair = next(p for p in _bridgable_pairs() if not _clashes_with_sh_stub(p))
+    bridge_anchor, bridge_far = tuple(pair)
+    board_adjacent = bridge_far in BOARD.adjacent.get(bridge_anchor, frozenset())
+    assert not board_adjacent  # sanity: a real bridge span is never plain-adjacent
+
+    s = _with_sh(_state(), "nomads")
+    s = _place(s, "nomads", bridge_anchor, "D")
+    s = replace(s, bridges=s.bridges | {pair})
+    off_color = "red" if FACTIONS["nomads"].color != "red" else "blue"
+    hexes = dict(s.hexes)
+    hexes[bridge_far] = replace(hexes[bridge_far], color=off_color, building=None, owner=None)
+    s = replace(s, hexes=hexes)
+    s = handle_action(s, "nomads", _cmd("action", tile="ACTN"))
+    with pytest.raises(EngineError):
+        handle_transform(s, "nomads", _cmd("transform", loc=bridge_far))
 
 
 # --------------------------------------------------------------------------
