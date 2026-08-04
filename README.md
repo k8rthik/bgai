@@ -53,3 +53,11 @@ corpus have a `nofaction*` placeholder seat (`load_setup` raises `ValueError`
 for them — an expected, documented exclusion, not an engine bug) and are
 skipped automatically (reported with `error` set to the `ValueError` text,
 `rows_checked=0`).
+
+As of task 14 (phase 4), **3549/3553 loadable games** (3563 total minus the
+10 `nofaction*` exclusions above) replay with zero delta-oracle mismatches
+and zero errors. The 4 remaining failures are written up as precise USER
+QUESTIONS in `.superpowers/sdd/2026-08-03-tm-engine-core/task-14-report.md`
+(3 share one already-triaged root cause — a dropped faction's bonus-tile
+coin accrual across an imprecise drop-detection window; 1 is an
+unresolved final-cult-scoring anomaly), not left as unexamined failures.
