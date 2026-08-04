@@ -98,7 +98,7 @@ from dataclasses import replace
 from bgai.data.ledger_parser import ParsedCommand
 from bgai.engine.tm.apply import EngineError, pop_pending, register_handler
 from bgai.engine.tm.board import RIVER, base_board
-from bgai.engine.tm.connectivity import reachable
+from bgai.engine.tm.connectivity import reachable, teleport_crossing
 from bgai.engine.tm.factions.hooks import HOOKS, FactionHooks, hooks_for
 from bgai.engine.tm.factions_data import COLOR_WHEEL, FACTIONS
 from bgai.engine.tm.state import FactionState, GameState, with_faction
@@ -437,6 +437,31 @@ def handle_transform(state: GameState, faction: str, cmd: ParsedCommand) -> Game
                 cmd=cmd,
             )
     fs = replace(fs, spades_available=fs.spades_available - cost)
+
+    if free_tf_index is None and hex_key not in fs.teleported_hexes:
+        # ``map.pm`` ``transform_cost`` folds ``check_reachable``'s
+        # teleport cost/gain directly into the transform's own pay/gain
+        # (588-600/631-632) -- a bare ``transform`` command that can only
+        # reach ``hex_key`` via the faction's TeleportTrack (Dwarves
+        # tunnel / Fakirs carpet) pays that crossing here, *in addition
+        # to* the recolor cost above (``actions_build.py``'s
+        # ``handle_build`` already does the equivalent for its own
+        # implicit-transform and direct-build paths; this was the missing
+        # third call site -- task-14 fix, corpus row 338/344,
+        # ``4pLeague_S10_D3L2_G6``: ``dig 1. transform A10``/``A12`` each
+        # need their own +4 VP / teleport-level W charge that a bare
+        # ``transform`` never paid before). Skipped when a live
+        # ``free_tf`` marker made this transform free already (ACTN
+        # forces direct adjacency, never a tunnel), and when ``hex_key``
+        # is already in ``fs.teleported_hexes`` (``FactionState``
+        # docstring: paid once, free forever after).
+        teleport_cost, teleport_vp = teleport_crossing(state, faction, hex_key)
+        if teleport_cost:
+            fs = _pay_resources(state, faction, fs, teleport_cost, cmd)
+        if teleport_vp:
+            fs = replace(fs, vp=fs.vp + teleport_vp)
+        if teleport_cost or teleport_vp:
+            fs = replace(fs, teleported_hexes=fs.teleported_hexes | {hex_key})
 
     new_hexes = dict(state.hexes)
     new_hexes[hex_key] = replace(hex_state, color=effective_color)

@@ -222,6 +222,27 @@ def test_build_across_tunnel_pays_teleport_cost_and_gains_vp() -> None:
     assert s2.hexes[b].owner == "dwarves"
 
 
+def test_build_skips_teleport_fee_for_a_hex_already_teleported_to() -> None:
+    """Task-14 fix, corpus ``4pLeague_S10_D3L2_G6`` row 350: dwarves
+    ``dig 1. transform A12`` at row 344 already pays the tunnel fee for
+    A12 (``FactionState.teleported_hexes`` docstring); building on that
+    same, by-then-already-recolored hex several turns later (darklings/
+    cultists/chaosmagicians all acted in between) must not pay the tunnel
+    fee a second time -- only the D building's own ordinary cost."""
+    a, b = _skip_chain()
+    s = _with_dwarves(_state())
+    s = _place(s, "dwarves", a, "D")
+    s = _clear(s, "dwarves", b)  # already dwarves' color -- tf_needed=False
+    s = replace(s, factions={**s.factions, "dwarves": replace(s.factions["dwarves"], teleported_hexes=frozenset({b}))})
+    before = s.factions["dwarves"]
+    s2 = handle_build(s, "dwarves", _cmd("build", loc=b))
+    after = s2.factions["dwarves"]
+    d_cost = FACTIONS["dwarves"].buildings["D"].cost
+    assert after.workers == before.workers - d_cost["W"]  # no extra tunnel W charge
+    assert after.vp == before.vp  # no tunnel VP gain, already paid
+    assert s2.hexes[b].building == "D"
+
+
 def test_build_occupied_hex_rejected() -> None:
     s = _state()
     s = _place(s, "engineers", ANCHOR, "D")

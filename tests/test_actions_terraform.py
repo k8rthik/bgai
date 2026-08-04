@@ -63,6 +63,28 @@ def _triangle() -> tuple[str, str]:
 ANCHOR, TARGET = _triangle()
 
 
+def _skip_chain() -> tuple[str, str]:
+    """(a, b): two land hexes at ``hex_distance`` 2 via some middle hex, not
+    directly adjacent -- Dwarves' tunnel range (``test_actions_build.py``'s
+    identically-shaped helper, duplicated here for the same no-cross-test-
+    coupling reason this module's sibling test files already document)."""
+    land = set(BOARD.land_hexes())
+    for mid in land:
+        neighbors = [n for n in BOARD.adjacent[mid] if n in land]
+        pair = next(
+            (
+                (a, b)
+                for a in neighbors
+                for b in neighbors
+                if a != b and b not in BOARD.adjacent[a]
+            ),
+            None,
+        )
+        if pair:
+            return pair
+    raise AssertionError("no skip-chain found")
+
+
 def _place(state: GameState, faction: str, hex_key: str, building: str = "D") -> GameState:
     hexes = dict(state.hexes)
     hexes[hex_key] = replace(
@@ -398,6 +420,52 @@ def test_lose_spade_insufficient_balance_rejected() -> None:
     s = _rich(s, "engineers", spades_available=1)
     with pytest.raises(EngineError):
         handle_lose_spade(s, "engineers", _cmd("lose_spade", n1=2))
+
+
+def test_transform_across_tunnel_pays_teleport_cost_and_gains_vp() -> None:
+    """Task-14 fix, corpus ``4pLeague_S10_D3L2_G6`` rows 338/344: a bare
+    ``dig 1. transform A10/A12`` (no ``build`` in the same row) on a hex
+    reachable only via Dwarves' tunnel never paid the tunnel's own W cost
+    or VP gain -- ``handle_build`` already had this wired (task-13 fix),
+    but ``map.pm``'s ``transform_cost``/``check_reachable`` (588-600/
+    631-632) folds the *same* teleport cost/gain into a bare
+    ``command_transform`` too, and this was the missing call site. Each
+    reference row was 4 VP low and short the teleport level's own W cost
+    on top of the recolor's own spade cost.
+    """
+    a, b = _skip_chain()
+    s = with_faction(_state(), "dwarves", FactionState.initial(FACTIONS["dwarves"]))
+    s = _place(s, "dwarves", a)
+    home = FACTIONS["dwarves"].color
+    s = _set_color(s, b, _one_step_neighbor(home))
+    s = _rich(s, "dwarves", spades_available=1)
+    before = s.factions["dwarves"]
+    s2 = handle_transform(s, "dwarves", _cmd("transform", loc=b, color=home))
+    after = s2.factions["dwarves"]
+    assert s2.hexes[b].color == home
+    assert after.spades_available == before.spades_available - 1  # recolor's own spade cost
+    assert after.workers == before.workers - 2  # tunnel cost at teleport_level 0
+    assert after.vp == before.vp + 4  # tunnel's flat VP gain
+    assert b in after.teleported_hexes
+
+
+def test_transform_across_tunnel_is_free_for_a_hex_already_teleported_to() -> None:
+    """``FactionState.teleported_hexes`` docstring: once paid, a hex is
+    free forever after -- guards against double-charging if a later
+    command (a second bare ``transform``, or ``handle_build``'s own
+    teleport-crossing call) revisits the same hex."""
+    a, b = _skip_chain()
+    s = with_faction(_state(), "dwarves", FactionState.initial(FACTIONS["dwarves"]))
+    s = _place(s, "dwarves", a)
+    home = FACTIONS["dwarves"].color
+    s = _set_color(s, b, _one_step_neighbor(home))
+    s = _rich(s, "dwarves", spades_available=2, teleported_hexes=frozenset({b}))
+    before = s.factions["dwarves"]
+    s2 = handle_transform(s, "dwarves", _cmd("transform", loc=b, color=home))
+    after = s2.factions["dwarves"]
+    assert after.workers == before.workers  # no tunnel W charge, already paid
+    assert after.vp == before.vp  # no tunnel VP gain, already paid
+    assert after.spades_available == before.spades_available - 1  # recolor's own spade cost still applies
 
 
 def test_giants_corpus_transforms_never_target_non_home_color() -> None:
