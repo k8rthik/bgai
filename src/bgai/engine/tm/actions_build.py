@@ -739,7 +739,24 @@ def handle_gain_favor(state: GameState, faction: str, cmd: ParsedCommand) -> Gam
 
     new_state = replace(state, cults=new_cults, cult_10=new_cult_10, favors_pool=new_pool)
     new_state = with_faction(new_state, faction, fs)
-    return replace(new_state, pending=_consume_amount(new_state.pending, idx, 1))
+    new_state = replace(new_state, pending=_consume_amount(new_state.pending, idx, 1))
+
+    if tile == "FAV5":
+        # resources.pm's adjust_resource FAV branch, the "Hack" comment
+        # (250-395 area): taking FAV5 immediately re-scans every building
+        # hex the faction owns for a town that *now* qualifies under the
+        # lowered TOWN_SIZE threshold (FAV5's own passive, already read by
+        # towns.py's new_towns/_town_threshold once fs.favors includes
+        # it) -- not deferred to that hex's next build/upgrade. Reusing
+        # _maybe_queue_town (the same detection this module already runs
+        # after build/upgrade/bridge) rather than re-deriving the scan
+        # (task-13 report, corpus game 4pLeague_S10_D1L1_G3 row 321:
+        # swarmlings' "upgrade H2 to TE. gain_favor FAV5. gain_town TW8"
+        # -- the TE upgrade alone doesn't reach TOWN_SIZE=7, but FAV5's
+        # TOWN_SIZE=6 threshold, applied within the same row, does).
+        new_state = _maybe_queue_town(new_state, faction)
+
+    return new_state
 
 
 def _apply_town_cult_gains(state: GameState, faction: str, tile: str) -> GameState:

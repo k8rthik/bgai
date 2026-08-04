@@ -631,6 +631,43 @@ def test_upgrade_scores_held_fav10_vp_passively_alongside_score_tile() -> None:
     assert s2.factions["engineers"].vp == before_vp + 3 + 3  # FAV10 + score tile
 
 
+def test_gain_favor_fav5_immediately_rescans_for_a_newly_qualifying_town() -> None:
+    """Corpus game ``4pLeague_S10_D1L1_G3`` row 321: swarmlings'
+    "upgrade H2 to TE. gain_favor FAV5. gain_town TW8" -- the TE upgrade
+    alone leaves a 4-hex cluster at power 6, short of the default
+    ``TOWN_SIZE`` (7), but FAV5's ``TOWN_SIZE => -1`` passive (applied
+    the instant it's taken, ``resources.pm``'s ``adjust_resource`` FAV
+    branch -- ``handle_gain_favor``'s own docstring) drops the threshold
+    to 6, so the *same row*'s ``gain_town TW8`` answer needs a pending
+    that only exists because granting FAV5 re-scanned for it -- not
+    deferred to this cluster's next build/upgrade."""
+    s = _state()
+    land = set(BOARD.land_hexes())
+    chain = [ANCHOR]
+    seen = {ANCHOR}
+    stack = [ANCHOR]
+    while stack and len(chain) < 4:
+        node = stack.pop()
+        for n in sorted(BOARD.adjacent[node]):
+            if n in land and n not in seen:
+                seen.add(n)
+                chain.append(n)
+                stack.append(n)
+                if len(chain) >= 4:
+                    break
+    assert len(chain) == 4
+    for h in chain[:2]:
+        s = _place(s, "engineers", h, "TP")  # power 2 each
+    for h in chain[2:]:
+        s = _place(s, "engineers", h, "D")  # power 1 each -- total 6, below TOWN_SIZE(7)
+    assert _maybe_queue_town(s, "engineers").pending == ()  # doesn't qualify yet
+
+    s = replace(s, pending=(PendingDecision(faction="engineers", kind="gain_favor", amount=1),))
+    s2 = handle_gain_favor(s, "engineers", _cmd("gain_favor", tile="FAV5"))
+    assert [p.kind for p in s2.pending] == ["gain_town"]
+    assert s2.founded_towns["engineers"] == (frozenset(chain),)
+
+
 # --------------------------------------------------------------------------
 # gain_town
 # --------------------------------------------------------------------------
