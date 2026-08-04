@@ -418,30 +418,65 @@ def test_legal_moves_contains_every_decision_across_five_replayed_games(
     )
 
 
+_SMOKE_STATES_PER_GAME = 44  # 5 games * 44 = 220 >= 200 (task brief floor)
+
+
+def _evenly_spaced_indices(n: int, k: int) -> list[int]:
+    """``k`` deterministic, evenly-spaced indices into ``range(n)`` (every
+    index if ``k >= n``) -- used to pick a representative slice of one
+    game's own decision timeline rather than favoring whichever end of it
+    a naive prefix/suffix slice would land on.
+    """
+    if k >= n:
+        return list(range(n))
+    return [i * n // k for i in range(k)]
+
+
 def test_legal_moves_apply_cleanly_with_no_negative_resources(
     frames: tuple[pl.DataFrame, pl.DataFrame],
 ) -> None:
     """Generative smoke test (task brief, Step 2): every command
     ``legal_moves_for`` produces for a sampled pre-state must ``apply()``
     without raising, and must never leave a resource negative.
+
+    Sampled with a **per-game quota** (:data:`_SMOKE_STATES_PER_GAME`),
+    not a single running counter capped by a global slice -- code review
+    caught that an earlier revision's ``counter % 3 == 0`` running tally,
+    truncated to the first 220 entries *after* accumulating across all 5
+    games in game order, silently confined every sampled state to the
+    first 1-2 games (each game has hundreds of decisions, so the 220-item
+    cap was exhausted before games 3-5 ever contributed any). Evenly
+    spacing a fixed quota across *each* game's own timeline guarantees
+    every game contributes, deterministically.
     """
     moves_df, deltas_df = frames
-    sampled: list[tuple[str, GameState]] = []
-    counter = 0
-
-    def on_decision(pre: GameState, faction: str, cmd: ParsedCommand, post: GameState) -> None:
-        nonlocal counter
-        counter += 1
-        if counter % 3 == 0:
-            sampled.append((faction, pre))
+    sampled: list[tuple[str, str, GameState]] = []  # (game_id, faction, pre_state)
 
     for game_id in _CONTAINMENT_GAMES:
+        game_states: list[tuple[str, GameState]] = []
+
+        def on_decision(
+            pre: GameState,
+            faction: str,
+            cmd: ParsedCommand,
+            post: GameState,
+            _states: list[tuple[str, GameState]] = game_states,
+        ) -> None:
+            _states.append((faction, pre))
+
         _walk_decisions(game_id, moves_df, deltas_df, on_decision)
-    sampled = sampled[:220]
+        indices = _evenly_spaced_indices(len(game_states), _SMOKE_STATES_PER_GAME)
+        sampled.extend((game_id, *game_states[i]) for i in indices)
+
+    contributing_games = {game_id for game_id, _, _ in sampled}
+    assert contributing_games == set(_CONTAINMENT_GAMES), (
+        f"expected all {len(_CONTAINMENT_GAMES)} games to contribute smoke states, "
+        f"got only {sorted(contributing_games)}"
+    )
     assert len(sampled) >= 200, f"sanity: expected >=200 sampled states, got {len(sampled)}"
 
     total_moves = 0
-    for faction, state in sampled:
+    for _game_id, faction, state in sampled:
         for move in legal_moves_for(state, faction):
             total_moves += 1
             try:
@@ -451,6 +486,87 @@ def test_legal_moves_apply_cleanly_with_no_negative_resources(
             _assert_no_negative_resources(post.factions[faction])
 
     assert total_moves > 1000, f"sanity: expected a substantial move sample, got {total_moves}"
+
+
+# --------------------------------------------------------------------------
+# Slow: the broader 29-game containment sweep from task-15 development
+# (task-15-report.md's table), pinned as a real test rather than left as a
+# dev-time-only script -- mirrors test_replay_corpus.py's own
+# REGRESSION_SET/STRESS_OUTLIERS split and its `pytest.mark.slow` pattern,
+# so a future legal.py change that regresses the broader 100% containment
+# claim fails loudly instead of silently drifting. Not run by default
+# (pyproject.toml's `addopts = "-m 'not slow'"`); run explicitly with
+# `pytest tests/test_legal.py -m slow`. Duplicated locally rather than
+# imported from test_replay_corpus.py -- no test file in this suite
+# imports from another (each pins its own game-id tuples independently).
+# --------------------------------------------------------------------------
+
+_REGRESSION_SET: tuple[str, ...] = (
+    "4pLeague_S5_D3L2_G3",
+    "4pLeague_S8_D3L3_G2",
+    "4pLeague_S3_D3L3_G2",
+    "4pLeague_S1_D3L4_G1",
+    "4pLeague_S10_D3L3_G5",
+    "4pLeague_S24_D2L1_G3",
+    "4pLeague_S29_D3L1_G4",
+    "4pLeague_S36_D3L2_G2",
+    "4pLeague_S17_D3L3_G3",
+    "4pLeague_S11_D3L1_G6",
+    "4pLeague_S40_D3L1_G6",
+    "4pLeague_S12_D3L3_G4",
+    "4pLeague_S13_D1L1_G1",
+    "4pLeague_S14_D1L1_G1",
+    "4pLeague_S15_D1L1_G1",
+    "4pLeague_S16_D1L1_G1",
+    "4pLeague_S18_D1L1_G1",
+    "4pLeague_S19_D1L1_G1",
+    "4pLeague_S20_D1L1_G1",
+    "4pLeague_S21_D1L1_G1",
+    "4pLeague_S22_D1L1_G1",
+    "4pLeague_S23_D1L1_G1",
+    "4pLeague_S25_D1L1_G1",
+    "4pLeague_S26_D1L1_G1",
+    "4pLeague_S27_D1L1_G1",
+)
+_STRESS_OUTLIERS: tuple[str, ...] = (
+    "4pLeague_S34_D3L1_G2",
+    "4pLeague_S40_D1L1_G2",
+    "4pLeague_S72_D2L2_G4",
+    "4pLeague_S62_D2L1_G4",
+)
+
+
+@pytest.mark.slow
+def test_legal_moves_containment_holds_across_the_full_regression_sweep(
+    frames: tuple[pl.DataFrame, pl.DataFrame],
+) -> None:
+    """The 29-game sweep (task-14's 25-game regression set + 4 stress
+    outliers) verified 100% (10598/10598) clean during task-15
+    development (task-15-report.md) -- pinned here so it stays true.
+    Slow (~29 games' worth of replay + per-decision enumeration); excluded
+    from normal ``pytest``/``pytest -q`` runs by ``pyproject.toml``'s
+    default ``-m "not slow"``.
+    """
+    moves_df, deltas_df = frames
+    total = 0
+    misses: list[str] = []
+
+    def on_decision(pre: GameState, faction: str, cmd: ParsedCommand, post: GameState) -> None:
+        nonlocal total
+        if cmd.kind != Kind.DECISION:
+            return
+        total += 1
+        legal = legal_moves_for(pre, faction)
+        if not _is_contained(legal, cmd):
+            misses.append(f"{faction} {cmd.raw!r} (round={pre.round} phase={pre.phase.name})")
+
+    for game_id in _REGRESSION_SET + _STRESS_OUTLIERS:
+        _walk_decisions(game_id, moves_df, deltas_df, on_decision)
+
+    assert total > 9000, f"sanity: expected a substantial decision sample, got {total}"
+    assert misses == [], (
+        f"{len(misses)}/{total} DECISION rows not in legal_moves_for: {misses[:20]}"
+    )
 
 
 # --------------------------------------------------------------------------
