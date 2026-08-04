@@ -203,9 +203,34 @@ class GameState:
 
 
 def active_faction(state: GameState) -> str:
-    """Head of `pending` if any, else the turn-order successor."""
-    if state.pending:
-        return state.pending[0].faction
+    """The faction taking the current full turn: ``turn_order[active_index]``.
+
+    Ported from ``acting.pm``'s ``active_faction`` attribute (module
+    docstring there: "Which faction is currently acting (a full action,
+    not just an async decision on resources)") -- a plain slot updated
+    only by explicit turn-advancement, deliberately independent of
+    ``action_required`` (this engine's ``state.pending``). An earlier
+    revision of this function returned ``pending[0].faction`` whenever
+    ``pending`` was non-empty, on the theory that an outstanding decision
+    (chiefly a leech offer) should gate every other faction's turn until
+    answered. Replaying the reference game disproved that (task-13
+    report, row 59): nomads' row-58 build queues leech offers for
+    engineers and darklings, yet row 59 is mermaids taking an entirely
+    ordinary ``upgrade`` turn with both offers still outstanding, and
+    engineers doesn't answer its offer until row 60 -- *after* mermaids'
+    turn. Perl's own dispatcher (``commands.pm`` ``command``,
+    ``$assert_active_faction``) confirms this structurally: ``leech``/
+    ``decline``/``+CULT`` route through the faction-only ``$assert_faction``
+    check, never ``$assert_active_faction`` -- only genuine main-track
+    verbs (build/upgrade/send/convert/burn/dig/bridge/connect/pass/action)
+    are gated against ``active_faction`` at all, so a pending leech/
+    cult-choice decision was never meant to block anyone's main-track
+    turn, this faction's own included. ``apply.py``'s leech/decline/
+    gain_cult exemptions already have their own independent
+    ``state.pending``-membership checks (``_has_queued_pending_of_kind``)
+    for exactly this reason -- they never depended on this function's
+    former pending-preference behavior.
+    """
     return state.turn_order[state.active_index]
 
 

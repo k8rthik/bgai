@@ -80,11 +80,18 @@ def test_bonus_coins_initialized_zero_for_pool() -> None:
     assert all(v == 0 for v in s.bonus_coins.values())
 
 
-def test_active_faction_prefers_pending_head() -> None:
+def test_active_faction_ignores_pending_regardless_of_kind() -> None:
+    """``active_faction`` tracks ``turn_order[active_index]`` only -- a
+    queued decision for a *different* faction (here, an outstanding
+    leech offer for darklings while engineers is still turn_order's
+    active seat) must not override it (module docstring, task-13 fix:
+    reference-game row 59 replays with exactly this shape -- mermaids
+    takes an ordinary turn while engineers/darklings each still have an
+    unanswered leech offer queued)."""
     s = GameState.initial(load_setup("4pLeague_S10_D1L1_G1"))
     pending = (PendingDecision(faction="darklings", kind="leech"),)
     s2 = replace(s, pending=pending)
-    assert active_faction(s2) == "darklings"
+    assert active_faction(s2) == "engineers"
 
 
 def test_with_faction_returns_new_state_without_mutating_original() -> None:

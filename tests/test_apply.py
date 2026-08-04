@@ -446,7 +446,10 @@ def test_apply_allows_leech_answer_out_of_turn_when_queued_for_that_faction() ->
         PendingDecision(faction="nomads", kind="gain_favor"),
         PendingDecision(faction="darklings", kind="leech"),
     )
-    assert active_faction(s) == "nomads"
+    # active_faction is turn_order[active_index] regardless of pending
+    # (state.py's own docstring, task-13 fix) -- darklings' leech answer
+    # below is exempt via its own queued-leech check, not via active_faction.
+    assert active_faction(s) == "engineers"
 
     # Save/restore rather than `del`: Task 8 (leech.py) registers real
     # "leech"/"decline" handlers at import time, so HANDLERS is no longer

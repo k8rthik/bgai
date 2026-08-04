@@ -293,15 +293,18 @@ def test_cultists_first_accept_fires_cult_choice_immediately_mid_batch() -> None
 
 
 def test_apply_lets_cultists_answer_cult_choice_mid_batch_through_the_gate() -> None:
-    """Regression test (code review round 2, apply()-level): with two
-    opponents adjacent to a Cultists build, after the first accept the
-    pending queue is [leech(nomads), cultist_leech_watch, cult_choice] --
-    `nomads`, not `cultists`, is `active_faction`. Cultists must still be
-    able to submit their `+CULT` answer *through `apply()`* (not just by
-    calling the handler directly), and doing so must consume exactly
-    their `cult_choice` pending (not the head-of-queue entry), leaving
-    the still-outstanding `nomads` leech offer and `active_faction`
-    untouched.
+    """Regression test (code review round 2, apply()-level; updated
+    task-13: ``active_faction`` no longer prefers ``pending``'s head --
+    see ``state.py``'s docstring for why). With two opponents adjacent to
+    a Cultists build, after the first accept the pending queue is
+    [leech(nomads), cultist_leech_watch, cult_choice] -- ``active_faction``
+    stays ``cultists`` (``turn_order[active_index]``, untouched by no
+    ``advance_turn`` call happening in this handler-level test) throughout.
+    Cultists must still be able to submit their ``+CULT`` answer *through
+    `apply()`* (not just by calling the handler directly), and doing so
+    must consume exactly their ``cult_choice`` pending (not the
+    head-of-queue entry), leaving the still-outstanding ``nomads`` leech
+    offer untouched.
     """
     s = _state()
     factions = dict(s.factions)
@@ -320,22 +323,27 @@ def test_apply_lets_cultists_answer_cult_choice_mid_batch_through_the_gate() -> 
     # darklings accepts through apply() -- exempt via the queued-leech rule.
     s = apply(s, "darklings", _cmd("leech", n1=2, target="cultists"))
     assert [p.kind for p in s.pending] == ["leech", "cultist_leech_watch", "cult_choice"]
-    assert active_faction(s) == "nomads"  # NOT cultists -- the crux of the repro
+    assert active_faction(s) == "cultists"  # turn_order[active_index], unmoved
 
-    # Before the fix this raised EngineError("faction acted out of turn").
+    # Before the original fix this raised EngineError("faction acted out of turn").
     s2 = apply(s, "cultists", _cmd("gain_cult", cult="FIRE", n1=1))
 
     assert s2.cults["cultists"]["FIRE"] == 2  # cultists start FIRE=1
     assert not any(p.kind == "cult_choice" for p in s2.pending)
-    # The sibling nomads offer (and the game's real active_faction) is
-    # untouched by cultists jumping the queue to answer their own choice.
+    # The sibling nomads offer is untouched by cultists jumping the queue
+    # to answer their own choice.
     remaining_leech = [p for p in s2.pending if p.kind == "leech"]
     assert [p.faction for p in remaining_leech] == ["nomads"]
-    assert active_faction(s2) == "nomads"
+    assert active_faction(s2) == "cultists"
 
-    # And the normal out-of-turn rejection still applies to everything else.
-    with pytest.raises(EngineError):
-        apply(s2, "cultists", _cmd("burn", n1=1))
+    # It is still legitimately cultists' turn (no advance_turn has run) --
+    # an ordinary main-track verb from them succeeds, same as real Perl's
+    # `$assert_active_faction` (only checks `is_active`, never consults
+    # `action_required`/pending -- state.py's docstring). A genuinely
+    # out-of-turn faction is still rejected (test_apply.py's
+    # test_apply_rejects_out_of_turn_non_exempt_move covers that).
+    s3 = apply(s2, "cultists", _cmd("burn", n1=1))
+    assert s3.factions["cultists"].power.bowl3 == s2.factions["cultists"].power.bowl3 + 1
 
 
 def test_cultists_all_decline_grants_power_under_errata_option() -> None:
