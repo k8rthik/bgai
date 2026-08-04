@@ -140,13 +140,51 @@ def _consume_amount(
     return pending[:index] + pending[index + 1 :]
 
 
+def _apply_spade_gain_bonus(
+    state: GameState, faction: str, fs: FactionState, spades: int
+) -> FactionState:
+    """Fold ``hooks_for(faction).extra_dig_gain`` into ``fs``, scaled by
+    ``spades`` just gained. A near-duplicate of ``actions_terraform.py``'s
+    identically-named-in-spirit helper (``_apply_extra_dig_gain``) -- kept
+    as its own small copy here rather than an import, to avoid a
+    build<->terraform module coupling neither otherwise needs (see that
+    module's docstring: Perl's ``adjust_resource`` gain-mode loop,
+    resources.pm 313-392, fires this for *any* positive ``SPADE`` delta,
+    not just ``dig``'s -- a Halflings SH's 3-spade ``build_gain`` grant
+    goes through the exact same mechanism in real Perl).
+    """
+    if spades <= 0:
+        return fs
+    extra = hooks_for(faction).extra_dig_gain(state, faction)
+    for res, per_unit in extra.items():
+        total = per_unit * spades
+        if not total:
+            continue
+        if res == "VP":
+            fs = replace(fs, vp=fs.vp + total)
+        elif res == "PW":
+            fs = replace(fs, power=fs.power.gain(total))
+        else:
+            raise ValueError(f"unhandled extra_dig_gain key {res!r} for {faction}")
+    return fs
+
+
 def _apply_build_gain(state: GameState, faction: str, gain: dict[str, int]) -> GameState:
     """Fold one ``BuildingTrack.build_gain[level]`` dict into state: PW/VP
-    apply immediately; GAIN_FAVOR/SPADE(Halflings)/CONVERT_W_TO_P
-    (Darklings) become metered pendings; GAIN_SHIP/GAIN_TELEPORT bump the
-    track directly (no companion ledger row observed in the corpus for
-    either -- see task-8 report); ACTx is a documented no-op (Task 10
-    derives special-action availability from ``fs.buildings["SH"]``).
+    apply immediately; SPADE (Halflings' SH) is *also* immediate -- straight
+    onto ``fs.spades_available``, plus whatever
+    ``hooks_for(faction).extra_dig_gain`` fires for that many spades (the
+    same "gain the instant it's granted" timing ``resources.pm``'s
+    ``adjust_resource`` uses for every positive ``SPADE`` delta, dig or
+    build-gain alike -- see ``actions_terraform.py``'s module docstring
+    and this fix's report for why an earlier revision's
+    ``halflings_spades``-pending design could silently drop the grant when
+    no ``transform``/``lose_spade`` ever followed the SH build).
+    GAIN_FAVOR/CONVERT_W_TO_P (Darklings) become metered pendings;
+    GAIN_SHIP/GAIN_TELEPORT bump the track directly (no companion ledger
+    row observed in the corpus for either -- see task-8 report); ACTx is a
+    documented no-op (Task 10 derives special-action availability from
+    ``fs.buildings["SH"]``).
     """
     fs = state.factions[faction]
     pendings: list[PendingDecision] = []
@@ -160,9 +198,8 @@ def _apply_build_gain(state: GameState, faction: str, gain: dict[str, int]) -> G
         elif key == "GAIN_FAVOR":
             pendings.append(PendingDecision(faction=faction, kind="gain_favor", amount=amount))
         elif key == "SPADE":
-            pendings.append(
-                PendingDecision(faction=faction, kind="halflings_spades", amount=amount)
-            )
+            fs = replace(fs, spades_available=fs.spades_available + amount)
+            fs = _apply_spade_gain_bonus(state, faction, fs, amount)
         elif key == "CONVERT_W_TO_P":
             pendings.append(PendingDecision(faction=faction, kind="convert_w_to_p", amount=amount))
         elif key == "GAIN_SHIP":

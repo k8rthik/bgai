@@ -46,8 +46,10 @@ class PendingDecision:
     """A forced sub-decision queued ahead of the turn-order successor.
 
     ``kind`` values used by later tasks: "leech", "gain_favor", "gain_town",
-    "cult_choice", "convert_w_to_p", "halflings_spades", "bonus_choice",
-    "spade_use".
+    "cult_choice", "convert_w_to_p", "bonus_choice", "spade_use". (Task 9's
+    initial "halflings_spades" kind was retired -- a Halflings SH's spade
+    grant is applied immediately by ``actions_build.py`` instead, see that
+    module's docstring; kept out of this list so it doesn't get reused.)
     """
 
     faction: str
@@ -87,8 +89,8 @@ class FactionState:
     """
     spades_available: int = 0
     """Transient spade balance (``$faction->{SPADE}`` in ``resources.pm``):
-    incremented by ``dig N`` (and by absorbing a still-pending
-    ``halflings_spades`` grant), decremented by ``transform`` and by
+    incremented by ``dig N`` and by a Halflings SH's immediate 3-spade
+    grant (``actions_build.py``), decremented by ``transform`` and by
     ``lose_spade``; added by Task 9 -- another migration on top of the
     task-3 frozen shape, per this module's docstring. ACT5/ACT6/BON1 spade
     grants (Task 10) feed the same balance -- ``actions_terraform.py``

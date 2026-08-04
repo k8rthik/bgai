@@ -20,6 +20,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from bgai.engine.tm.terraform import spade_distance
+
 if TYPE_CHECKING:
     from bgai.engine.tm.state import GameState
 
@@ -30,6 +32,15 @@ class FactionHooks:
     def spade_transform_target(self, state: GameState, faction: str, loc: str, color: str) -> str:
         """Effective terraform target color for `loc` (Giants: always home terrain)."""
         return color
+
+    def spade_transform_cost(
+        self, state: GameState, faction: str, from_color: str, to_color: str
+    ) -> int:
+        """Spade cost to recolor a hex from `from_color` to `to_color`
+        (Giants: flat 2 whenever they differ, `map.pm` 610-614 -- see
+        `actions_terraform.py`'s `_GiantsHooks` override).
+        """
+        return spade_distance(from_color, to_color)
 
     def extra_dig_gain(self, state: GameState, faction: str) -> dict[str, int]:
         """Extra resources granted per spade dug, beyond the dig track (Alchemists SH)."""

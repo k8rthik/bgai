@@ -286,10 +286,19 @@ def test_upgrade_sh_cultists_gains_7_vp_directly() -> None:
     assert s2.factions["cultists"].vp == before + 7
 
 
-def test_upgrade_sh_halflings_pushes_spades_pending() -> None:
+def test_upgrade_sh_halflings_grants_spades_and_vp_immediately() -> None:
+    """Fix-2 (task-9 review): the SH's 3-spade grant must land on
+    ``spades_available`` -- and its +1 VP/spade passive -- the instant the
+    SH is built (``resources.pm`` ``adjust_resource`` gain-mode timing),
+    not deferred behind a pending that a player could skip past entirely.
+    """
     s = _sh_state("halflings")
+    before_vp = s.factions["halflings"].vp
     s2 = handle_upgrade(s, "halflings", _cmd("upgrade", loc=TARGET, building="SH"))
-    assert PendingDecision(faction="halflings", kind="halflings_spades", amount=3) in s2.pending
+    fs = s2.factions["halflings"]
+    assert fs.spades_available == 3
+    assert fs.vp == before_vp + 3
+    assert [p for p in s2.pending if p.kind == "halflings_spades"] == []
 
 
 def test_upgrade_sh_darklings_pushes_convert_w_to_p_pending() -> None:

@@ -12,15 +12,22 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import polars as pl
 import pytest
 
 from bgai.data.ledger_parser import Kind, ParsedCommand
-from bgai.engine.tm.actions_terraform import handle_dig, handle_lose_spade, handle_transform
+from bgai.engine.tm.actions_terraform import (
+    _default_target_color,
+    _transform_colors_on_cycle,
+    handle_dig,
+    handle_lose_spade,
+    handle_transform,
+)
 from bgai.engine.tm.apply import EngineError
 from bgai.engine.tm.board import RIVER, base_board
 from bgai.engine.tm.factions_data import FACTIONS
 from bgai.engine.tm.setup import load_setup
-from bgai.engine.tm.state import FactionState, GameState, PendingDecision, Phase, with_faction
+from bgai.engine.tm.state import FactionState, GameState, Phase, with_faction
 
 GAME_ID = "4pLeague_S10_D1L1_G1"
 BOARD = base_board()
@@ -286,20 +293,65 @@ def test_transform_giants_explicit_non_home_color_rejected() -> None:
         handle_transform(s, "giants", _cmd("transform", loc=TARGET, color="green"))
 
 
-def test_transform_absorbs_halflings_pending_and_scores_full_grant_vp() -> None:
+def test_transform_default_color_under_balance_lands_on_wheel_limited_color() -> None:
+    """map.pm ``transform_colors_on_cycle`` (473-493): with fewer spades
+    than the true home-distance, a bare ``transform`` doesn't jump straight
+    to home -- it lands wherever ``spades_available`` steps actually reach.
+    Darklings (home ``black``) starting from ``gray`` is 3 steps by the
+    short way; with only 2 banked, walking 2 steps each direction gives
+    ``yellow`` (clockwise) vs ``blue`` (counter-clockwise, distance 1 from
+    black) -- ``blue`` is closer, so it wins (module docstring / see the
+    direct ``_transform_colors_on_cycle`` tests below for the arithmetic).
+    """
     s = _state()
-    s = _place(s, "halflings", ANCHOR)
-    home = FACTIONS["halflings"].color
-    s = _set_color(s, TARGET, _one_step_neighbor(home))
-    s = replace(
-        s, pending=(PendingDecision(faction="halflings", kind="halflings_spades", amount=3),)
-    )
-    before_vp = s.factions["halflings"].vp
-    s2 = handle_transform(s, "halflings", _cmd("transform", loc=TARGET, color=home))
-    fs = s2.factions["halflings"]
-    assert fs.vp == before_vp + 3  # whole 3-spade grant scored, not just the 1 used
-    assert fs.spades_available == 2  # 3 absorbed, 1 spent on this transform
-    assert s2.pending == ()
+    s = _place(s, "darklings", ANCHOR)
+    assert FACTIONS["darklings"].color == "black"
+    s = _set_color(s, TARGET, "gray")
+    s = _rich(s, "darklings", spades_available=2)
+    s2 = handle_transform(s, "darklings", _cmd("transform", loc=TARGET))
+    assert s2.hexes[TARGET].color == "blue"
+    assert s2.factions["darklings"].spades_available == 0  # full balance spent, cost == 2
+
+
+def test_transform_default_color_zero_balance_is_a_noop_current_color() -> None:
+    """map.pm ``transform_colors`` 517-518: with zero spades banked, the
+    default target is the current color itself -- so the caller's
+    "already this color" check (not an insufficient-spades error) is what
+    rejects a bare ``transform`` with nothing to spend.
+    """
+    s = _state()
+    s = _place(s, "engineers", ANCHOR)
+    off_color = _one_step_neighbor(FACTIONS["engineers"].color)
+    s = _set_color(s, TARGET, off_color)
+    with pytest.raises(EngineError, match="already"):
+        handle_transform(s, "engineers", _cmd("transform", loc=TARGET))
+
+
+def test_transform_colors_on_cycle_prefers_closer_direction() -> None:
+    """Direct unit test of the ported wheel-walk (map.pm 473-493), matching
+    the hand-computed values behind
+    ``test_transform_default_color_under_balance_lands_on_wheel_limited_color``.
+    """
+    preferred, other = _transform_colors_on_cycle("gray", "black", 2)
+    assert (preferred, other) == ("blue", "yellow")  # ccw wins: distance 1 < cw's distance 2
+    assert _default_target_color("gray", "black", 2) == "blue"
+
+
+def test_transform_colors_on_cycle_ties_prefer_counter_clockwise() -> None:
+    """map.pm 487-492: the direction comparison is a strict ``<``, so an
+    exact tie falls through to the ``else`` branch, which returns the
+    counter-clockwise result first. On this engine's actual 7-color
+    (odd-length) wheel, an exhaustive search over every (home, current,
+    spade-count) triple never produces a tie between
+    two *distinct* colors -- odd-cycle symmetry makes that mathematically
+    impossible here (task-9 fix-2 report) -- so the only real tie is both
+    directions fully converging on home once the balance covers even the
+    long way around; this test exercises that boundary and confirms the
+    branch returns home cleanly rather than erroring.
+    """
+    # black<->gray: short distance 3, long way 4 -- 4 spades exhausts both.
+    preferred, other = _transform_colors_on_cycle("gray", "black", 4)
+    assert preferred == other == "black"
 
 
 # --------------------------------------------------------------------------
@@ -328,14 +380,19 @@ def test_lose_spade_insufficient_balance_rejected() -> None:
         handle_lose_spade(s, "engineers", _cmd("lose_spade", n1=2))
 
 
-def test_lose_spade_absorbs_halflings_pending_first() -> None:
-    s = _state()
-    s = replace(
-        s, pending=(PendingDecision(faction="halflings", kind="halflings_spades", amount=3),)
+def test_giants_corpus_transforms_never_target_non_home_color() -> None:
+    """Corpus regression lock for the brief's stricter Giants contract
+    (module docstring): every real ``giants transform ... to X`` ledger
+    row across the crawled corpus targets ``red`` (their home color) --
+    committed as a real test (task-9 fix-2 review) so corpus growth that
+    ever surfaces a non-home Giants transform fails loudly here instead of
+    silently drifting from the documented justification.
+    """
+    moves = pl.read_parquet("data/datasets/moves.parquet")
+    colors = (
+        moves.filter((pl.col("faction") == "giants") & (pl.col("verb") == "transform"))
+        .select("color")
+        .drop_nulls()
     )
-    before_vp = s.factions["halflings"].vp
-    s2 = handle_lose_spade(s, "halflings", _cmd("lose_spade", n1=3))
-    fs = s2.factions["halflings"]
-    assert fs.spades_available == 0
-    assert fs.vp == before_vp + 3
-    assert s2.pending == ()
+    assert colors.height > 0
+    assert set(colors["color"].to_list()) == {"red"}

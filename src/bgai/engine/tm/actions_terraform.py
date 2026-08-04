@@ -14,20 +14,34 @@ Ported from the reference implementation (jsnell/terra-mystica, MIT),
   way is ``$amount`` spades added to the balance, Darklings' dig additionally
   scoring 2 VP per spade and never advancing the (max-level-0) track.
 - ``command_transform`` (588-668) + ``map.pm`` ``transform_cost``
-  (554-618)/``transform_colors``(505-535): spade cost is
-  ``abs(color_difference(current, target))`` the short way around the
-  7-color wheel (``terraform.spade_distance`` here), forced to exactly 2
-  whenever nonzero for Giants regardless of true distance (map.pm 610-614:
-  ``if ($faction->{name} eq 'giants' and $color_difference != 0) {
-  $color_difference = 2; }``); an unspecified target color defaults to the
-  faction's own color (``transform_colors``, 505-535 -- our engine has no
-  ``secondary_color``/ice mechanic, so the full bidirectional
-  ``transform_colors_on_cycle`` wheel-walk that F&I factions need collapses
-  to "home" for every base faction). ``pay $faction, $transform_cost``
-  (631) is the ``spades_available`` debit; a request that can't be paid
-  raises here exactly like any other insufficient-resource case
-  (``resources.pm`` ``adjust_resource``'s ``$faction->{$type} < 0`` die,
-  400-402).
+  (554-618): spade cost is ``abs(color_difference(current, target))`` the
+  short way around the 7-color wheel (``terraform.spade_distance``,
+  reached through ``hooks_for(faction).spade_transform_cost`` so Giants
+  can override it), forced to exactly 2 whenever nonzero for Giants
+  regardless of true distance (map.pm 610-614: ``if ($faction->{name} eq
+  'giants' and $color_difference != 0) { $color_difference = 2; }``).
+  ``pay $faction, $transform_cost`` (631) is the ``spades_available``
+  debit; a request that can't be paid raises here exactly like any other
+  insufficient-resource case (``resources.pm`` ``adjust_resource``'s
+  ``$faction->{$type} < 0`` die, 400-402).
+- ``map.pm`` ``transform_colors``/``transform_colors_on_cycle`` (473-535):
+  an unspecified target color is **not** just "home". ``transform_colors``
+  (505-535) short-circuits straight to home only for ``FREE_TF``/Giants
+  (511-514, ``hooks_for(faction).spade_transform_target`` here); every
+  other faction with **no banked spades** defaults to the *current* color
+  itself (517-518, ``return ($current_color, $current_color) if
+  !$spades`` -- the caller's "already this color" die then rejects the
+  no-op), and with spades banked, walks the wheel exactly
+  ``spades_available`` steps in both directions from the current color
+  (``transform_colors_on_cycle``, 473-493, ``for my $offset (1..$spades)``,
+  each direction stopping early once it reaches home -- ``$cw``/``$ccw``
+  freeze there even if more steps remain), returning whichever end lands
+  strictly closer to home; a tie prefers counter-clockwise (487-492: the
+  comparison is a strict ``<``, so an exact tie falls through to the
+  ``else`` branch, ``($ccw, $cw)``). Ported verbatim as
+  ``_transform_colors_on_cycle``/``_default_target_color`` below (our
+  engine has no ``secondary_color``/ice mechanic, so the
+  ``$secondary_color`` branch at 523-531, F&I-only, never applies).
 - ``resources.pm`` ``adjust_resource`` (250-403): for any *positive* delta
   to a plain resource (including ``SPADE``), the generic branch (313-333)
   loops ``for (1..$delta)`` calling ``maybe_score_current_score_tile`` and
@@ -37,12 +51,14 @@ Ported from the reference implementation (jsnell/terra-mystica, MIT),
   brief's open question: Halflings' ``special => { mode => gain, SPADE =>
   {VP=>1} }`` and Alchemists' ``special => { SPADE => {PW=>2}, mode => gain,
   enable_if => {SH=>1} }`` (``Game/Factions/Halflings.pm``/``Alchemists.pm``)
-  both fire **once per spade gained** (dig, or a Halflings SH's 3-spade
-  grant), never per spade spent on a transform -- ``command_transform``'s
-  own per-spade-spent loop (634-640) calls ``maybe_gain_faction_special``
-  with mode ``'spend'``, which is a no-op for every base faction (no base
-  faction's ``special`` uses ``mode => 'spend'``; grepped the whole
-  ``src/Game/Factions/*.pm`` tree -- zero hits).
+  both fire **once per spade gained** (``dig``, or a Halflings SH's
+  3-spade grant, applied immediately by ``actions_build.py`` -- see that
+  module's docstring), never per spade spent on a transform --
+  ``command_transform``'s own per-spade-spent loop (634-640) calls
+  ``maybe_gain_faction_special`` with mode ``'spend'``, which is a no-op
+  for every base faction (no base faction's ``special`` uses ``mode =>
+  'spend'``; grepped the whole ``src/Game/Factions/*.pm`` tree -- zero
+  hits).
 - ``commands.pm`` line 98 + resources.pm: a bare ``-SPADE``/``-Nspade``
   row (``lose_spade`` here) is a **plain decrement** of the balance by N
   (``adjust_resource($faction, 'SPADE', -N)``), not an unconditional
@@ -55,25 +71,24 @@ Ported from the reference implementation (jsnell/terra-mystica, MIT),
   ``EngineError`` if that would go negative.
 
 Giants' 202-for-202 real ``transform ... to red`` rows in the crawled
-corpus (task-9 report) empirically back the brief's stricter contract over
-the letter of ``command_transform`` (which technically lets *any* faction,
+corpus (``test_giants_corpus_transforms_never_target_non_home_color``,
+task-9 report) empirically back the brief's stricter contract over the
+letter of ``command_transform`` (which technically lets *any* faction,
 Giants included, name an explicit non-home target -- ``validate_transform_color``
 only rejects ice/volcano, 495-503): this module raises ``EngineError`` on an
 explicit non-home ``to color`` for Giants rather than silently allowing it.
 
 ``FactionState.spades_available`` (state.py) is the single running balance
-``dig``/``transform``/``lose_spade`` all read and write -- a still-pending
-``halflings_spades`` grant (pushed by ``actions_build.py`` on Halflings' SH
-build, an amount=3 marker rather than an immediate balance bump) is folded
-into it the first time either handler needs the balance, at which point the
-Halflings VP-per-spade fires for the whole grant at once (closest available
-analog to Perl's "granted and scored the instant the SH goes up" timing,
-since this engine defers the literal ``SPADE`` resource bump to a pending
-rather than mutating ``fs`` from inside ``actions_build.handle_upgrade``).
-ACT5/ACT6/BON1 spade grants (Task 10) are the seam this leaves open: as
-long as whatever adds to that balance also goes through
-``FactionState.spades_available``, ``transform``/``lose_spade`` here don't
-need to change at all.
+``dig``/``transform``/``lose_spade`` all read and write. A Halflings SH's
+3-spade grant is applied **immediately** by ``actions_build.py`` at build
+time (matching Perl's "granted and scored the instant the SH goes up"
+timing exactly -- see that module's docstring for why the fix-2 review
+retired this module's earlier ``halflings_spades``-pending-absorption
+design, which could silently drop the grant if no ``transform``/
+``lose_spade`` ever followed the SH build). ACT5/ACT6/BON1 spade grants
+(Task 10) are the seam this leaves open: as long as whatever adds to that
+balance also goes through ``FactionState.spades_available``,
+``transform``/``lose_spade`` here don't need to change at all.
 """
 
 from __future__ import annotations
@@ -81,11 +96,11 @@ from __future__ import annotations
 from dataclasses import replace
 
 from bgai.data.ledger_parser import ParsedCommand
-from bgai.engine.tm.apply import EngineError, pop_pending, register_handler
+from bgai.engine.tm.apply import EngineError, register_handler
 from bgai.engine.tm.board import RIVER
 from bgai.engine.tm.connectivity import reachable
 from bgai.engine.tm.factions.hooks import HOOKS, FactionHooks, hooks_for
-from bgai.engine.tm.factions_data import FACTIONS
+from bgai.engine.tm.factions_data import COLOR_WHEEL, FACTIONS
 from bgai.engine.tm.state import FactionState, GameState, with_faction
 from bgai.engine.tm.terraform import spade_distance
 
@@ -102,10 +117,17 @@ _COLOR_ALIASES: dict[str, str] = {"grey": "gray"}
 
 
 class _GiantsHooks(FactionHooks):
-    """map.pm 505-514/610-614: every transform targets home terrain."""
+    """map.pm 505-514/610-614: every transform targets home terrain, at a
+    flat 2-spade cost regardless of true wheel distance.
+    """
 
     def spade_transform_target(self, state: GameState, faction: str, loc: str, color: str) -> str:
         return FACTIONS[faction].color
+
+    def spade_transform_cost(
+        self, state: GameState, faction: str, from_color: str, to_color: str
+    ) -> int:
+        return 0 if from_color == to_color else 2
 
 
 class _SpadeSpecialGainHooks(FactionHooks):
@@ -142,13 +164,6 @@ def _alias_color(color: str) -> str:
     return _COLOR_ALIASES.get(color, color)
 
 
-def _find_pending_index(state: GameState, faction: str, kind: str) -> int | None:
-    for i, p in enumerate(state.pending):
-        if p.faction == faction and p.kind == kind:
-            return i
-    return None
-
-
 def _pay_resources(
     state: GameState, faction: str, fs: FactionState, cost: dict[str, int], cmd: ParsedCommand
 ) -> FactionState:
@@ -172,10 +187,10 @@ def _apply_extra_dig_gain(
     state: GameState, faction: str, fs: FactionState, spade_count: int
 ) -> FactionState:
     """Fold ``hooks_for(faction).extra_dig_gain`` into ``fs``, scaled by
-    ``spade_count`` spades just gained (dig, or a ``halflings_spades``
-    pending absorption -- see module docstring). ``state`` is read for the
-    Alchemists SH gate only; callers must pass the state *before* this
-    gain (buildings never change here, so any snapshot works).
+    ``spade_count`` spades just gained (``dig`` here; ``actions_build.py``
+    has its own copy of this same fold for a Halflings SH's immediate
+    3-spade grant -- see that module's docstring). ``state`` is read for
+    the Alchemists SH gate only.
     """
     if spade_count <= 0:
         return fs
@@ -193,23 +208,44 @@ def _apply_extra_dig_gain(
     return fs
 
 
-def _absorb_halflings_pending(
-    state: GameState, faction: str, fs: FactionState
-) -> tuple[GameState, FactionState]:
-    """Fold a still-outstanding ``halflings_spades`` pending (pushed by
-    ``actions_build.py`` on Halflings' SH build) into ``fs.spades_available``,
-    firing the Halflings VP-per-spade bonus for the whole grant at once
-    (module docstring). No-op if no such pending is queued, or for any
-    other faction (the pending's ``kind`` is Halflings-only).
+def _transform_colors_on_cycle(current_color: str, home_color: str, spades: int) -> tuple[str, str]:
+    """map.pm ``transform_colors_on_cycle`` (473-493): walk ``spades`` steps
+    both clockwise and counter-clockwise around the 7-color wheel from
+    ``current_color``, each direction freezing once it reaches
+    ``home_color`` (the ``if ($cw ne $home_color)`` guards, 479/482).
+    Returns ``(preferred, other)`` where ``preferred`` is whichever end is
+    strictly closer to ``home_color``; an exact tie prefers the
+    counter-clockwise result (487-492: the comparison is a strict ``<``,
+    so a tie falls through to the ``else`` branch, ``($ccw, $cw)``).
     """
-    idx = _find_pending_index(state, faction, "halflings_spades")
-    if idx is None:
-        return state, fs
-    amount = state.pending[idx].amount
-    new_state = pop_pending(state, idx)
-    fs = replace(fs, spades_available=fs.spades_available + amount)
-    fs = _apply_extra_dig_gain(state, faction, fs, amount)
-    return new_state, fs
+    n = len(COLOR_WHEEL)
+    idx = COLOR_WHEEL.index(current_color)
+    cw = current_color
+    ccw = current_color
+    for offset in range(1, spades + 1):
+        if cw != home_color:
+            cw = COLOR_WHEEL[(idx + offset) % n]
+        if ccw != home_color:
+            ccw = COLOR_WHEEL[(idx - offset) % n]
+    if spade_distance(home_color, cw) < spade_distance(home_color, ccw):
+        return cw, ccw
+    return ccw, cw
+
+
+def _default_target_color(current_color: str, home_color: str, spades_available: int) -> str:
+    """map.pm ``transform_colors`` (505-535) for a faction with no
+    ``secondary_color`` (every base faction -- see module docstring): with
+    no banked spades, the default target is the current color itself
+    (517-518) -- the caller's "already this color" check then rejects the
+    resulting no-op transform, exactly like Perl's own die a few lines
+    later in ``command_transform``. With spades banked, it's the
+    ``_transform_colors_on_cycle``-preferred color reachable in exactly
+    that many steps.
+    """
+    if spades_available <= 0:
+        return current_color
+    preferred, _other = _transform_colors_on_cycle(current_color, home_color, spades_available)
+    return preferred
 
 
 # --------------------------------------------------------------------------
@@ -288,9 +324,13 @@ def handle_transform(state: GameState, faction: str, cmd: ParsedCommand) -> Game
             f"{hex_key} is not reachable by {faction}", state=state, faction=faction, cmd=cmd
         )
 
+    fs = state.factions[faction]
     home_color = FACTIONS[faction].color
     requested_color = _alias_color(cmd.color) if cmd.color is not None else None
-    proposed_color = requested_color if requested_color is not None else home_color
+    if requested_color is not None:
+        proposed_color = requested_color
+    else:
+        proposed_color = _default_target_color(hex_state.color, home_color, fs.spades_available)
     effective_color = hooks_for(faction).spade_transform_target(
         state, faction, hex_key, proposed_color
     )
@@ -307,26 +347,20 @@ def handle_transform(state: GameState, faction: str, cmd: ParsedCommand) -> Game
             f"{hex_key} is already {effective_color}", state=state, faction=faction, cmd=cmd
         )
 
-    # Giants always pay exactly 2 spades for any nonzero-distance transform
-    # (map.pm 610-614); every other faction pays the true wheel distance.
-    cost = 2 if faction == "giants" else spade_distance(hex_state.color, effective_color)
-
-    fs = state.factions[faction]
-    new_state, fs = _absorb_halflings_pending(state, faction, fs)
-
+    cost = hooks_for(faction).spade_transform_cost(state, faction, hex_state.color, effective_color)
     if cost > fs.spades_available:
         raise EngineError(
             f"{faction} has {fs.spades_available} spades available, needs {cost} to "
             f"transform {hex_key}",
-            state=new_state,
+            state=state,
             faction=faction,
             cmd=cmd,
         )
     fs = replace(fs, spades_available=fs.spades_available - cost)
 
-    new_hexes = dict(new_state.hexes)
+    new_hexes = dict(state.hexes)
     new_hexes[hex_key] = replace(hex_state, color=effective_color)
-    return replace(with_faction(new_state, faction, fs), hexes=new_hexes)
+    return replace(with_faction(state, faction, fs), hexes=new_hexes)
 
 
 def handle_lose_spade(state: GameState, faction: str, cmd: ParsedCommand) -> GameState:
@@ -335,18 +369,16 @@ def handle_lose_spade(state: GameState, faction: str, cmd: ParsedCommand) -> Gam
     """
     n = cmd.n1 if cmd.n1 is not None else 1
     fs = state.factions[faction]
-    new_state, fs = _absorb_halflings_pending(state, faction, fs)
-
     new_value = fs.spades_available - n
     if new_value < 0:
         raise EngineError(
             f"{faction} cannot discard {n} spades (has {fs.spades_available})",
-            state=new_state,
+            state=state,
             faction=faction,
             cmd=cmd,
         )
     fs = replace(fs, spades_available=new_value)
-    return with_faction(new_state, faction, fs)
+    return with_faction(state, faction, fs)
 
 
 register_handler("dig", handle_dig)
