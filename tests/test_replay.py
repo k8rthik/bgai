@@ -450,3 +450,73 @@ def test_cult_blocked_does_not_survive_into_a_later_turn(
     assert result.error is None, result.error
     assert result.mismatches == ()
     assert result.rows_checked > 300
+
+
+# --------------------------------------------------------------------------
+# Task 14 phase 4: round-0 (SETUP_DWELLINGS/SETUP_BONUS) has no active-
+# faction enforcement in real Perl, and a dropped faction's own stale
+# in-flight setup row is applied under whichever faction `setup_order`'s
+# front now names, not the identity baked into the request.
+# --------------------------------------------------------------------------
+
+
+def test_dropped_factions_stale_setup_row_applies_under_the_new_setup_order_front(
+    frames: tuple[pl.DataFrame, pl.DataFrame],
+) -> None:
+    """``4pLeague_S22_D3L1_G1``: mermaids drops right as its own first
+    ``SETUP_DWELLINGS`` turn would start. Row 33's ledger `faction` is
+    still "mermaids" (`build F4`, a stale already-in-flight client
+    submission), but real Perl's raw JSON `map` has F4 colored green --
+    witches' home color, not mermaids' blue -- because `commands.pm`'s
+    `$assert_active_faction` skips its active-player check entirely for
+    `$game{round} == 0`, and `acting.pm`'s `setup_action`/
+    `shift_setup_order` blindly pops whichever faction `setup_order`'s
+    front now names (witches, once mermaids' own remaining entries are
+    filtered out by the drop) regardless of who actually submitted the
+    command. Applying this row under mermaids' own (dropped) identity
+    either hard-errors (`EngineError`: wrong home color, since F4 isn't
+    blue) or, if skipped as a no-op, strands this engine's own
+    `_setup_dwellings_order` pointer one slot behind real Perl's --
+    surfacing several rows later as a spurious "faction acted out of
+    turn" on cultists' very next legitimate build. A full clean replay.
+    """
+    moves_df, deltas_df = frames
+    result = replay_game("4pLeague_S22_D3L1_G1", moves_df, deltas_df)
+    assert result.error is None, result.error
+    assert result.mismatches == ()
+
+
+def test_dropped_factions_stale_setup_row_can_apply_under_a_later_faction_too(
+    frames: tuple[pl.DataFrame, pl.DataFrame],
+) -> None:
+    """``4pLeague_S22_D3L1_G6``: witches drops right as its own first
+    ``SETUP_DWELLINGS`` turn would start (a 4-player game with Nomads, so
+    `setup_order`'s post-drop front lands on nomads' *forward* dwelling
+    slot, not the very next faction in seat order). Row 31's ledger
+    `faction` is "witches" (`build F3`), but the raw JSON's `map` has F3
+    colored yellow -- nomads' home color -- and nomads' own row 137
+    (`upgrade F3 to TP`) has no intervening "build F3" anywhere in the
+    ledger, so row 31 must be where nomads' dwelling actually landed.
+    Same fix as the sibling `S22_D3L1_G1` test, pinned separately because
+    the post-drop `setup_order` front here is a *different* faction than
+    the very next seat, exercising `_first_live_setup_index`'s general
+    skip-ahead rather than the simple case.
+    """
+    moves_df, deltas_df = frames
+    result = replay_game("4pLeague_S22_D3L1_G6", moves_df, deltas_df)
+    assert result.error is None, result.error
+    assert result.mismatches == ()
+
+
+def test_dropped_factions_stale_setup_row_resolves_without_further_fixes(
+    frames: tuple[pl.DataFrame, pl.DataFrame],
+) -> None:
+    """``4pLeague_S22_D3L1_G4``: alchemists drops mid-``SETUP_BONUS``; the
+    same round-0 setup-order-front substitution (no separate fix needed)
+    resolves this game's own "faction acted out of turn" too, confirming
+    the fix generalizes across both `SETUP_DWELLINGS` and `SETUP_BONUS`.
+    """
+    moves_df, deltas_df = frames
+    result = replay_game("4pLeague_S22_D3L1_G4", moves_df, deltas_df)
+    assert result.error is None, result.error
+    assert result.mismatches == ()
