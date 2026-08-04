@@ -346,11 +346,22 @@ def _setup_with_variable_turn_order(enabled: bool) -> GameState:
     return GameState.initial(setup)
 
 
-def test_end_of_round_keeps_seat_order_without_variable_turn_order() -> None:
+def test_end_of_round_rotates_seat_order_to_the_first_passer_without_variable_turn_order() -> None:
+    """Task-14 correction: without ``variable-turn-order``,
+    ``raw_factions_in_order`` is never touched by individual passes
+    (``end_of_round``'s own docstring has the full citation trail and
+    corpus counter-example, ``4pLeague_S1_D1L1_G1``) -- only *which* seat
+    starts next round is chronological (whoever passed first), the other
+    3 keep their original seat *positions*, not their pass order. Seats
+    here are (engineers, darklings, nomads, mermaids);
+    ``_ALT_PASSED_ORDER``'s first entry is mermaids (seat index 3), so
+    the correct result rotates seat order to start there: (mermaids,
+    engineers, darklings, nomads) -- not ``_ALT_PASSED_ORDER`` itself,
+    and not unrotated seat order either."""
     s = _setup_with_variable_turn_order(False)
     s = replace(s, phase=Phase.CLEANUP, passed_order=_ALT_PASSED_ORDER)
     s2 = end_of_round(s)
-    assert s2.turn_order == s.setup.factions
+    assert s2.turn_order == ("mermaids", "engineers", "darklings", "nomads")
 
 
 def test_end_of_round_uses_passed_order_under_variable_turn_order() -> None:

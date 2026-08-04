@@ -235,10 +235,13 @@ Task 12 contract (the replay harness)
    calls. Once every faction's cult-income row for the round has landed,
    call ``end_of_round(state)``: this grants bonus-tile coin
    accumulation, resets per-round balances, sets next round's
-   ``turn_order`` (``variable_turn_order`` -> ``passed_order``; else seat
-   order, unchanged), and transitions to either the next round's
-   ``Phase.INCOME`` (loop back to step 4) or, after round 6,
-   ``Phase.FINISHED`` with ``round`` left at 6.
+   ``turn_order`` (task-14 correction: under ``variable_turn_order``,
+   this round's ``passed_order`` directly; otherwise seat order rotated
+   to start at whoever passed *first* this round, which is **not** the
+   same as ``passed_order`` -- that function's own docstring has the
+   full citation trail and corpus counter-example), and transitions to
+   either the next round's ``Phase.INCOME`` (loop back to step 4) or,
+   after round 6, ``Phase.FINISHED`` with ``round`` left at 6.
 7. ``Phase.FINISHED`` is a deliberate hand-off point: no final/area/
    resource-conversion scoring has been applied yet. ``round_flow.py``
    guarantees only that every faction's resources, board, and VP total
@@ -512,10 +515,48 @@ def end_of_round(state: GameState) -> GameState:
         for name, fs in state.factions.items()
     }
 
+    # Task-14 correction: next round's turn_order always starts with
+    # whichever faction passed *first* this round (acting.pm's
+    # factions_in_turn_order, 203-210: rotates raw_factions_in_order so
+    # whichever faction holds {start_player} -- set on any first-to-pass,
+    # command_pass ~780-785, *unconditionally*, not gated by variable-
+    # turn-order -- goes first). What differs by option is which array
+    # gets rotated:
+    #
+    # - Under variable-turn-order, every single pass calls new_faction_order
+    #   (commands.pm ~788-792), moving that passer to the *end* of
+    #   raw_factions_in_order (keeping everyone else's relative order).
+    #   Applied cumulatively across a round's 4 passes, this converges
+    #   exactly to *chronological pass order* -- confirmed by hand-
+    #   simulating 4 passes against an arbitrary seat order, and by the
+    #   existing ``test_end_of_round_uses_passed_order_under_variable_
+    #   turn_order`` pin -- so ``state.passed_order`` directly is correct
+    #   here.
+    # - Without it, raw_factions_in_order is *never* touched by passing at
+    #   all and stays the original seat order for the whole game; only
+    #   *which* seat starts is chronological (whoever happened to pass
+    #   first), the other 3 keep their original seat *positions* in the
+    #   rotation, not their pass *timestamps* -- these can differ whenever
+    #   a faction passes early (skipping ahead in wall-clock time without
+    #   changing its seat position). Corpus proof: ``4pLeague_S1_D1L1_G1``
+    #   (no variable-turn-order), round 2->3: engineers passes early
+    #   (turn 3 of 6) while cultists/witches/darklings all keep playing
+    #   until turns 5-6; round 2's pass order is (engineers, cultists,
+    #   darklings, witches), but round 3 actually starts (engineers,
+    #   cultists, witches, darklings) -- seat order (darklings, engineers,
+    #   cultists, witches) rotated to start at engineers, *not* passed_order
+    #   itself. An earlier revision of this function used raw seat order
+    #   unrotated for the non-variable-turn-order case (never checked
+    #   against a real such corpus game) -- also wrong, just differently.
+    # Either way ``state.passed_order`` is never empty here (every faction
+    # must pass before ``end_of_round`` runs), so ``[0]`` is safe.
     if state.setup.options.variable_turn_order:
         new_turn_order = state.passed_order
     else:
-        new_turn_order = state.setup.factions
+        first_to_pass = state.passed_order[0]
+        seats = state.setup.factions
+        pivot = seats.index(first_to_pass)
+        new_turn_order = seats[pivot:] + seats[:pivot]
 
     is_final_round = state.round >= 6
     new_round = state.round if is_final_round else state.round + 1

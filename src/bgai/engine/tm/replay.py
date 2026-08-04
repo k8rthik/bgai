@@ -68,7 +68,7 @@ from __future__ import annotations
 import argparse
 import json
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -85,7 +85,7 @@ from bgai.engine.tm.round_flow import (
     start_setup,
 )
 from bgai.engine.tm.setup import load_setup
-from bgai.engine.tm.state import GameState, Phase, cult_string
+from bgai.engine.tm.state import GameState, Phase, active_faction, cult_string, with_faction
 
 _MAIN_TRACK_VERBS = frozenset(
     {"build", "upgrade", "action", "advance", "pass", "send", "dig", "transform", "bridge", "connect"}
@@ -217,6 +217,38 @@ def _row_mismatches(
 # --------------------------------------------------------------------------
 
 
+def _skip_dropped_factions(state: GameState, faction: str) -> GameState:
+    """A dropped faction (``GameSetup.dropped_factions`` docstring) leaves
+    no further ledger trace of its own once it drops -- no explicit
+    ``drop-faction`` verb this ledger grammar recognizes, no more main-
+    track rows, ever. So the only signal this harness gets that faction
+    ``X`` has dropped *by this point* is exactly the situation this
+    function handles: the ledger's next real row belongs to a *different*
+    faction than whoever ``active_faction`` currently says should go.
+    If that active faction is one this game's raw JSON snapshot confirms
+    dropped at some point, treat it as passed (round_flow's existing
+    skip-in-round-robin mechanic, reused rather than duplicated) and
+    advance past it -- repeated in case more than one dropped faction is
+    queued up back to back. A non-dropped active faction is left alone;
+    that mismatch is a real engine bug and should still raise loudly from
+    ``apply()``'s own gate.
+    """
+    if state.phase != Phase.ACTIONS:
+        return state
+    dropped = state.setup.dropped_factions
+    if not dropped:
+        return state
+    for _ in range(len(state.setup.factions)):
+        current = active_faction(state)
+        if current == faction or current not in dropped:
+            return state
+        fs = state.factions[current]
+        if not fs.passed:
+            state = with_faction(state, current, replace(fs, passed=True))
+        state = advance_turn(state)
+    return state
+
+
 def _apply_row_commands(state: GameState, faction: str, cmds: tuple[ParsedCommand, ...]) -> GameState:
     """Apply every command of one ledger row via ``apply()``, calling
     ``advance_turn`` once per genuinely independent full action within the
@@ -243,6 +275,15 @@ def _apply_row_commands(state: GameState, faction: str, cmds: tuple[ParsedComman
     row where *every* command is a never-starts-action verb (e.g. a lone
     ``transform`` row).
     """
+    if any(cmd.verb in _MAIN_TRACK_VERBS for cmd in cmds):
+        # Gate-exempt sub-decision rows (leech/decline/...) never belong to
+        # the active faction by design -- only a genuine main-track row's
+        # faction mismatch is evidence a dropped faction's turn needs
+        # skipping (``_skip_dropped_factions`` docstring); calling this
+        # unconditionally would misfire on an ordinary leech/decline row
+        # sandwiched between two other factions' real turns and skip a
+        # faction that hasn't actually dropped *yet*.
+        state = _skip_dropped_factions(state, faction)
     prev_verb: str | None = None
     open_action = False
     any_main_track = False
@@ -260,6 +301,33 @@ def _apply_row_commands(state: GameState, faction: str, cmds: tuple[ParsedComman
             open_action = True
     if any_main_track:
         state = advance_turn(state)
+    return state
+
+
+def _ensure_actions_phase_started(state: GameState, cmds: tuple[ParsedCommand, ...]) -> GameState:
+    """Symmetric counterpart to the CLEANUP-phase check in
+    ``_advance_after_row``: a round's main-track ACTIONS-phase rows only
+    ever start once every faction's ``other_income_for_faction`` row has
+    landed and ``begin_actions`` has fired -- so a main-track command
+    arriving while still ``Phase.INCOME`` is itself proof that phase has
+    genuinely ended, missing rows or not (a dropped faction, task-14 fix,
+    never gets an ``other_income_for_faction`` row for any round after it
+    drops either -- the mirror image of the missing-``cult_income_for_
+    faction`` case). Must run *before* the row's commands are applied
+    (unlike the CLEANUP-side check, which can react afterward): a stale
+    ``Phase.INCOME`` makes ``handle_pass`` raise immediately
+    (``actions_pass.py``: "pass is not legal during INCOME") before any
+    later bookkeeping would get a chance to fix the phase.
+
+    ``transform`` is deliberately excluded from the trigger set: task-13
+    fix #6 established that a cult-income SPADE payout legitimately forces
+    an immediate out-of-turn ``transform`` *while still* ``Phase.INCOME``
+    (reference-game row 98) -- treating that as "actions phase started"
+    would be wrong and reintroduces that already-fixed bug.
+    """
+    trigger_verbs = _MAIN_TRACK_VERBS - {"transform"}
+    if state.phase == Phase.INCOME and any(cmd.verb in trigger_verbs for cmd in cmds):
+        state = begin_actions(state)
     return state
 
 
@@ -331,6 +399,10 @@ def replay_game(
     for row, faction, cmds in _iter_rows(game_moves):
         raw = "; ".join(cmd.raw for cmd in cmds)
         try:
+            was_income = state.phase == Phase.INCOME
+            state = _ensure_actions_phase_started(state, cmds)
+            if was_income and state.phase != Phase.INCOME:
+                other_income_done = set()
             state = _apply_row_commands(state, faction, cmds)
             state, other_income_done, cult_income_done = _advance_after_row(
                 state, faction, cmds, other_income_done, cult_income_done

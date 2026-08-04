@@ -104,6 +104,22 @@ class GameSetup:
     score_tiles: tuple[ScoringTile, ...]  # len 6, round 1..6
     bonus_tiles: tuple[str, ...]  # sorted BON ids in this game's pool
     player_count: int
+    dropped_factions: frozenset[str] = frozenset()
+    """Factions the raw JSON's final snapshot marks ``"dropped": 1``
+    (``commands.pm``'s ``command drop-faction``: ``$faction->{dropped}=1;
+    $faction->{allowed_actions}=0; ...; $game{acting}->dismiss_action
+    ($faction, undef);`` -- dismissed from turn rotation for the rest of
+    the game, immediately). A real, fairly common corpus phenomenon (an
+    AFK/timed-out player), not covered by Task 2's 10 ``nofaction*``
+    known-bad games -- a dropped faction still played real early-game
+    moves (build/upgrade rows) before dropping, so it can't be treated as
+    unloadable/excluded outright; ``replay.py`` uses this set to
+    reactively skip a dropped faction's turn once the ledger's own
+    silence about them (no further main-track row ever appears) makes it
+    clear they've dropped, without knowing the exact row -- see that
+    module's docstring. 189 of 3563 corpus games have at least one
+    dropped faction (task-14 report).
+    """
 
 
 def _read_raw_game(game_id: str, raw_dir: Path) -> dict[str, object]:
@@ -207,6 +223,17 @@ def _resolve_bonus_tiles(
     return bonus_tiles
 
 
+def _resolve_dropped_factions(raw: dict[str, object]) -> frozenset[str]:
+    factions = raw.get("factions")
+    if not isinstance(factions, dict):
+        return frozenset()
+    return frozenset(
+        name
+        for name, info in factions.items()
+        if isinstance(info, dict) and info.get("dropped")
+    )
+
+
 def load_setup(game_id: str, raw_dir: Path = Path("data/raw/games")) -> GameSetup:
     """Load and validate one crawled game's pre-round-1 setup."""
     raw = _read_raw_game(game_id, raw_dir)
@@ -216,6 +243,7 @@ def load_setup(game_id: str, raw_dir: Path = Path("data/raw/games")) -> GameSetu
     factions = _resolve_seat_order(game_id, raw)
     score_tiles = _resolve_score_tiles(game_id, raw)
     bonus_tiles = _resolve_bonus_tiles(game_id, raw, player_count)
+    dropped_factions = _resolve_dropped_factions(raw)
 
     return GameSetup(
         game_id=game_id,
@@ -224,4 +252,5 @@ def load_setup(game_id: str, raw_dir: Path = Path("data/raw/games")) -> GameSetu
         score_tiles=score_tiles,
         bonus_tiles=bonus_tiles,
         player_count=player_count,
+        dropped_factions=dropped_factions,
     )

@@ -144,6 +144,48 @@ def test_missing_cult_income_row_does_not_strand_the_harness_in_cleanup(
     assert result.rows_checked > 300
 
 
+def test_seat_order_rotation_without_variable_turn_order(
+    frames: tuple[pl.DataFrame, pl.DataFrame],
+) -> None:
+    """``4pLeague_S1_D1L1_G1`` (no ``variable-turn-order``): round 2's
+    turn order starts with whoever passed first in round 1 (rotating
+    *seat* order, not simply reusing it unrotated) -- and round 3's start
+    diverges from round 2's plain pass order, since a faction that passes
+    early keeps its original seat *position* for the next round's
+    rotation rather than jumping to the front by pass *timestamp*
+    (``round_flow.end_of_round``'s own docstring has the full citation
+    trail). Before this fix, an earlier revision either always reused raw
+    seat order (never rotated) or always used passed_order directly
+    (right only under variable-turn-order) -- both wrong here, producing
+    "faction acted out of turn" hard errors by round 3.
+    """
+    moves_df, deltas_df = frames
+    result = replay_game("4pLeague_S1_D1L1_G1", moves_df, deltas_df)
+    assert result.error is None, result.error
+    assert result.mismatches == ()
+    assert result.rows_checked > 300
+
+
+def test_dropped_faction_is_skipped_in_the_round_robin(
+    frames: tuple[pl.DataFrame, pl.DataFrame],
+) -> None:
+    """``4pLeague_S12_D2L1_G6``: darklings drops (raw JSON ``"dropped":
+    1``) partway through round 1, after playing real early moves --
+    ``GameSetup.dropped_factions``/``replay._skip_dropped_factions``
+    reactively skip its turn once the ledger's own silence about it makes
+    that clear, since no ``drop-faction`` ledger verb exists to pinpoint
+    exactly when. Pins the replay reaching well past where the dropped
+    faction's turn would otherwise strand the harness (row 51's turn-order
+    gate, then row 111's ``pass is not legal during INCOME``, both fixed
+    together) -- not necessarily a fully clean replay for this specific
+    game, since dropped-faction games can carry other, unrelated
+    mismatches this task's loop didn't chase further.
+    """
+    moves_df, deltas_df = frames
+    result = replay_game("4pLeague_S12_D2L1_G6", moves_df, deltas_df)
+    assert result.rows_checked > 130
+
+
 # --------------------------------------------------------------------------
 # Task 14: ACTC compound-turn bundling (round_flow.is_turn_boundary)
 # --------------------------------------------------------------------------
