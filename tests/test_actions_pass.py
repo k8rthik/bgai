@@ -59,11 +59,19 @@ def _mermaid_river_layout() -> tuple[str, str, str, str, str]:
 
     Identical algorithm to ``test_towns.py``'s helper of the same name --
     duplicated locally rather than imported (test modules aren't a shared
-    library here).
+    library here). ``sorted(...)`` in ``land_neighbors`` makes the search
+    deterministic across ``PYTHONHASHSEED``-randomized processes -- see
+    that sibling helper's own docstring for why an unsorted
+    ``frozenset`` walk here made this file's
+    ``test_connect_two_hex_early_era_form_derives_the_river`` flaky
+    (task-14 fix): a different, sometimes-genuinely-ambiguous layout on
+    every other run.
     """
 
     def land_neighbors(x: str, exclude: frozenset[str] = frozenset()) -> list[str]:
-        return [n for n in BOARD.adjacent[x] if BOARD.hexes[n].color != RIVER and n not in exclude]
+        return sorted(
+            n for n in BOARD.adjacent[x] if BOARD.hexes[n].color != RIVER and n not in exclude
+        )
 
     for river, hex_ in BOARD.hexes.items():
         if hex_.color != RIVER:

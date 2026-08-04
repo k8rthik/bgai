@@ -63,10 +63,22 @@ def _chain(n: int) -> tuple[str, ...]:
 
 
 def _mermaid_river_layout() -> tuple[str, str, str, str, str]:
-    """(a, a2, river, b, b2): two 2-hex land groups joined only via one river hex."""
+    """(a, a2, river, b, b2): two 2-hex land groups joined only via one river hex.
+
+    ``BOARD.adjacent`` values are ``frozenset[str]`` (``board.py``), so
+    iterating one directly is Python's hash-randomized-per-process string
+    order, not board order -- this helper's search can find a *different*
+    (still-valid) layout on every process, and on some seeds that layout
+    happens to have a second river hex also adjacent to both land groups,
+    breaking this file's own "joined only via one river hex" assumption
+    downstream. ``sorted(...)`` makes the search (and therefore the
+    returned layout) deterministic across runs.
+    """
 
     def land_neighbors(x: str, exclude: frozenset[str] = frozenset()) -> list[str]:
-        return [n for n in BOARD.adjacent[x] if BOARD.hexes[n].color != RIVER and n not in exclude]
+        return sorted(
+            n for n in BOARD.adjacent[x] if BOARD.hexes[n].color != RIVER and n not in exclude
+        )
 
     for river, hex_ in BOARD.hexes.items():
         if hex_.color != RIVER:
