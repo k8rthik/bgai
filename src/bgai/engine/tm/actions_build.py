@@ -842,31 +842,52 @@ def _apply_town_ship_gain(state: GameState, faction: str, tile: str) -> GameStat
 
 
 def handle_gain_town(state: GameState, faction: str, cmd: ParsedCommand) -> GameState:
-    """Pop the matching ``gain_town`` pending and apply ``cmd.tile`` to the
-    cluster it was queued for (``pending.source``, see
-    ``_maybe_queue_town``/``_cluster_key``). The cluster was already
+    """Pop the matching ``gain_town`` pending(s) and apply ``cmd.tile`` to
+    the cluster(s) they were queued for (``pending.source``, see
+    ``_maybe_queue_town``/``_cluster_key``). Each cluster was already
     recorded into ``founded_towns`` at *detection* time -- this handler
-    only grants the tile, it does not re-derive or re-record the cluster.
+    only grants the tile(s), it does not re-derive or re-record the
+    cluster(s).
+
+    ``cmd.n1`` (ledger raw ``+NTWx``, default 1) is not a scaled reward --
+    it is a *count* of separate ``gain_town`` pendings being resolved with
+    the *same* tile type in one ledger row (``commands.pm``'s generic
+    ``+N<TYPE>`` handler, lines 85-92: ``$faction->{GAIN_TW} -= $delta``
+    against a single counter that ``_maybe_queue_town`` can push above 1
+    when two clusters qualify at once, e.g. a FAV5 rescan -- fix #13's
+    docstring -- surfacing a second cluster the very same row an upgrade's
+    own ``_maybe_queue_town`` call already queued one for). ``resources.pm``
+    ``adjust_resource``'s own ``TW`` branch (355-362) confirms this: ``for
+    (1..$delta) { gain $faction, $tiles{$type}{gain}, 'TW' }`` -- the
+    *entire* per-tile gain (VP/resources/cult steps/shipping) is applied
+    ``$delta`` times, once per pending resolved, not scaled once. Task-13
+    report, ``4pLeague_S10_D1L1_G4`` row 257 (raw ``+2TW1``): engine
+    previously read only ``cmd.tile`` and ignored ``cmd.n1`` entirely,
+    granting TW1 once instead of twice.
     """
     assert cmd.tile is not None
-    idx = _find_pending(state, faction, "gain_town", cmd)
-    pending = state.pending[idx]
-    if pending.source is None:
-        raise EngineError(
-            "gain_town pending missing its cluster source (internal bookkeeping bug -- "
-            "_maybe_queue_town should always set it)",
-            state=state,
-            faction=faction,
-            cmd=cmd,
-        )
+    count = cmd.n1 if cmd.n1 is not None else 1
+    new_state = state
+    for _ in range(count):
+        idx = _find_pending(new_state, faction, "gain_town", cmd)
+        pending = new_state.pending[idx]
+        if pending.source is None:
+            raise EngineError(
+                "gain_town pending missing its cluster source (internal bookkeeping bug -- "
+                "_maybe_queue_town should always set it)",
+                state=state,
+                faction=faction,
+                cmd=cmd,
+            )
 
-    new_state = pop_pending(state, idx)
-    try:
-        new_state = apply_town_tile(new_state, faction, cmd.tile)
-    except ValueError as exc:
-        raise EngineError(str(exc), state=state, faction=faction, cmd=cmd) from exc
-    new_state = _apply_town_cult_gains(new_state, faction, cmd.tile)
-    return _apply_town_ship_gain(new_state, faction, cmd.tile)
+        new_state = pop_pending(new_state, idx)
+        try:
+            new_state = apply_town_tile(new_state, faction, cmd.tile)
+        except ValueError as exc:
+            raise EngineError(str(exc), state=state, faction=faction, cmd=cmd) from exc
+        new_state = _apply_town_cult_gains(new_state, faction, cmd.tile)
+        new_state = _apply_town_ship_gain(new_state, faction, cmd.tile)
+    return new_state
 
 
 register_handler("build", handle_build)

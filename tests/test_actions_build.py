@@ -755,6 +755,48 @@ def test_gain_town_applies_tile_and_records_founded_cluster() -> None:
     assert any(set(chain) <= set(c) for c in s2.founded_towns["engineers"])
 
 
+def test_gain_town_n1_resolves_that_many_pendings_with_the_same_tile() -> None:
+    """Task-13 report, ``4pLeague_S10_D1L1_G4`` row 257 (raw ``+2TW1``):
+    ``cmd.n1`` is a *count* of separate ``gain_town`` pendings being
+    resolved with the same tile type in one row, not a scaled reward
+    (``handle_gain_town``'s own docstring cites ``resources.pm``
+    ``adjust_resource``'s ``TW`` branch, 355-362: ``for (1..$delta) {
+    gain $faction, $tiles{$type}{gain}, 'TW' }`` -- the *entire* per-tile
+    gain applied twice, not once at double size). Two independently
+    queued clusters (distinct ``source``s) both resolving to TW1 must
+    grant TW1's VP/resources twice and consume both pendings, leaving the
+    pool down by 2."""
+    s = _state()
+    s = replace(
+        s,
+        pending=(
+            PendingDecision(faction="engineers", kind="gain_town", source="cluster-a"),
+            PendingDecision(faction="engineers", kind="gain_town", source="cluster-b"),
+        ),
+    )
+    before = s.factions["engineers"]
+    before_pool = s.towns_pool["TW1"]
+
+    # A single grant, for comparison -- proves n1=2 isn't just "apply once
+    # at double size" but genuinely two independent applications.
+    s_single = replace(
+        s, pending=(PendingDecision(faction="engineers", kind="gain_town", source="cluster-a"),)
+    )
+    single_vp_delta = (
+        handle_gain_town(s_single, "engineers", _cmd("gain_town", tile="TW1")).factions[
+            "engineers"
+        ].vp
+        - before.vp
+    )
+
+    s2 = handle_gain_town(s, "engineers", _cmd("gain_town", tile="TW1", n1=2))
+    after = s2.factions["engineers"]
+    assert s2.pending == ()
+    assert after.towns == ("TW1", "TW1")
+    assert s2.towns_pool["TW1"] == before_pool - 2
+    assert after.vp == before.vp + 2 * single_vp_delta
+
+
 def test_gain_town_without_pending_rejected() -> None:
     s = _state()
     with pytest.raises(EngineError):
