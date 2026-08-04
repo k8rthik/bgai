@@ -48,43 +48,48 @@ Ported from the reference implementation (jsnell/terra-mystica, MIT):
   ``strict_leech`` has **no observable effect here yet** -- flagged as a
   seam for whichever later task wires resource-conversion/leech ordering.
 - Cultists timing (``leech_effect``, ``factions_data.py``): the "taken"
-  effect (``command_leech`` lines 446-458) fires **unconditionally**, the
-  very first time *any* offer from one build is accepted with
+  effect (``command_leech`` lines 446-458) fires **unconditionally, the
+  very first time** *any* offer from one build is accepted with
   ``actual > 0`` (deduped per build via ``leech_cult_gained``, keyed by
-  the Perl ``leech_id`` counter) -- not gated by ``errata-cultist-power``.
-  The "not_taken" effect (``cultist_maybe_gain_power``, lines 558-586) only
-  fires once the *last* offer with ``actual > 0`` from that build has been
-  explicitly declined (``leech_not_rejected`` reaches 0), and only under
-  ``errata-cultist-power``.
+  the Perl ``leech_id`` counter) -- **immediately, mid-batch**, not gated
+  by ``errata-cultist-power``, and not deferred until every offer from
+  that build has answered. The "not_taken" effect
+  (``cultist_maybe_gain_power``, lines 558-586) only fires once the *last*
+  offer with ``actual > 0`` from that build has been explicitly declined
+  (``leech_not_rejected`` reaches 0, i.e. every such offer was declined),
+  and only under ``errata-cultist-power``.
 
-  **Documented simplification** (per the task-8 brief's own prescribed
-  timing, "after ALL offers for one build resolve"): rather than port
-  Perl's exact per-event firing (cult step on the *first* accept, +1 power
-  on the *last* decline, mid-batch), this module tracks a single
-  ``"cultist_leech_watch"`` bookkeeping ``PendingDecision`` per originating
-  build (pushed by :func:`queue_leech` alongside the batch of offers,
-  ``amount`` = count of nonzero-amount offers, ``source`` = builder name)
-  and only resolves the Cultists effect once every offer in that batch has
-  been answered. Any accept along the way marks the watch
-  ``options=("accepted",)``; at zero remaining, an accepted batch pushes
-  one ``cult_choice`` pending (amount 1, resolved by Task 7's
-  ``handle_gain_cult``); an all-declined batch grants +1 power iff
-  ``errata_cultist_power``. This is observably identical to the Perl for
-  the common case (a build's offers are answered as one contiguous block
-  before the next build, since ``apply``'s turn-order gate makes
-  ``active_faction`` track the pending queue -- see ``apply.py``'s
-  ``_has_queued_leech_for`` exemption) but differs if a batch is ever left
-  half-resolved across other actions; flagged as a seam for later tasks.
+  This module ports that timing directly (a prior revision deferred the
+  "taken" effect to batch-end to match the task brief's simplified
+  wording, but that diverges from a real corpus replay: a game can log
+  the Cultists' ``+CULT`` row before every opponent has answered that
+  build's leech offers -- fixed per code review). A single
+  ``"cultist_leech_watch"`` bookkeeping ``PendingDecision`` per
+  originating build (pushed by :func:`queue_leech` alongside the batch of
+  offers, ``amount`` = count of nonzero-amount offers, ``source`` =
+  builder name) still tracks *how many offers remain unanswered* (needed
+  to detect "the last offer was just declined" for the "not_taken" case)
+  and *whether the "taken" effect already fired this batch* (via
+  ``options``, so a second accept in the same batch doesn't push a second
+  ``cult_choice``) -- but the effect itself now fires through
+  ``factions.hooks.HOOKS["cultists"].on_leech_resolved`` (see that hook's
+  docstring), called exactly at the two Perl-faithful trigger points
+  (first accept; last-offer-of-an-all-declined-batch), not once per raw
+  offer resolution. This satisfies the brief's literal instruction
+  ("Cultists: ``HOOKS["cultists"].on_leech_resolved``") which the prior
+  revision left unwired.
 
 **Zero-cap decision** (task brief: "capped by Power.gainable(); no offer
 if cap is 0 (verify vs Perl)"): verified above against ``note_leech`` --
 Perl does *not* skip zero-``gainable()`` offers, so neither does this
 module. ``PendingDecision.amount`` here holds ``min(raw_building_power,
-gainable())`` -- Perl's "amount"/"actual" split collapses to one number
-since this engine doesn't track a separate "declared vs. capped" pair the
-way the Perl ``action_required`` record does; handlers below re-derive
-Perl's VP-floor cap at accept time from this already-gainable-capped
-value.
+gainable())`` at offer-creation time -- Perl's "amount"/"actual" split
+collapses to one number since this engine doesn't track a separate
+"declared vs. capped" pair the way the Perl ``action_required`` record
+does. ``handle_leech`` re-derives *both* the VP-floor cap and a **fresh**
+``gainable()`` cap at accept time (Perl's ``gain_power`` always reads
+live ``P1``/``P2`` bowls, not an offer-time snapshot -- see that
+function's docstring).
 """
 
 from __future__ import annotations
@@ -94,11 +99,37 @@ from dataclasses import replace
 from bgai.data.ledger_parser import ParsedCommand
 from bgai.engine.tm.apply import EngineError, pop_pending, push_pending, register_handler
 from bgai.engine.tm.connectivity import directly_adjacent
+from bgai.engine.tm.factions.hooks import HOOKS, FactionHooks, hooks_for
 from bgai.engine.tm.factions_data import FACTIONS
 from bgai.engine.tm.state import GameState, PendingDecision, with_faction
 from bgai.engine.tm.towns import building_power_value
 
 _WATCH_KIND = "cultist_leech_watch"
+_FIRED_OPTION = "taken_effect_fired"
+
+
+class _CultistsHooks(FactionHooks):
+    """Cultists' ``leech_effect`` (``factions_data.py``): ``on_leech_resolved``
+    is called by :func:`_resolve_cultist_watch` at exactly the two
+    Perl-faithful trigger points (see module docstring) -- ``accepted=True``
+    means "the first accepted offer of this build's batch just resolved"
+    (``leech_effect["taken"]``, unconditional); ``accepted=False`` means
+    "the last offer of an all-declined batch just resolved"
+    (``leech_effect["not_taken"]``, gated by ``errata_cultist_power``).
+    """
+
+    def on_leech_resolved(self, state: GameState, faction: str, accepted: bool) -> GameState:
+        if accepted:
+            return push_pending(
+                state, PendingDecision(faction=faction, kind="cult_choice", amount=1)
+            )
+        if not state.setup.options.errata_cultist_power:
+            return state
+        fs = state.factions[faction]
+        return with_faction(state, faction, replace(fs, power=fs.power.gain(1)))
+
+
+HOOKS["cultists"] = _CultistsHooks()
 
 
 def offers_for_build(state: GameState, builder: str, hex_key: str) -> tuple[PendingDecision, ...]:
@@ -190,13 +221,17 @@ def _find_leech_pending(state: GameState, faction: str, cmd: ParsedCommand) -> i
 def _resolve_cultist_watch(
     state: GameState, resolved: PendingDecision, *, accepted: bool
 ) -> GameState:
-    """Decrement the Cultists watch marker for ``resolved``'s batch, if any.
+    """Update the Cultists watch marker for ``resolved``'s batch, if any,
+    firing ``HOOKS[builder].on_leech_resolved`` at the two Perl-faithful
+    trigger points (module docstring): immediately on the first accept
+    (``accepted=True``, regardless of how many offers in the batch remain
+    unanswered), and once on an all-declined batch's last offer
+    (``accepted=False``, only if the "taken" effect never fired).
 
     No-op for offers with ``amount == 0`` (Perl: only ``actual > 0``
     offers participate in ``leech_not_rejected``/``leech_rejected``) and
     for builds whose builder has no ``leech_effect`` (no watch was ever
-    pushed). See module docstring for the "after ALL offers resolve"
-    simplification this implements.
+    pushed).
     """
     if resolved.amount <= 0:
         return state
@@ -213,40 +248,52 @@ def _resolve_cultist_watch(
         return state
 
     watch = state.pending[idx]
-    remaining = watch.amount - 1
-    accepted_so_far = accepted or watch.options == ("accepted",)
-    new_options: tuple[str, ...] = ("accepted",) if accepted_so_far else ()
-
-    if remaining > 0:
-        new_watch = replace(watch, amount=remaining, options=new_options)
-        return replace(state, pending=state.pending[:idx] + (new_watch,) + state.pending[idx + 1 :])
-
-    new_state = pop_pending(state, idx)
     builder = watch.faction
-    if accepted_so_far:
-        return push_pending(
-            new_state, PendingDecision(faction=builder, kind="cult_choice", amount=1)
+    remaining = watch.amount - 1
+    already_fired = _FIRED_OPTION in watch.options
+
+    new_state = state
+    if accepted and not already_fired:
+        new_state = hooks_for(builder).on_leech_resolved(new_state, builder, True)
+        already_fired = True
+
+    pending = new_state.pending
+    # The watch's own index is unaffected by the hook call above: it only
+    # ever appends (push_pending) or replaces a *different* faction's
+    # resources, never removes/reorders entries ahead of `idx`.
+    if remaining > 0:
+        new_watch = replace(
+            watch, amount=remaining, options=(_FIRED_OPTION,) if already_fired else ()
         )
-    if new_state.setup.options.errata_cultist_power:
-        fs = new_state.factions[builder]
-        new_state = with_faction(new_state, builder, replace(fs, power=fs.power.gain(1)))
+        return replace(new_state, pending=pending[:idx] + (new_watch,) + pending[idx + 1 :])
+
+    new_state = pop_pending(new_state, idx)
+    if not already_fired:
+        new_state = hooks_for(builder).on_leech_resolved(new_state, builder, False)
     return new_state
 
 
 def handle_leech(state: GameState, faction: str, cmd: ParsedCommand) -> GameState:
     """``leech N[ from X]``: accept up to ``N`` power, pay ``N-1`` VP.
 
-    ``N`` is capped by the offer's already-``gainable()``-capped
-    ``amount`` and, per ``command_leech`` (module docstring), by the
-    faction's remaining VP (``min(requested, fs.vp + 1)``). A zero-effect
-    accept (``amount == 0`` on the offer) costs no VP.
+    ``N`` is capped three ways, matching ``command_leech``/``gain_power``
+    (module docstring): by the offer's own ``amount`` (can't claim more
+    than was on offer), by the faction's remaining VP
+    (``min(requested, fs.vp + 1)``), and by the faction's **current**
+    ``Power.gainable()`` -- recomputed fresh here rather than trusting
+    ``pending.amount``'s offer-time snapshot, since Perl's ``gain_power``
+    always reads live ``P1``/``P2`` bowls at accept time: if this faction
+    accepted an earlier offer from the same batch (or otherwise spent
+    power) since this offer was queued, its gainable capacity may now be
+    lower than what was cached on the pending. A zero-effect accept
+    (``actual == 0``) costs no VP.
     """
     idx = _find_leech_pending(state, faction, cmd)
     pending = state.pending[idx]
     fs = state.factions[faction]
 
     requested = cmd.n1 if cmd.n1 is not None else pending.amount
-    actual = min(requested, pending.amount, fs.vp + 1)
+    actual = min(requested, pending.amount, fs.power.gainable(), fs.vp + 1)
     actual = max(actual, 0)
 
     new_fs = fs

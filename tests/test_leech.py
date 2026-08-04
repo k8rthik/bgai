@@ -119,6 +119,35 @@ def test_offers_for_build_zero_gainable_still_enqueues_an_offer() -> None:
     )
 
 
+def test_offers_for_build_multi_opponent_clockwise_order_with_wraparound() -> None:
+    """3+ factions, two adjoining: offers enqueue in seat order starting
+    *after* the builder, wrapping around the end of ``turn_order`` --
+    brief-mandated scenario (Step 2 checklist).
+
+    ``turn_order`` for this game is (engineers, darklings, nomads,
+    mermaids). Builder = nomads (index 2): the rotation is
+    nomads -> mermaids -> engineers -> darklings. mermaids and engineers
+    both have an adjacent building of a different color; darklings does
+    not. Expect offers in exactly that order: mermaids, then engineers
+    (the wraparound past the end of ``turn_order`` back to index 0).
+    """
+    s = _state()
+    assert s.turn_order == ("engineers", "darklings", "nomads", "mermaids")
+    s = _place(s, "mermaids", ANCHOR, "TP", FACTIONS["mermaids"].color)  # power 2
+    s = _place(s, "engineers", NEIGHBOR, "SH", FACTIONS["engineers"].color)  # power 3
+    hexes = dict(s.hexes)
+    hexes[TARGET] = replace(
+        hexes[TARGET], color=FACTIONS["nomads"].color, building=None, owner=None
+    )
+    s = replace(s, hexes=hexes)
+
+    offers = offers_for_build(s, "nomads", TARGET)
+    assert [o.faction for o in offers] == ["mermaids", "engineers"]
+    assert offers[0].amount == 2
+    assert offers[1].amount == 3
+    assert all(o.source == "nomads" for o in offers)
+
+
 def test_offers_for_build_own_color_neighbor_gives_no_offer() -> None:
     s = _state()
     s = _place(s, "engineers", ANCHOR, "D", FACTIONS["engineers"].color)
@@ -216,6 +245,44 @@ def test_cultists_any_accept_pushes_cult_choice_after_batch_resolves() -> None:
 
     s2 = handle_leech(s, "darklings", _cmd("leech", n1=2, target="cultists"))
     assert s2.pending == (PendingDecision(faction="cultists", kind="cult_choice", amount=1),)
+
+
+def test_cultists_first_accept_fires_cult_choice_immediately_mid_batch() -> None:
+    """Two opponents adjacent to a Cultists build: the FIRST accept must
+    push ``cult_choice`` right away, before the second offer resolves --
+    not deferred to batch-end (code review Important-2 fix). A second
+    accept/decline in the same batch must not push a duplicate.
+    """
+    s = _state()
+    factions = dict(s.factions)
+    factions["cultists"] = FactionState.initial(FACTIONS["cultists"])
+    s = replace(s, factions=factions, turn_order=("cultists", "darklings", "nomads"))
+    s = _place(s, "darklings", ANCHOR, "TP", FACTIONS["darklings"].color)
+    s = _place(s, "nomads", NEIGHBOR, "TP", FACTIONS["nomads"].color)
+    hexes = dict(s.hexes)
+    hexes[TARGET] = replace(
+        hexes[TARGET], color=FACTIONS["cultists"].color, building=None, owner=None
+    )
+    s = replace(s, hexes=hexes)
+
+    s = queue_leech(s, "cultists", TARGET)
+    assert len([p for p in s.pending if p.kind == "leech"]) == 2
+    watch = next(p for p in s.pending if p.kind == "cultist_leech_watch")
+    assert watch.amount == 2
+
+    # darklings accepts first -- nomads' offer is still outstanding.
+    s2 = handle_leech(s, "darklings", _cmd("leech", n1=2, target="cultists"))
+    remaining_leech = [p for p in s2.pending if p.kind == "leech"]
+    assert [p.faction for p in remaining_leech] == ["nomads"]
+    assert PendingDecision(faction="cultists", kind="cult_choice", amount=1) in s2.pending
+    remaining_watch = next(p for p in s2.pending if p.kind == "cultist_leech_watch")
+    assert remaining_watch.amount == 1  # batch not fully resolved yet
+
+    # nomads then declines: no second cult_choice, and the watch clears.
+    s3 = handle_decline(s2, "nomads", _cmd("decline", n1=2, target="cultists"))
+    cult_choices = [p for p in s3.pending if p.kind == "cult_choice"]
+    assert cult_choices == [PendingDecision(faction="cultists", kind="cult_choice", amount=1)]
+    assert not any(p.kind == "cultist_leech_watch" for p in s3.pending)
 
 
 def test_cultists_all_decline_grants_power_under_errata_option() -> None:

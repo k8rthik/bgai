@@ -78,13 +78,13 @@ from dataclasses import replace
 from functools import lru_cache
 
 from bgai.data.ledger_parser import ParsedCommand
+from bgai.engine.tm import leech
 from bgai.engine.tm.apply import EngineError, pop_pending, push_pending, register_handler
 from bgai.engine.tm.board import RIVER, base_board
 from bgai.engine.tm.connectivity import clusters, reachable
 from bgai.engine.tm.cults import advance
 from bgai.engine.tm.factions.hooks import hooks_for
 from bgai.engine.tm.factions_data import BRIDGE_COUNT, FACTIONS, TOWN_SIZE
-from bgai.engine.tm.leech import offers_for_build, queue_leech
 from bgai.engine.tm.state import FactionState, GameState, PendingDecision, Phase, with_faction
 from bgai.engine.tm.tiles import FAVOR_TILES
 from bgai.engine.tm.towns import (
@@ -204,14 +204,42 @@ def _plain_town_candidates(state: GameState, faction: str) -> tuple[frozenset[st
     return tuple(result)
 
 
+def _cluster_key(cluster: frozenset[str]) -> str:
+    """Canonical, order-independent string encoding of a hex cluster, used
+    as a ``gain_town`` pending's ``source`` so ``handle_gain_town`` can
+    recover exactly which cluster a pending refers to without having to
+    re-derive "the" qualifying cluster at resolution time (see
+    ``_maybe_queue_town``'s docstring for why that recomputation was
+    unsound).
+    """
+    return ",".join(sorted(cluster))
+
+
 def _maybe_queue_town(state: GameState, faction: str) -> GameState:
+    """Detect newly-qualifying town clusters and queue one ``gain_town``
+    pending each -- **recording** each cluster into ``founded_towns`` at
+    detection time, not at tile-choice time.
+
+    Ports ``towns.pm`` ``detect_towns_from`` marking ``$map{$where}{town}``
+    the moment a cluster qualifies (lines 77-81), *before* a tile is even
+    picked. Recording later (originally: only in ``handle_gain_town``,
+    once ``apply_town_tile`` ran) let a second board change between
+    detection and tile-choice re-detect the *same still-unresolved*
+    cluster (``founded_towns`` hadn't been updated yet) and enqueue a
+    second ``gain_town`` pending for one physical town -- fixed per code
+    review. Each candidate returned by ``_plain_town_candidates`` in one
+    call is a distinct connected component (component clusters are always
+    disjoint), so founding all of them here in one pass cannot itself
+    double-count.
+    """
     candidates = _plain_town_candidates(state, faction)
-    if not candidates:
-        return state
-    pendings = tuple(
-        PendingDecision(faction=faction, kind="gain_town", amount=1) for _ in candidates
-    )
-    return push_pending(state, *pendings)
+    for cluster in candidates:
+        state = record_founded_town(state, faction, cluster)
+        pending = PendingDecision(
+            faction=faction, kind="gain_town", amount=1, source=_cluster_key(cluster)
+        )
+        state = push_pending(state, pending)
+    return state
 
 
 @lru_cache(maxsize=1)
@@ -327,7 +355,7 @@ def handle_build(state: GameState, faction: str, cmd: ParsedCommand) -> GameStat
     new_state = replace(with_faction(state, faction, fs), hexes=new_hexes)
 
     if not setup:
-        new_state = queue_leech(new_state, faction, hex_key)
+        new_state = leech.queue_leech(new_state, faction, hex_key)
 
     return _maybe_queue_town(new_state, faction)
 
@@ -371,7 +399,7 @@ def handle_upgrade(state: GameState, faction: str, cmd: ParsedCommand) -> GameSt
             cmd=cmd,
         )
 
-    offers = offers_for_build(state, faction, hex_key)
+    offers = leech.offers_for_build(state, faction, hex_key)
 
     if new_type == "TP":
         cost = dict(track.cost)
@@ -398,7 +426,7 @@ def handle_upgrade(state: GameState, faction: str, cmd: ParsedCommand) -> GameSt
     if new_type == "SH":
         new_state = hooks_for(faction).on_stronghold_built(new_state, faction)
 
-    new_state = queue_leech(new_state, faction, hex_key, offers=offers)
+    new_state = leech.queue_leech(new_state, faction, hex_key, offers=offers)
     return _maybe_queue_town(new_state, faction)
 
 
@@ -485,23 +513,23 @@ def handle_gain_favor(state: GameState, faction: str, cmd: ParsedCommand) -> Gam
 
 
 def handle_gain_town(state: GameState, faction: str, cmd: ParsedCommand) -> GameState:
+    """Pop the matching ``gain_town`` pending and apply ``cmd.tile`` to the
+    cluster it was queued for (``pending.source``, see
+    ``_maybe_queue_town``/``_cluster_key``). The cluster was already
+    recorded into ``founded_towns`` at *detection* time -- this handler
+    only grants the tile, it does not re-derive or re-record the cluster.
+    """
     assert cmd.tile is not None
     idx = _find_pending(state, faction, "gain_town", cmd)
+    pending = state.pending[idx]
+    assert pending.source is not None, "gain_town pending missing its cluster source"
+
     new_state = pop_pending(state, idx)
-
-    candidates = _plain_town_candidates(new_state, faction)
-    if not candidates:
-        raise EngineError(
-            f"no qualifying town cluster left for {faction}", state=state, faction=faction, cmd=cmd
-        )
-    cluster = min(candidates, key=sorted)
-
     try:
         new_state = apply_town_tile(new_state, faction, cmd.tile)
     except ValueError as exc:
         raise EngineError(str(exc), state=state, faction=faction, cmd=cmd) from exc
-
-    return record_founded_town(new_state, faction, cluster)
+    return new_state
 
 
 register_handler("build", handle_build)

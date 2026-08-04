@@ -14,6 +14,8 @@ import pytest
 
 from bgai.data.ledger_parser import Kind, ParsedCommand
 from bgai.engine.tm.actions_build import (
+    _bridgable_pairs,
+    _maybe_queue_town,
     handle_bridge,
     handle_build,
     handle_gain_favor,
@@ -186,7 +188,22 @@ def test_build_founds_town_when_cluster_qualifies() -> None:
 
     s2 = handle_build(s, "engineers", _cmd("build", loc=TARGET))
     town_pendings = [p for p in s2.pending if p.kind == "gain_town"]
-    assert town_pendings == [PendingDecision(faction="engineers", kind="gain_town", amount=1)]
+    assert len(town_pendings) == 1
+    pending = town_pendings[0]
+    assert pending.faction == "engineers" and pending.amount == 1
+    expected_cluster = frozenset(chain) | {TARGET}
+    assert pending.source is not None
+    assert frozenset(pending.source.split(",")) == expected_cluster
+    # Perl (towns.pm detect_towns_from) marks the town at *detection* time,
+    # not at tile-choice time -- see Important-3 fix.
+    assert s2.founded_towns["engineers"] == (expected_cluster,)
+
+    # Re-running detection (as would happen on a second board-changing
+    # action for this faction before the pending is resolved) must not
+    # re-enqueue a pending for the same already-recorded cluster --
+    # regression test for the duplicate-gain_town-pending bug.
+    s3 = _maybe_queue_town(s2, "engineers")
+    assert [p for p in s3.pending if p.kind == "gain_town"] == town_pendings
 
 
 # --------------------------------------------------------------------------
@@ -296,9 +313,53 @@ def test_upgrade_sh_mermaids_advances_shipping_with_no_vp() -> None:
 
 
 def _bridge_pair() -> tuple[str, str]:
-    from bgai.engine.tm.actions_build import _bridgable_pairs
-
     return tuple(sorted(next(iter(_bridgable_pairs()))))  # type: ignore[return-value]
+
+
+# 29 distinct `bridge X:Y` command pairs extracted from every game in
+# data/raw/games/*.json.gz (script in task-8-report.md). Committed here as
+# a real regression test rather than a one-off manual check: every real
+# bridge ever built in the crawled corpus must be a legal span per
+# `_bridgable_pairs` (map.pm `setup_valid_bridges`, 164-203). 29 is also
+# the map's well-known total legal-bridge count.
+_CORPUS_BRIDGE_PAIRS: tuple[tuple[str, str], ...] = (
+    ("A11", "C5"),
+    ("A3", "C1"),
+    ("A7", "C3"),
+    ("B1", "C1"),
+    ("B1", "D1"),
+    ("B2", "C1"),
+    ("B3", "C3"),
+    ("B4", "C3"),
+    ("B5", "C5"),
+    ("B6", "C5"),
+    ("B6", "D8"),
+    ("C2", "D3"),
+    ("C2", "D4"),
+    ("C2", "E5"),
+    ("C4", "D5"),
+    ("C5", "D6"),
+    ("D6", "E8"),
+    ("D6", "E9"),
+    ("E4", "G1"),
+    ("E8", "G3"),
+    ("F1", "H1"),
+    ("F2", "G1"),
+    ("F2", "H2"),
+    ("F3", "G1"),
+    ("F4", "G3"),
+    ("G2", "H4"),
+    ("G2", "I6"),
+    ("G4", "H5"),
+    ("H6", "I9"),
+)
+
+
+def test_bridgable_pairs_matches_every_real_corpus_bridge() -> None:
+    pairs = _bridgable_pairs()
+    missing = [pair for pair in _CORPUS_BRIDGE_PAIRS if frozenset(pair) not in pairs]
+    assert missing == []
+    assert len(pairs) == len(_CORPUS_BRIDGE_PAIRS) == 29
 
 
 def test_bridge_consumes_pending_and_places_it() -> None:
@@ -430,11 +491,15 @@ def test_gain_town_applies_tile_and_records_founded_cluster() -> None:
     for h in chain:
         s = _place(s, "engineers", h, "TP")  # 4 * power 2 = 8 >= TOWN_SIZE(7), count 4
 
-    s = replace(s, pending=(PendingDecision(faction="engineers", kind="gain_town", amount=1),))
+    s = _maybe_queue_town(s, "engineers")  # realistic detection: records + queues
+    assert [p.kind for p in s.pending] == ["gain_town"]
+    assert s.founded_towns["engineers"] == (frozenset(chain),)
+
     before_pool = s.towns_pool["TW1"]
     s2 = handle_gain_town(s, "engineers", _cmd("gain_town", tile="TW1"))
     assert s2.pending == ()
     assert "TW1" in s2.factions["engineers"].towns
+    assert s2.founded_towns["engineers"] == (frozenset(chain),)  # unchanged, already recorded
     assert s2.towns_pool["TW1"] == before_pool - 1
     assert any(set(chain) <= set(c) for c in s2.founded_towns["engineers"])
 
