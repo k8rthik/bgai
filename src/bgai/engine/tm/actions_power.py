@@ -158,8 +158,12 @@ Ported from the reference implementation (jsnell/terra-mystica, MIT):
   ``strict-chaosmagician-sh`` option only gates ``command_pass``
   (``commands.pm`` 771-773: clamp ``allowed_actions`` to 1 before passing;
   796: forbid passing twice in one round) -- entirely pass-command
-  behavior, so it is a documented no-op here, same as Task 8's other
-  ``strict-*`` findings.
+  behavior, a documented no-op here (this module never sees a ``pass``
+  verb). ``actions_pass.py``'s ``handle_pass`` is where that clamp
+  actually lives (task-14 fix: an earlier revision left it as a no-op
+  there too, which the 10-game sample never disproved since none of
+  those games ever pass with a live ``extra_actions`` balance still
+  banked).
 
 ``-FREE_D``/``-FREE_TP``/``-FREE_TF``/``-BRIDGE`` (``lose_marker``,
 parsed with ``cmd.reason``) are the corpus's "declined the grant" rows --

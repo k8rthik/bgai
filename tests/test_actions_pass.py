@@ -220,6 +220,24 @@ def test_round_6_bare_pass_takes_no_tile() -> None:
     assert fs.coins == before_coins  # no tile taken -> no coin payout
 
 
+def test_pass_clamps_extra_actions_under_strict_chaosmagician_sh() -> None:
+    """Task-14 fix, corpus ``4pLeague_S13_D3L4_G3``/``4pLeague_S16_D2L1_G6``
+    row ``action ACTC; pass`` (both ``strict-chaosmagician-sh``): passing
+    with an unused Chaos Magicians ACTC extra action still banked
+    (``FactionState.extra_actions``) must discard it, mirroring
+    ``commands.pm``'s own clamp (~771-773: forces ``allowed_actions`` to 1
+    right before ``command_pass``'s own decrement) -- otherwise
+    ``round_flow._advance_actions`` treats the faction as still owed more
+    turns it will never actually take (a passed faction never gets
+    another row), stranding ``active_index`` on them for the rest of the
+    game."""
+    s = _state()
+    assert s.setup.options.strict_chaosmagician_sh
+    s = with_faction(s, "engineers", replace(s.factions["engineers"], extra_actions=1))
+    s2 = handle_pass(s, "engineers", _cmd("pass", tile="BON7"))
+    assert s2.factions["engineers"].extra_actions == 0
+
+
 def test_pass_rejects_a_tile_already_held_by_someone_else() -> None:
     s = _state()
     s = _rich(s, "darklings", bonus="BON7")

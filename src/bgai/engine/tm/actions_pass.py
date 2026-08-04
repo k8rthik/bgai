@@ -197,7 +197,22 @@ def handle_pass(state: GameState, faction: str, cmd: ParsedCommand) -> GameState
 
     fs = state.factions[faction]
     vp = _bonus_pass_vp(fs) + _favor_pass_vp(fs) + hooks_for(faction).pass_vp_extra(state, faction)
-    fs = replace(fs, vp=fs.vp + vp, bonus=None, passed=True)
+    # commands.pm ~771-773: "if ($game{options}{'strict-chaosmagician-sh'}
+    # and $faction->{allowed_actions} > 1) { $faction->{allowed_actions} =
+    # 1; }" -- passing with an unused Chaos Magicians ACTC extra action
+    # still banked (this engine's extra_actions, task-14 fix) discards it
+    # rather than leaving the faction "active" for one more turn nobody
+    # ever submits: the round-robin gate (round_flow._advance_actions)
+    # only moves past a faction once its extra_actions has been fully
+    # spent, and a passed faction never gets another real row to spend it
+    # with, stranding active_index on them for the rest of the game
+    # otherwise. actions_power.py's own module docstring previously
+    # documented this option as a no-op here -- true only for the
+    # 10-game sample that never exercised "use ACTC then immediately
+    # pass" (corpus games 4pLeague_S13_D3L4_G3/S16_D2L1_G6 row
+    # ACTC+pass, both strict-chaosmagician-sh).
+    extra_actions = 0 if state.setup.options.strict_chaosmagician_sh else fs.extra_actions
+    fs = replace(fs, vp=fs.vp + vp, bonus=None, passed=True, extra_actions=extra_actions)
     new_state = with_faction(state, faction, fs)
     new_state = replace(new_state, passed_order=new_state.passed_order + (faction,))
 
