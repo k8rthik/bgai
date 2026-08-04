@@ -221,6 +221,25 @@ def test_dropped_faction_is_excluded_from_turn_order(
     assert result.rows_checked > 130
 
 
+def test_dropped_factions_still_standing_building_avoids_the_isolated_tp_surcharge(
+    frames: tuple[pl.DataFrame, pl.DataFrame],
+) -> None:
+    """``4pLeague_S64_D1L1_G6``: alchemists drops at row 276; row 348's
+    nomads ``upgrade E3 to TP`` is directly adjacent to two of
+    alchemists' still-standing dwellings. ``leech.has_leechable_neighbor``
+    fix (that module's docstring, full citation trail): this must not be
+    charged the "isolated" doubled TP cost (6 C) just because alchemists
+    fell out of ``offers_for_build``'s live-faction seat-order walk under
+    ``variable-turn-order`` -- the real ledger charges the un-isolated
+    3 C. A full clean replay (not just past row 348) since this game has
+    no other unrelated mismatches once this fix lands.
+    """
+    moves_df, deltas_df = frames
+    result = replay_game("4pLeague_S64_D1L1_G6", moves_df, deltas_df)
+    assert result.error is None, result.error
+    assert result.mismatches == ()
+
+
 # --------------------------------------------------------------------------
 # Task 14: ACTC compound-turn bundling (round_flow.is_turn_boundary)
 # --------------------------------------------------------------------------

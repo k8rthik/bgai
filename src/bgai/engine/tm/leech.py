@@ -163,20 +163,16 @@ class _CultistsHooks(FactionHooks):
 HOOKS["cultists"] = _CultistsHooks()
 
 
-def offers_for_build(state: GameState, builder: str, hex_key: str) -> tuple[PendingDecision, ...]:
-    """Leech offers triggered by ``builder`` building/upgrading at ``hex_key``.
-
-    One offer per faction with a different-color building directly
-    adjacent (incl. bridges) to ``hex_key``; ``amount`` = that faction's
-    adjacent building power summed by color, capped by
-    ``Power.gainable()``. Enqueued in seat order starting after
-    ``builder`` (``factions_in_order_from``, see module docstring). See
-    the module docstring for why zero-``gainable()`` factions still get an
-    offer.
+def _raw_leech_by_color(state: GameState, builder: str, hex_key: str) -> dict[str, int]:
+    """``map.pm``'s ``compute_leech`` (module docstring): every adjacent
+    hex's building power, bucketed by color, for a *different*-colored
+    building than ``builder``'s -- purely geometric (board state only),
+    independent of turn order, seat order, or any faction's ``dropped``
+    status. ``()`` during setup (``return () if !$game{round}``, same as
+    the caller-level ``state.round == 0`` guard below).
     """
     if state.round == 0:
-        return ()
-
+        return {}
     builder_color = FACTIONS[builder].color
     raw_by_color: dict[str, int] = {}
     for neighbor in directly_adjacent(state, hex_key):
@@ -186,7 +182,67 @@ def offers_for_build(state: GameState, builder: str, hex_key: str) -> tuple[Pend
         raw_by_color[hex_state.color] = raw_by_color.get(hex_state.color, 0) + building_power_value(
             hex_state.building
         )
+    return raw_by_color
 
+
+def has_leechable_neighbor(state: GameState, builder: str, hex_key: str) -> bool:
+    """Whether ``hex_key`` has *any* adjacent different-color building --
+    ``commands.pm``'s ``command_upgrade`` TP-upgrade isolated-surcharge
+    check (``if (!keys %this_leech)``, ~288, where ``%this_leech`` is
+    ``note_leech``'s return, itself ``compute_leech``'s -- commands.pm
+    280 near ``note_leech``). This is a **different** question than
+    "does any offer exist" (``offers_for_build`` below): ``map.pm``'s
+    ``compute_leech`` (~457-468) sums a color's building strength into
+    ``%this_leech`` unconditionally, *before* it ever looks up which
+    living faction currently holds that color
+    (``grep {$_->{color} eq $map_color} factions_in_order(1)`` -- the
+    ``no_dummy=1`` filter that excludes dropped factions, ~461-463) --
+    that lookup's result only feeds the per-faction ``building_strength``
+    override fallback, it never gates whether the color's entry gets
+    added to ``%this_leech`` at all. So a build next to a *dropped*
+    faction's still-standing building is correctly **not** isolated in
+    real Perl, even though that dropped faction of course never receives
+    an actual leech offer for it (a separate mechanism entirely --
+    ``resources.pm``'s ``note_leech`` walks
+    ``factions_in_order_from($from, 1)``, the same ``no_dummy`` filter,
+    to decide *who* gets offered one).
+
+    Task-14 corpus fix: an earlier revision used ``bool(offers_for_build(
+    ...))`` for this check, conflating the two -- wrong the moment a
+    dropped faction's color falls out of ``offers_for_build``'s own
+    seat-order walk (``state.turn_order``, which shrinks to only
+    currently-passing/live factions every round under
+    ``variable-turn-order``, ``round_flow.end_of_round``'s own
+    ``passed_order`` branch -- a dropped faction never explicitly passes
+    again, so it simply stops appearing there). Corpus:
+    ``4pLeague_S64_D1L1_G6`` row 348, nomads' ``upgrade E3 to TP``: E3 is
+    directly adjacent to two of *dropped* alchemists' still-standing
+    dwellings (E2, D2) -- the real ledger charges the un-isolated 3 C,
+    not the doubled 6 C ``bool(offers_for_build(...))`` produced once
+    alchemists (dropped at row 276) had already fallen out of
+    ``turn_order``.
+    """
+    return bool(_raw_leech_by_color(state, builder, hex_key))
+
+
+def offers_for_build(state: GameState, builder: str, hex_key: str) -> tuple[PendingDecision, ...]:
+    """Leech offers triggered by ``builder`` building/upgrading at ``hex_key``.
+
+    One offer per **live** (not ``FactionState.dropped``) faction with a
+    different-color building directly adjacent (incl. bridges) to
+    ``hex_key``; ``amount`` = that faction's adjacent building power
+    summed by color, capped by ``Power.gainable()``. Enqueued in seat
+    order starting after ``builder`` (``factions_in_order_from``, see
+    module docstring) -- ``resources.pm``'s ``note_leech`` walks
+    ``factions_in_order_from($from, 1)``, the ``no_dummy=1`` variant that
+    excludes dropped factions (``acting.pm``'s own ``!dropped`` filter),
+    so a dropped faction never receives an offer here even though its
+    still-standing building's color can still make a build "not isolated"
+    for cost purposes -- see ``has_leechable_neighbor`` above for that
+    separate check. See the module docstring for why zero-``gainable()``
+    factions still get an offer.
+    """
+    raw_by_color = _raw_leech_by_color(state, builder, hex_key)
     if not raw_by_color:
         return ()
 
@@ -195,7 +251,7 @@ def offers_for_build(state: GameState, builder: str, hex_key: str) -> tuple[Pend
 
     offers = []
     for faction in seat_order:
-        if faction == builder:
+        if faction == builder or state.factions[faction].dropped:
             continue
         raw = raw_by_color.get(FACTIONS[faction].color)
         if not raw:

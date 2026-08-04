@@ -20,6 +20,7 @@ from bgai.engine.tm.leech import (
     handle_cultist_leech_bonus,
     handle_decline,
     handle_leech,
+    has_leechable_neighbor,
     offers_for_build,
     queue_leech,
 )
@@ -169,6 +170,61 @@ def test_offers_for_build_own_color_neighbor_gives_no_offer() -> None:
     hexes[TARGET] = replace(hexes[TARGET], color=FACTIONS["engineers"].color)
     s = replace(s, hexes=hexes)
     assert offers_for_build(s, "engineers", TARGET) == ()
+
+
+def test_offers_for_build_excludes_a_dropped_opponent() -> None:
+    """``resources.pm``'s ``note_leech`` walks
+    ``factions_in_order_from($from, 1)`` -- the ``no_dummy=1`` variant
+    that excludes dropped factions -- so a dropped opponent's adjacent
+    building generates no offer, even though the color's raw strength is
+    still there (``has_leechable_neighbor``, next test)."""
+    s = _seeded()
+    dropped_fs = replace(s.factions["darklings"], dropped=True)
+    s = with_faction(s, "darklings", dropped_fs)
+    assert offers_for_build(s, "engineers", TARGET) == ()
+
+
+# --------------------------------------------------------------------------
+# has_leechable_neighbor (task-14 fix: TP-upgrade isolation surcharge)
+# --------------------------------------------------------------------------
+
+
+def test_has_leechable_neighbor_true_for_ordinary_adjacent_opponent() -> None:
+    s = _seeded()
+    assert has_leechable_neighbor(s, "engineers", TARGET) is True
+
+
+def test_has_leechable_neighbor_false_with_no_adjacent_opponent() -> None:
+    s = _state()
+    s = _place(s, "engineers", ANCHOR, "D", FACTIONS["engineers"].color)
+    assert has_leechable_neighbor(s, "engineers", TARGET) is False
+
+
+def test_has_leechable_neighbor_false_at_round_zero() -> None:
+    s = _seeded()
+    s = replace(s, round=0)
+    assert has_leechable_neighbor(s, "engineers", TARGET) is False
+
+
+def test_has_leechable_neighbor_stays_true_for_a_dropped_opponents_building() -> None:
+    """Task-14 corpus fix: ``4pLeague_S64_D1L1_G6`` row 348, nomads'
+    ``upgrade E3 to TP`` -- E3 is directly adjacent to two of *dropped*
+    alchemists' still-standing dwellings. Real Perl's ``compute_leech``
+    (module docstring's full citation trail) sums a color's building
+    strength into ``%this_leech`` before it ever looks up which *living*
+    faction currently holds that color, so a dropped opponent's building
+    still counts here -- unlike ``offers_for_build``, which correctly
+    never queues that dropped faction an actual offer for it (previous
+    test). An earlier revision used ``bool(offers_for_build(...))`` for
+    the isolation check in ``actions_build.handle_upgrade``, which came
+    out wrongly isolated (doubled cost) the moment the dropped faction
+    fell out of ``offers_for_build``'s seat-order walk.
+    """
+    s = _seeded()
+    dropped_fs = replace(s.factions["darklings"], dropped=True)
+    s = with_faction(s, "darklings", dropped_fs)
+    assert offers_for_build(s, "engineers", TARGET) == ()
+    assert has_leechable_neighbor(s, "engineers", TARGET) is True
 
 
 # --------------------------------------------------------------------------

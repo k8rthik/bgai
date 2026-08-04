@@ -648,7 +648,12 @@ def handle_upgrade(state: GameState, faction: str, cmd: ParsedCommand) -> GameSt
         cost: dict[str, int] = {}
     elif new_type == "TP":
         cost = dict(track.cost)
-        if not offers:  # no adjacent opponent building -> isolated surcharge
+        # Isolated-surcharge check: purely geometric adjacency
+        # (``leech.has_leechable_neighbor`` docstring), **not**
+        # ``bool(offers)`` -- a dropped faction's still-standing adjacent
+        # building still counts here even though it never receives an
+        # actual offer in ``offers`` itself (task-14 fix).
+        if not leech.has_leechable_neighbor(state, faction, hex_key):
             cost["C"] = cost.get("C", 0) * 2
     else:
         cost = track.cost
