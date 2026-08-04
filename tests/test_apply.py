@@ -206,6 +206,36 @@ def test_darklings_sh_convert_w_to_p_exceeding_allowance_raises() -> None:
     assert s.pending == (PendingDecision(faction="darklings", kind="convert_w_to_p", amount=2),)
 
 
+def test_darklings_sh_convert_w_to_p_clamps_the_gain_to_priest_pool() -> None:
+    """``resources.pm``'s ``adjust_resource`` generic branch clamps *any*
+    positive delta of a resource with a live faction-level ``MAX_$type``
+    entry (``MAX_P`` is this engine's ``priest_pool`` -- ``towns.py``'s
+    ``apply_town_tile``/``actions_power.py``'s ACT2 docstrings have the
+    full citation trail). ``handle_convert``'s Darklings SH W->P path used
+    a bare ``_with_resource_delta`` with no ceiling, over-crediting a
+    faction that had already sent priests to cult tracks (task-14 fix,
+    corpus ``4pLeague_S70_D3L3_G4`` row 281: darklings' ``priest_pool`` is
+    already down to 7 by then -- 1 priest sent to a cult track -- so
+    converting 3 W to 3 P should only land 3 P if room allows, but here
+    priests=5/priest_pool=6 leaves room for only 1 more). The W is still
+    spent in full; only the P gain clamps.
+    """
+    s = _as_active(_state(), "darklings")
+    s = push_pending(s, PendingDecision(faction="darklings", kind="convert_w_to_p", amount=3))
+    s = with_faction(
+        s, "darklings", replace(s.factions["darklings"], workers=5, priests=5, priest_pool=6)
+    )
+    cmd = _cmd("convert", n1=3, res1="W", n2=3, res2="P")
+    s2 = apply(s, "darklings", cmd)
+    fs = s2.factions["darklings"]
+    assert fs.workers == 5 - 3  # W is spent in full regardless of the P clamp
+    assert fs.priests == 6  # clamped to priest_pool, not 5 + 3 = 8
+    # The SH allowance is still metered by the requested amount, not the
+    # clamped gain -- Perl's own allowance counter tracks W spent, not P
+    # actually received.
+    assert s2.pending == ()
+
+
 def test_darklings_sh_convert_w_to_p_rate_must_stay_1_to_1() -> None:
     s = _as_active(_state(), "darklings")
     s = push_pending(s, PendingDecision(faction="darklings", kind="convert_w_to_p", amount=3))

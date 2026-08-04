@@ -266,6 +266,23 @@ def _with_resource_delta(
             faction=faction,
             cmd=cmd,
         )
+    if res == "P":
+        # resources.pm's adjust_resource generic branch clamps any positive
+        # delta of a resource with a live faction-level MAX_$type entry;
+        # MAX_P is this engine's priest_pool (actions_power.py's ACT2
+        # docstring/towns.py's town-tile-P-gain docstring have the full
+        # citation trail -- command_send, commands.pm line 333, permanently
+        # decrements MAX_P by 1 per priest committed to a cult-track slot).
+        # towns.py's apply_town_tile and actions_power.py's ACT2 gain both
+        # already clamp their own P grants; this shared helper (also used
+        # by handle_convert's Darklings SH W->P allowance, handle_lose_
+        # resource, and any other bare P delta) needs the same clamp so no
+        # caller can silently over-credit a faction that already sent
+        # priests to cult tracks (task-14 fix, corpus 4pLeague_S70_D3L3_G4
+        # row 281: darklings' SH-granted "convert 3W to 3P" over-credits by
+        # 1 P once darklings' own priest_pool is already below 8/8, a
+        # persistent +1 P shortfall for the rest of the game).
+        new_value = min(new_value, fs.priest_pool)
     return replace(fs, **{_RESOURCE_ATTR[res]: new_value})
 
 
