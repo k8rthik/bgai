@@ -116,6 +116,35 @@ def test_first_ten_games_replay_clean(frames: tuple[pl.DataFrame, pl.DataFrame])
 
 
 # --------------------------------------------------------------------------
+# Task 14: a round missing one faction's cult_income_for_faction row
+# entirely must not strand the harness in Phase.CLEANUP forever
+# --------------------------------------------------------------------------
+
+
+def test_missing_cult_income_row_does_not_strand_the_harness_in_cleanup(
+    frames: tuple[pl.DataFrame, pl.DataFrame],
+) -> None:
+    """``4pLeague_S11_D3L1_G5``: the raw ledger's round 1->2 transition
+    (verified directly against the crawled game JSON) has
+    ``cult_income_for_faction`` rows for cultists (x2)/witches/
+    chaosmagicians but *none* for darklings -- a genuine ledger gap, not a
+    parsing bug. ``_advance_after_row``'s old "wait for every faction's
+    cult_income_for_faction row" gate never fires when a faction's row is
+    simply absent, stranding the harness in ``Phase.CLEANUP`` for the rest
+    of the game -- eventually a hard error much later (row 128,
+    ``EngineError: power action space ACT4 is blocked this round``, since
+    ``command_start``'s per-round unblock never ran either). Seeing a
+    round's first ``other_income_for_faction`` row while still in CLEANUP
+    is itself proof the cult-income phase has ended, missing rows or not.
+    """
+    moves_df, deltas_df = frames
+    result = replay_game("4pLeague_S11_D3L1_G5", moves_df, deltas_df)
+    assert result.error is None, result.error
+    assert result.mismatches == ()
+    assert result.rows_checked > 300
+
+
+# --------------------------------------------------------------------------
 # Task 14: ACTC compound-turn bundling (round_flow.is_turn_boundary)
 # --------------------------------------------------------------------------
 

@@ -42,7 +42,14 @@ check each row so a same-row ``all_income_for_faction`` batch
 (``merge-income-phases``, not exercised by the reference game or the
 first 10 corpus games -- see this module's tests) can't spuriously fire
 ``begin_actions`` off carry-over bookkeeping from the ``end_of_round``
-call that just ran.
+call that just ran. A faction's ``cult_income_for_faction`` row can be
+missing from the ledger entirely (a genuine corpus gap, not a parsing
+bug -- verified directly against the raw crawled JSON, task-14 fix:
+``4pLeague_S11_D3L1_G5``'s round 1->2 transition simply never emits one
+for darklings), so "every faction accounted for" can never become true on
+its own; seeing the round's first ``other_income_for_faction`` row while
+still in ``Phase.CLEANUP`` is itself proof the cult-income phase ended
+regardless, and forces ``end_of_round`` early in that case.
 
 **Deltas oracle.** After every command of a ledger row has been applied
 (and any phase transition above has run), if ``deltas.parquet`` has a row
@@ -85,6 +92,13 @@ _MAIN_TRACK_VERBS = frozenset(
 )
 _OTHER_INCOME_VERBS = frozenset({"other_income_for_faction", "all_income_for_faction"})
 _CULT_INCOME_VERBS = frozenset({"cult_income_for_faction", "all_income_for_faction"})
+# Split ``other_income_for_faction`` back out from ``_OTHER_INCOME_VERBS``
+# for the "cult-income phase implicitly ended" check below -- that check
+# must not also fire on ``all_income_for_faction`` (the merge-income-phases
+# option, still deferred per the task brief) the moment its first faction's
+# row lands, since that verb legitimately opens *both* phases' bookkeeping
+# on its own, phase-agnostically, in one row.
+_PURE_OTHER_INCOME_VERBS = frozenset({"other_income_for_faction"})
 
 _MOVES_PATH = Path("data/datasets/moves.parquet")
 _DELTAS_PATH = Path("data/datasets/deltas.parquet")
@@ -257,6 +271,20 @@ def _advance_after_row(
     cult_income_done: set[str],
 ) -> tuple[GameState, set[str], set[str]]:
     for cmd in cmds:
+        if cmd.verb in _PURE_OTHER_INCOME_VERBS and state.phase == Phase.CLEANUP:
+            # A round's other_income_for_faction rows only ever start once
+            # the cult-income phase has genuinely ended -- so seeing one
+            # while still in CLEANUP is itself proof the cult-income phase
+            # is over, even if not every faction actually got a
+            # cult_income_for_faction row (the ledger can just be missing
+            # one entirely: task-14 fix, corpus ``4pLeague_S11_D3L1_G5``,
+            # darklings never gets a round 1->2 cult_income_for_faction row
+            # at all, so the "wait for every faction" gate below would
+            # otherwise never fire and strand the harness in Phase.CLEANUP
+            # for the rest of the game).
+            state = end_of_round(state)
+            cult_income_done = set()
+            other_income_done = set()
         if cmd.verb in _OTHER_INCOME_VERBS:
             other_income_done.add(faction)
         if cmd.verb in _CULT_INCOME_VERBS:
