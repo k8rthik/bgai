@@ -346,6 +346,29 @@ def test_setup_bonus_reverse_order_then_round_1_income() -> None:
     assert s.turn_order == s.setup.factions
 
 
+def test_setup_bonus_transition_bumps_coins_on_every_untaken_tile() -> None:
+    """Reference-game row 83: nomads takes BON7 (untouched by any of the
+    4 SETUP_BONUS picks -- BON1/BON5/BON3/BON4 above) for exactly 1 C,
+    still within round 1's own ACTIONS phase (round 1's own cleanup
+    hasn't run yet). Only explained by ``command_start``'s bonus-coin
+    bump firing on *every* round transition, including 0 -> 1
+    (``_bumped_bonus_coins``'s own docstring; task-13 report)."""
+    s = GameState.initial(load_setup(GAME_ID))
+    s = start_setup(s)
+    for faction, hex_key in _REFERENCE_SETUP_ROWS:
+        s = apply(s, faction, _cmd("build", loc=hex_key))
+        s = advance_turn(s)
+    for faction, tile in zip(
+        tuple(reversed(s.setup.factions)), ("BON1", "BON5", "BON3", "BON4"), strict=True
+    ):
+        s = apply(s, faction, _cmd("pass", tile=tile))
+        s = advance_turn(s)
+    assert s.phase == Phase.INCOME and s.round == 1
+    taken = {"BON1", "BON5", "BON3", "BON4"}
+    for tile in s.setup.bonus_tiles:
+        assert s.bonus_coins[tile] == (0 if tile in taken else 1)
+
+
 def test_setup_dwellings_snake_order_reproduces_chaos_magicians_game() -> None:
     """Second, independent corpus game (no Nomads): exercises the
     single-dwelling-faction-placed-last branch of ``acting.pm``'s

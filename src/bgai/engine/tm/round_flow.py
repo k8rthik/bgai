@@ -372,6 +372,28 @@ def begin_actions(state: GameState) -> GameState:
 # --------------------------------------------------------------------------
 
 
+def _bumped_bonus_coins(state: GameState) -> dict[str, int]:
+    """+1 coin on every bonus tile no faction currently holds
+    (``commands.pm`` ``command_start``, lines 899-904: ``for (keys
+    %{$game{pool}}) { next if !/^BON/; next if !$game{pool}{$_};
+    $game{bonus_coins}{$_}{C}++; }``). ``command_start`` fires on *every*
+    round transition, including the very first (``$game{round}++`` from 0
+    to 1) -- this is why ``_advance_setup_bonus`` below calls this helper
+    too, not just ``end_of_round`` (module docstring's own "Bonus-tile
+    coin accumulation" section already cites this exact mechanic; task-13
+    report, reference-game row 83 -- nomads takes BON7 for 1 C at row 83,
+    still round 1's own ACTIONS phase, which only checks out if BON7
+    already carried 1 accumulated coin from the SETUP_BONUS -> round-1
+    transition, since round 1's own cleanup hasn't happened yet by then).
+    """
+    held_bonus = {fs.bonus for fs in state.factions.values() if fs.bonus is not None}
+    new_bonus_coins = dict(state.bonus_coins)
+    for tile in state.setup.bonus_tiles:
+        if tile not in held_bonus:
+            new_bonus_coins[tile] = new_bonus_coins.get(tile, 0) + 1
+    return new_bonus_coins
+
+
 def end_of_round(state: GameState) -> GameState:
     """``Phase.CLEANUP`` -> next round's ``Phase.INCOME`` (or
     ``Phase.FINISHED`` after round 6) -- module docstring, Task 12
@@ -381,11 +403,7 @@ def end_of_round(state: GameState) -> GameState:
     if state.phase != Phase.CLEANUP:
         raise ValueError(f"end_of_round called outside Phase.CLEANUP (got {state.phase})")
 
-    held_bonus = {fs.bonus for fs in state.factions.values() if fs.bonus is not None}
-    new_bonus_coins = dict(state.bonus_coins)
-    for tile in state.setup.bonus_tiles:
-        if tile not in held_bonus:
-            new_bonus_coins[tile] = new_bonus_coins.get(tile, 0) + 1
+    new_bonus_coins = _bumped_bonus_coins(state)
 
     new_factions = {
         name: replace(
@@ -455,8 +473,15 @@ def _advance_setup_bonus(state: GameState) -> GameState:
     next_index = state.active_index + 1
     if next_index < len(state.turn_order):
         return replace(state, active_index=next_index)
+    # command_start's bonus-coin bump fires here too (_bumped_bonus_coins'
+    # own docstring) -- this is round 1's "$game{round}++", from 0 to 1.
     return replace(
-        state, phase=Phase.INCOME, round=1, turn_order=state.setup.factions, active_index=0
+        state,
+        phase=Phase.INCOME,
+        round=1,
+        turn_order=state.setup.factions,
+        active_index=0,
+        bonus_coins=_bumped_bonus_coins(state),
     )
 
 
