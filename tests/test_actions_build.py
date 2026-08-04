@@ -663,3 +663,28 @@ def test_gain_town_without_pending_rejected() -> None:
     s = _state()
     with pytest.raises(EngineError):
         handle_gain_town(s, "engineers", _cmd("gain_town", tile="TW1"))
+
+
+def test_gain_town_tw5_drives_cult_advance_on_all_four_tracks() -> None:
+    """Reference-game row 203: darklings' TW5 grant (``gain={"KEY": 1,
+    "FIRE": 1, "WATER": 1, "EARTH": 1, "AIR": 1}``) must step all four
+    cult tracks and apply any threshold power -- ``apply_town_tile``
+    itself deliberately leaves those four keys unapplied (``towns.py``'s
+    own docstring); ``handle_gain_town`` is the "caller" that docstring
+    says must drive ``cults.advance`` (task-13 report)."""
+    s = _state()
+    fs = replace(s.factions["engineers"], keys=1)
+    s = with_faction(s, "engineers", fs)
+    s = replace(
+        s,
+        cults={**s.cults, "engineers": {"FIRE": 2, "WATER": 4, "EARTH": 9, "AIR": 0}},
+        pending=(PendingDecision(faction="engineers", kind="gain_town", source="cluster"),),
+    )
+    s2 = handle_gain_town(s, "engineers", _cmd("gain_town", tile="TW5"))
+    assert s2.cults["engineers"] == {"FIRE": 3, "WATER": 5, "EARTH": 10, "AIR": 1}
+    # FIRE crosses 3 (+1), WATER crosses 5 (+2), EARTH's 10 costs the key (+3): 6 total.
+    assert s2.factions["engineers"].power.as_str() == "0/9/3"  # started 3/9/0, gain(6)
+    # started with 1 key; TW5 itself grants +1 (apply_town_tile's own KEY
+    # gain), then crossing EARTH's 10 spends 1 -- net back to 1.
+    assert s2.factions["engineers"].keys == 1
+    assert s2.cult_10["EARTH"] == "engineers"

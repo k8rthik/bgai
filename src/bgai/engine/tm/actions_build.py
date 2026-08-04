@@ -120,7 +120,7 @@ from bgai.engine.tm.cults import advance
 from bgai.engine.tm.factions.hooks import hooks_for
 from bgai.engine.tm.factions_data import BRIDGE_COUNT, FACTIONS, TOWN_SIZE
 from bgai.engine.tm.state import FactionState, GameState, PendingDecision, Phase, with_faction
-from bgai.engine.tm.tiles import FAVOR_TILES, scored_vp
+from bgai.engine.tm.tiles import FAVOR_TILES, TOWN_TILES, scored_vp
 from bgai.engine.tm.towns import (
     apply_town_tile,
     building_power_value,
@@ -131,6 +131,7 @@ from bgai.engine.tm.towns import (
 _UPGRADE_FROM: dict[str, str] = {"TP": "D", "TE": "TP", "SH": "TP", "SA": "TE"}
 _COST_RES: dict[str, str] = {"W": "workers", "C": "coins"}
 _FAV5_TOWN_SIZE_DELTA = FAVOR_TILES["FAV5"].passive.get("TOWN_SIZE", 0)
+_TOWN_CULT_GAIN_KEYS = ("FIRE", "WATER", "EARTH", "AIR")
 
 
 # --------------------------------------------------------------------------
@@ -714,6 +715,56 @@ def handle_gain_favor(state: GameState, faction: str, cmd: ParsedCommand) -> Gam
     return replace(new_state, pending=_consume_amount(new_state.pending, idx, 1))
 
 
+def _apply_town_cult_gains(state: GameState, faction: str, tile: str) -> GameState:
+    """Drive ``cults.advance`` for ``tile``'s FIRE/WATER/EARTH/AIR gain
+    keys (TW5/TW6) -- ``towns.py``'s own docstring leaves these
+    deliberately unapplied by ``apply_town_tile`` ("do NOT import cult
+    logic here; just expose the gain... the caller must read
+    ``TOWN_TILES[tile].gain`` for these keys and drive ``cults.advance``
+    itself"). This handler is that caller. A small local port of
+    ``apply.py``'s private ``_advance_track``/``_apply_cult_advance`` fold
+    (not imported -- those are module-internal helpers, and this module
+    already keeps its own copies of comparable per-faction folds
+    elsewhere, e.g. ``_apply_spade_gain_bonus``) -- one track at a time,
+    so a threshold crossed on an earlier track in the same grant can't
+    affect a later one's key/blocked bookkeeping.
+
+    Missing this was a real engine bug, not a documented deferral: the
+    task brief for towns.py explicitly named this the caller's job, but
+    no caller existed before this replay harness ran the reference game
+    end to end (task-13 report, row 203: darklings' TW5 grant should add
+    1 step to all four cult tracks -- and the power crossing FIRE=3,
+    WATER=5, EARTH=8 grants -- but nothing drove it).
+    """
+    gain = TOWN_TILES[tile].gain
+    for cult in _TOWN_CULT_GAIN_KEYS:
+        steps = gain.get(cult, 0)
+        if not steps:
+            continue
+        fs = state.factions[faction]
+        result = advance(
+            state.cults[faction][cult],
+            steps,
+            keys_available=fs.keys,
+            track_open=state.cult_10[cult] is None,
+        )
+        new_cults = {f: dict(v) for f, v in state.cults.items()}
+        new_cults[faction][cult] = result.new_value
+        new_cult_10 = dict(state.cult_10)
+        new_keys = fs.keys
+        new_cult_blocked = fs.cult_blocked
+        if result.key_spent:
+            new_keys -= 1
+            new_cult_10[cult] = faction
+        if result.blocked_at_9:
+            new_cult_blocked = fs.cult_blocked | {cult}
+        new_fs = replace(
+            fs, power=fs.power.gain(result.power_gained), keys=new_keys, cult_blocked=new_cult_blocked
+        )
+        state = with_faction(replace(state, cults=new_cults, cult_10=new_cult_10), faction, new_fs)
+    return state
+
+
 def handle_gain_town(state: GameState, faction: str, cmd: ParsedCommand) -> GameState:
     """Pop the matching ``gain_town`` pending and apply ``cmd.tile`` to the
     cluster it was queued for (``pending.source``, see
@@ -738,7 +789,7 @@ def handle_gain_town(state: GameState, faction: str, cmd: ParsedCommand) -> Game
         new_state = apply_town_tile(new_state, faction, cmd.tile)
     except ValueError as exc:
         raise EngineError(str(exc), state=state, faction=faction, cmd=cmd) from exc
-    return new_state
+    return _apply_town_cult_gains(new_state, faction, cmd.tile)
 
 
 register_handler("build", handle_build)
