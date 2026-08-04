@@ -188,6 +188,23 @@ def test_accept_leech_amount_defaults_to_offer_amount() -> None:
     assert s2.factions["darklings"].vp == 19
 
 
+def test_accept_leech_with_target_matches_regardless_of_requested_amount() -> None:
+    """Reference-game row 155: nomads' offer amount is capped to 1 at
+    offer-creation time (``gainable()`` had already dropped), but the
+    ledger row still reads ``leech 2 from engineers`` -- a *request*, not
+    a promise (module docstring's ``_find_leech_pending`` citation).  With
+    an explicit ``from X`` clause, the offer's ``source`` alone
+    disambiguates; ``cmd.n1`` no longer has to equal the offer's cached
+    ``amount`` for the row to be found at all -- ``handle_leech`` still
+    caps the *actual* gain down to whatever's affordable.
+    """
+    s = _seeded()  # offer amount 2 (opponent TP, power 2)
+    s = queue_leech(s, "engineers", TARGET)
+    s2 = handle_leech(s, "darklings", _cmd("leech", n1=5, target="engineers"))
+    assert s2.pending == ()
+    assert s2.factions["darklings"].power.as_str() == "3/9/0"  # capped to the offer's own 2
+
+
 def test_decline_leech_is_free() -> None:
     s = _seeded()
     s = queue_leech(s, "engineers", TARGET)
