@@ -772,8 +772,12 @@ def handle_gain_favor(state: GameState, faction: str, cmd: ParsedCommand) -> Gam
     if result.key_spent:
         new_keys -= 1
         new_cult_10[favor.cult] = faction
+        # See `_advance_cult_track`'s identical fix/citation: a track that
+        # now successfully crosses is no longer blocked, even if an
+        # earlier same-turn grant had parked it at 9.
+        new_cult_blocked = new_cult_blocked - {favor.cult}
     if result.blocked_at_9:
-        new_cult_blocked = fs.cult_blocked | {favor.cult}
+        new_cult_blocked = new_cult_blocked | {favor.cult}
     fs = replace(
         fs, power=fs.power.gain(result.power_gained), keys=new_keys, cult_blocked=new_cult_blocked
     )
@@ -827,8 +831,23 @@ def _advance_cult_track(state: GameState, faction: str, cult: str, steps: int) -
     if result.key_spent:
         new_keys -= 1
         new_cult_10[cult] = faction
+        # A track that was previously parked at 9 for lack of a key (an
+        # earlier same-turn grant) and *now* successfully crosses is no
+        # longer blocked -- task-14 fix, corpus `4pLeague_S13_D2L1_G2` row
+        # 339: FAV5 blocks FIRE at 9 (0 keys); TW5's own +1-to-all-four
+        # grant, applied right after, both crosses FIRE to 10 (using TW5's
+        # own key) *and* blocks AIR at 9 (also crossing, but the key is
+        # already spent on FIRE) -- leaving `cult_blocked={FIRE, AIR}`
+        # even though FIRE is no longer blocked. TW8's own +1 key then
+        # arrives via `_retry_blocked_cults`, whose `keys >= len(blocked)`
+        # gate (1 >= 2, false) wrongly counts FIRE against the budget it
+        # needs to retry AIR alone, permanently stranding AIR at 9. Without
+        # this clear, a track can never leave `cult_blocked` except via a
+        # full-batch `_retry_blocked_cults` success or the next turn's
+        # reset, even after resolving on its own.
+        new_cult_blocked = new_cult_blocked - {cult}
     if result.blocked_at_9:
-        new_cult_blocked = fs.cult_blocked | {cult}
+        new_cult_blocked = new_cult_blocked | {cult}
     new_fs = replace(
         fs, power=fs.power.gain(result.power_gained), keys=new_keys, cult_blocked=new_cult_blocked
     )

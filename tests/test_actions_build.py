@@ -1024,6 +1024,43 @@ def test_gain_town_leaves_multiple_blocked_cults_alone_until_keys_cover_all_of_t
     assert s2.factions["nomads"].keys == 1  # banked, not spent -- not enough to cover both yet
 
 
+def test_advance_cult_track_clears_a_stale_block_once_the_track_crosses() -> None:
+    """Task-14 phase-4 fix, corpus ``4pLeague_S13_D2L1_G2`` row 339:
+    chaosmagicians' ``gain_favor FAV5`` blocks FIRE at 9 (0 keys) earlier
+    in the same turn. The very next command, ``gain_town TW5`` (+1 KEY,
+    +1 to all four cult tracks), both crosses FIRE to 10 (using TW5's own
+    key -- FIRE was already a contender at 9) *and* newly blocks AIR at 9
+    (also crossing, but the key is already spent on FIRE). Before this
+    fix, ``_advance_cult_track`` only ever *added* to ``cult_blocked``,
+    never removed a track that successfully crossed -- leaving
+    ``cult_blocked == {FIRE, AIR}`` even though FIRE is no longer blocked.
+    A later ``gain_town TW8`` (+1 key) should retry AIR alone (``keys(1)
+    >= len(blocked)(1)``), but the stale FIRE entry inflated the gate to
+    ``len(blocked) == 2``, permanently stranding AIR at 9.
+    """
+    s = _state()
+    fs = replace(s.factions["engineers"], keys=0, cult_blocked=frozenset({"FIRE"}))
+    s = with_faction(s, "engineers", fs)
+    s = replace(
+        s,
+        cults={**s.cults, "engineers": {"FIRE": 9, "WATER": 0, "EARTH": 6, "AIR": 9}},
+        cult_10={**s.cult_10, "FIRE": None, "AIR": None},
+        pending=(PendingDecision(faction="engineers", kind="gain_town", source="cluster"),),
+    )
+    s2 = handle_gain_town(s, "engineers", _cmd("gain_town", tile="TW5"))
+    assert s2.cults["engineers"]["FIRE"] == 10  # crossed, using TW5's own key
+    assert s2.cults["engineers"]["AIR"] == 9  # blocked -- the key is already spent
+    assert s2.factions["engineers"].cult_blocked == frozenset({"AIR"})  # not {"FIRE", "AIR"}
+
+    # A later TW8 (+1 key) must now retry AIR alone and succeed.
+    s2 = replace(
+        s2, pending=(PendingDecision(faction="engineers", kind="gain_town", source="cluster2"),)
+    )
+    s3 = handle_gain_town(s2, "engineers", _cmd("gain_town", tile="TW8"))
+    assert s3.cults["engineers"]["AIR"] == 10
+    assert s3.factions["engineers"].cult_blocked == frozenset()
+
+
 def test_gain_town_tw7_drives_shipping_advance_vp() -> None:
     """Reference-game row 210: nomads' TW7 grant (``gain={"KEY": 1,
     "VP": 4, "GAIN_SHIP": 1, "carpet_range": 1}``) must also bump
