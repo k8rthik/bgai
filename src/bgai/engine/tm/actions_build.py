@@ -233,6 +233,34 @@ def _directly_adjacent_to_own_building(state: GameState, faction: str, hex_key: 
     return any(hex_key in board.adjacent.get(b, frozenset()) for b in own)
 
 
+def _advance_shipping(faction: str, fs: FactionState, units: int) -> FactionState:
+    """Port of ``resources.pm``'s ``adjust_resource`` ``GAIN_(TELEPORT|SHIP)``
+    branch (250-262 area) for the ``ship`` track specifically: for each
+    unit, so long as the track isn't already maxed, grant
+    ``ShippingTrack.advance_vp[current level]`` VP (indexed by the level
+    *before* the bump -- the same convention ``actions_pass.py``'s
+    ``handle_advance`` already uses for a player-invoked ``advance ship``
+    row) and bump the level by one. Shared by ``_apply_build_gain``'s
+    ``GAIN_SHIP`` case below (a build_gain SH grant, e.g. Mermaids') and
+    ``handle_gain_town``'s TW7 wiring -- both are just a different Perl
+    call site feeding the exact same ``adjust_resource(faction,
+    'GAIN_SHIP', N)`` branch. Missing this was a real bug, not a harmless
+    deferral: Nomads' own ``advance_vp`` table (2/3/4 VP per level) is
+    nonzero, so silently dropping it produces a wrong VP total (task-13
+    report, reference-game row 210: nomads' TW7 grant bumps their
+    shipping level 0->1 and should score the 2VP -- no, 3VP, since their
+    level was already 1 by then from an earlier "advance ship" row --
+    ``advance_vp[1]`` for the 1->2 step).
+    """
+    track = FACTIONS[faction].shipping
+    for _ in range(units):
+        level = fs.shipping
+        if track.advance_cost is None or level >= track.max_level:
+            break
+        fs = replace(fs, shipping=level + 1, vp=fs.vp + track.advance_vp[level])
+    return fs
+
+
 def _favor_tile_vp(fs: FactionState, type_: str) -> int:
     """Port of ``scoring.pm``'s ``maybe_score_favor_tile`` (lines 32-47):
     sum, over every favor tile ``fs`` currently holds, that tile's
@@ -292,8 +320,7 @@ def _apply_build_gain(state: GameState, faction: str, gain: dict[str, int]) -> G
         elif key == "CONVERT_W_TO_P":
             pendings.append(PendingDecision(faction=faction, kind="convert_w_to_p", amount=amount))
         elif key == "GAIN_SHIP":
-            max_level = FACTIONS[faction].shipping.max_level
-            fs = replace(fs, shipping=min(fs.shipping + amount, max_level))
+            fs = _advance_shipping(faction, fs, amount)
         elif key == "GAIN_TELEPORT":
             fs = replace(fs, teleport_level=fs.teleport_level + amount)
         elif key.startswith("ACT"):
@@ -765,6 +792,21 @@ def _apply_town_cult_gains(state: GameState, faction: str, tile: str) -> GameSta
     return state
 
 
+def _apply_town_ship_gain(state: GameState, faction: str, tile: str) -> GameState:
+    """Drive ``_advance_shipping`` for ``tile``'s ``GAIN_SHIP`` key (TW7)
+    -- the other half of the deferral ``towns.py``'s docstring flags
+    alongside the cult-step keys ``_apply_town_cult_gains`` handles
+    (``carpet_range``, TeleportTrack's sibling key, stays deferred: no
+    corpus evidence yet that any Dwarves/Fakirs game needs it, and this
+    engine's roster of games sampled so far never grants TW7 to either).
+    """
+    units = TOWN_TILES[tile].gain.get("GAIN_SHIP", 0)
+    if not units:
+        return state
+    fs = _advance_shipping(faction, state.factions[faction], units)
+    return with_faction(state, faction, fs)
+
+
 def handle_gain_town(state: GameState, faction: str, cmd: ParsedCommand) -> GameState:
     """Pop the matching ``gain_town`` pending and apply ``cmd.tile`` to the
     cluster it was queued for (``pending.source``, see
@@ -789,7 +831,8 @@ def handle_gain_town(state: GameState, faction: str, cmd: ParsedCommand) -> Game
         new_state = apply_town_tile(new_state, faction, cmd.tile)
     except ValueError as exc:
         raise EngineError(str(exc), state=state, faction=faction, cmd=cmd) from exc
-    return _apply_town_cult_gains(new_state, faction, cmd.tile)
+    new_state = _apply_town_cult_gains(new_state, faction, cmd.tile)
+    return _apply_town_ship_gain(new_state, faction, cmd.tile)
 
 
 register_handler("build", handle_build)

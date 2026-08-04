@@ -417,13 +417,22 @@ def test_upgrade_sh_darklings_pushes_convert_w_to_p_pending() -> None:
     assert PendingDecision(faction="darklings", kind="convert_w_to_p", amount=3) in s2.pending
 
 
-def test_upgrade_sh_mermaids_advances_shipping_with_no_vp() -> None:
+def test_upgrade_sh_mermaids_advances_shipping_and_scores_advance_vp() -> None:
+    """Corrected (task-13 fix, cites ``resources.pm``'s ``adjust_resource``
+    ``GAIN_(TELEPORT|SHIP)`` branch, 276-286): a ``GAIN_SHIP`` grant --
+    from a build_gain (here, Mermaids' SH) or a town tile alike -- pays
+    ``ShippingTrack.advance_vp[level]`` the same as a player-invoked
+    ``advance ship`` row (``actions_pass.py``'s ``handle_advance``); it is
+    not a free level bump. An earlier revision of this test asserted the
+    opposite ("with_no_vp") with no Perl citation -- disproved by
+    reference-game row 210 (nomads' TW7 grant), which needs the exact
+    same code path to score correctly (``_advance_shipping``'s docstring)."""
     s = _sh_state("mermaids")
     before = s.factions["mermaids"]
     s2 = handle_upgrade(s, "mermaids", _cmd("upgrade", loc=TARGET, building="SH"))
     fs = s2.factions["mermaids"]
     assert fs.shipping == before.shipping + 1
-    assert fs.vp == before.vp
+    assert fs.vp == before.vp + FACTIONS["mermaids"].shipping.advance_vp[before.shipping]
 
 
 # --------------------------------------------------------------------------
@@ -688,3 +697,21 @@ def test_gain_town_tw5_drives_cult_advance_on_all_four_tracks() -> None:
     # gain), then crossing EARTH's 10 spends 1 -- net back to 1.
     assert s2.factions["engineers"].keys == 1
     assert s2.cult_10["EARTH"] == "engineers"
+
+
+def test_gain_town_tw7_drives_shipping_advance_vp() -> None:
+    """Reference-game row 210: nomads' TW7 grant (``gain={"KEY": 1,
+    "VP": 4, "GAIN_SHIP": 1, "carpet_range": 1}``) must also bump
+    shipping and score ``advance_vp`` for that step, on top of TW7's own
+    flat VP -- ``_apply_town_ship_gain``'s docstring (task-13 report:
+    nomads' shipping was already at level 1 by row 210, from an earlier
+    ``advance ship`` row, so the missing VP was ``advance_vp[1]``)."""
+    s = _state()
+    fs = replace(s.factions["nomads"], shipping=1)
+    s = with_faction(s, "nomads", fs)
+    s = replace(s, pending=(PendingDecision(faction="nomads", kind="gain_town", source="cluster"),))
+    before_vp = s.factions["nomads"].vp
+    s2 = handle_gain_town(s, "nomads", _cmd("gain_town", tile="TW7"))
+    assert s2.factions["nomads"].shipping == 2
+    expected_vp = 4 + FACTIONS["nomads"].shipping.advance_vp[1]  # TW7's own VP + the ship advance
+    assert s2.factions["nomads"].vp == before_vp + expected_vp
