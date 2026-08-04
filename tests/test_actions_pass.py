@@ -405,6 +405,29 @@ def test_connect_two_hex_early_era_form_derives_the_river() -> None:
     assert set(pendings[0].source.split(",")) == {a, a2, b, b2}
 
 
+def test_connect_two_hex_form_resolves_multiple_qualifying_rivers() -> None:
+    """Task-14 phase-4 fix, corpus ``4pLeague_S1_D2L1_G1`` row 322
+    (``connect B3 C3``): B3 and C3 have *two* river hexes adjacent to both
+    (``r2`` and ``r9`` on the real board), not the one
+    ``test_connect_two_hex_early_era_form_derives_the_river`` exercises --
+    ``_rivers_between`` used to require exactly one candidate and hard-
+    erred "no unique river hex connects B3 and C3" the moment a second
+    board location repeated this shape. Both candidates here happen to
+    have an identical building intersection (only B3/C3 themselves), so
+    either resolves to the same 4-hex cluster -- this pins that the
+    multi-candidate path picks *a* qualifying cluster rather than raising.
+    Neither {B3, C2} nor {C3, D4} qualifies on its own (power 4/3, count
+    2/2 -- below the power-7/count-4 threshold); only joining them via
+    either r2 or r9 reaches power 7 / count 4.
+    """
+    s = _state()
+    s = _place_all(s, "mermaids", {"B3": "SH", "C2": "D", "C3": "D", "D4": "TE"})
+    s2 = handle_connect(s, "mermaids", _cmd("connect", loc="B3", loc2="C3"))
+    pendings = [p for p in s2.pending if p.kind == "gain_town" and p.faction == "mermaids"]
+    assert len(pendings) == 1
+    assert set(pendings[0].source.split(",")) == {"B3", "C2", "C3", "D4"}
+
+
 def test_connect_rejects_non_mermaids() -> None:
     _a, _a2, river, _b, _b2 = _mermaid_river_layout()
     s = _state()

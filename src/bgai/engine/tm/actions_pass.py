@@ -307,8 +307,8 @@ def _cluster_key(cluster: frozenset[str]) -> str:
     return ",".join(sorted(cluster))
 
 
-def _river_between(state: GameState, loc: str, loc2: str, cmd: ParsedCommand, faction: str) -> str:
-    """The single river hex adjacent to *both* ``loc`` and ``loc2`` --
+def _rivers_between(state: GameState, loc: str, loc2: str, cmd: ParsedCommand, faction: str) -> list[str]:
+    """Every river hex adjacent to *both* ``loc`` and ``loc2`` --
     ``commands.pm``'s ``command_connect`` (930-967) is fully generic over
     an arbitrary ``@hexes`` list, finding whichever river hex is adjacent
     to *every* one of them (``next if $rivers{$river} != @hexes``); this
@@ -318,21 +318,25 @@ def _river_between(state: GameState, loc: str, loc2: str, cmd: ParsedCommand, fa
     ``4pLeague_S1_D2L1_G1`` row 258, ``connect loc=A4 loc2=C1``: neither
     A4 nor C1 is ever river-colored, so treating ``loc`` as the river
     hex directly hard-errored "A4 is not a river hex").
+
+    Real Perl's own ``%rivers`` can have more than one qualifying entry
+    (two river hexes both adjacent to the same land-hex pair is common
+    board topology); it picks *the first one in hash-iteration order* --
+    Perl-process-specific non-determinism, same flavor as the TW5/TW6
+    cult-tiebreak (``apply.py``'s ``oracle_cult`` docstring). Returning
+    every candidate here (rather than requiring exactly one) lets
+    ``handle_connect`` pick whichever one actually produces a qualifying
+    town cluster instead of hard-erring on the ambiguity.
     """
     board = base_board()
     if loc not in board.adjacent or loc2 not in board.adjacent:
         raise EngineError(f"unknown hex {loc!r} or {loc2!r}", state=state, faction=faction, cmd=cmd)
-    candidates = [h for h in board.adjacent[loc] & board.adjacent[loc2] if board.hexes[h].color == RIVER]
-    if len(candidates) != 1:
-        raise EngineError(
-            f"no unique river hex connects {loc} and {loc2}", state=state, faction=faction, cmd=cmd
-        )
-    return candidates[0]
+    return sorted(h for h in board.adjacent[loc] & board.adjacent[loc2] if board.hexes[h].color == RIVER)
 
 
 def handle_connect(state: GameState, faction: str, cmd: ParsedCommand) -> GameState:
     """``connect R<n>`` or the corpus's early-era 2-land-hex form (``connect
-    A<n> C<n>``, module docstring / ``_river_between``): Mermaids-only
+    A<n> C<n>``, module docstring / ``_rivers_between``): Mermaids-only
     river-hex town join.
 
     Uses ``towns.river_town_candidate`` -- the single-river BFS scoped to
@@ -341,6 +345,22 @@ def handle_connect(state: GameState, faction: str, cmd: ParsedCommand) -> GameSt
     neighbours (module docstring's "Known limitation" note, now fixed:
     that loose intersection test could match a candidate genuinely seeded
     from a *different* river hex).
+
+    The 2-hex form can have more than one qualifying river
+    (``_rivers_between``'s own docstring: real Perl's own tiebreak among
+    multiple candidates is hash-order non-determinism). Every candidate
+    river's resulting cluster is computed and only those that currently
+    qualify (``towns.river_town_candidate`` returning non-``None``) are
+    kept. Empirically (all 5 corpus games this fix resolves, verified
+    directly) every qualifying candidate converges to the *same* cluster
+    regardless of which river seeds it -- `towns._mermaid_river_cluster`'s
+    plain-adjacency expansion from the seed pulls in the same reachable
+    buildings either way, since the two candidate rivers' own land-
+    neighbour sets always overlap on the two named hexes themselves. The
+    smallest-cluster tiebreak below (sorted hex tuple as a final
+    deterministic fallback) is defensive for a hypothetical future corpus
+    game where that convergence doesn't hold, not something any known
+    game currently exercises.
     """
     assert cmd.loc is not None
     if faction != "mermaids":
@@ -348,7 +368,20 @@ def handle_connect(state: GameState, faction: str, cmd: ParsedCommand) -> GameSt
             f"{faction} cannot connect (Mermaids-only)", state=state, faction=faction, cmd=cmd
         )
     if cmd.loc2 is not None:
-        river = _river_between(state, cmd.loc, cmd.loc2, cmd, faction)
+        rivers = _rivers_between(state, cmd.loc, cmd.loc2, cmd, faction)
+        candidates = [
+            (river, cluster)
+            for river in rivers
+            if (cluster := river_town_candidate(state, faction, river)) is not None
+        ]
+        if not candidates:
+            raise EngineError(
+                f"no qualifying town cluster connects {cmd.loc} and {cmd.loc2}",
+                state=state,
+                faction=faction,
+                cmd=cmd,
+            )
+        river, cluster = min(candidates, key=lambda rc: (len(rc[1]), sorted(rc[1])))
     else:
         river = cmd.loc
         if river not in state.hexes:
@@ -357,15 +390,15 @@ def handle_connect(state: GameState, faction: str, cmd: ParsedCommand) -> GameSt
             raise EngineError(
                 f"{river} is not a river hex", state=state, faction=faction, cmd=cmd
             )
+        cluster = river_town_candidate(state, faction, river)
+        if cluster is None:
+            raise EngineError(
+                f"no qualifying town cluster touches river hex {river}",
+                state=state,
+                faction=faction,
+                cmd=cmd,
+            )
 
-    cluster = river_town_candidate(state, faction, river)
-    if cluster is None:
-        raise EngineError(
-            f"no qualifying town cluster touches river hex {river}",
-            state=state,
-            faction=faction,
-            cmd=cmd,
-        )
     new_state = record_founded_town(state, faction, cluster)
     pending = PendingDecision(
         faction=faction, kind="gain_town", amount=1, source=_cluster_key(cluster)

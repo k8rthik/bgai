@@ -520,3 +520,39 @@ def test_dropped_factions_stale_setup_row_resolves_without_further_fixes(
     result = replay_game("4pLeague_S22_D3L1_G4", moves_df, deltas_df)
     assert result.error is None, result.error
     assert result.mismatches == ()
+
+
+# --------------------------------------------------------------------------
+# Task 14 phase 4: connect's 2-hex early-era form can have more than one
+# qualifying river hex (actions_pass.py's `_rivers_between`/`handle_connect`).
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "game_id",
+    [
+        "4pLeague_S1_D2L1_G1",
+        "4pLeague_S1_D3L3_G5",
+        "4pLeague_S35_D2L2_G4",
+        "4pLeague_S62_D3L3_G6",
+        "4pLeague_S72_D2L1_G5",
+    ],
+)
+def test_connect_two_hex_form_resolves_when_multiple_rivers_qualify(
+    game_id: str, frames: tuple[pl.DataFrame, pl.DataFrame]
+) -> None:
+    """All 5 corpus games whose ``connect loc=X loc2=Y`` names a land-hex
+    pair with *two* river hexes adjacent to both (``_rivers_between``
+    previously required exactly one and hard-erred "no unique river hex
+    connects X and Y"). Verified directly (this module's own scratch
+    investigation, not repeated here) that every qualifying candidate
+    river converges to the identical resulting cluster in all 5 games --
+    ``handle_connect``'s multi-candidate resolution needs no genuine
+    tiebreak for any known corpus game, unlike the TW5/TW6 cult-gain
+    ambiguity (``apply.py``'s ``oracle_cult``), which is why this isn't a
+    USER QUESTION.
+    """
+    moves_df, deltas_df = frames
+    result = replay_game(game_id, moves_df, deltas_df)
+    assert result.error is None, result.error
+    assert result.mismatches == ()
