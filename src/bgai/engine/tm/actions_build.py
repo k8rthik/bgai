@@ -895,16 +895,34 @@ def _retry_blocked_cults(state: GameState, faction: str) -> GameState:
 def _apply_town_ship_gain(state: GameState, faction: str, tile: str) -> GameState:
     """Drive ``_advance_shipping`` for ``tile``'s ``GAIN_SHIP`` key (TW7)
     -- the other half of the deferral ``towns.py``'s docstring flags
-    alongside the cult-step keys ``_apply_town_cult_gains`` handles
-    (``carpet_range``, TeleportTrack's sibling key, stays deferred: no
-    corpus evidence yet that any Dwarves/Fakirs game needs it, and this
-    engine's roster of games sampled so far never grants TW7 to either).
+    alongside the cult-step keys ``_apply_town_cult_gains`` handles.
     """
     units = TOWN_TILES[tile].gain.get("GAIN_SHIP", 0)
     if not units:
         return state
     fs = _advance_shipping(faction, state.factions[faction], units)
     return with_faction(state, faction, fs)
+
+
+def _apply_town_teleport_gain(state: GameState, faction: str, tile: str) -> GameState:
+    """Drive ``FactionState.teleport_level`` for ``tile``'s
+    ``carpet_range`` key (TW7's third deferred gain, alongside
+    ``GAIN_SHIP`` above) -- task-14 fix: Fakirs' carpet-flight range
+    (``factions_data.py``'s ``TeleportTrack`` for "fakirs": ``range=1,
+    max_range=4, advance_gain=({"carpet_range": 1},)``) is meant to grow
+    exactly the same way Dwarves' tunnel cost drops on SH -- one step per
+    unit -- but TW7's own ``carpet_range`` gain was never wired to
+    anything (an earlier revision's docstring here explicitly deferred it
+    "no corpus evidence yet"). Corpus: ``4pLeague_S13_D2L2_G2`` row 192
+    grants Fakirs TW7 (no SH built at all yet, so base range 1); the very
+    next build, row 205, needs the extra step to reach a hex at carpet
+    range 2 and hard-errors "not reachable" without this.
+    """
+    units = TOWN_TILES[tile].gain.get("carpet_range", 0)
+    if not units:
+        return state
+    fs = state.factions[faction]
+    return with_faction(state, faction, replace(fs, teleport_level=fs.teleport_level + units))
 
 
 def handle_gain_town(state: GameState, faction: str, cmd: ParsedCommand) -> GameState:
@@ -953,6 +971,7 @@ def handle_gain_town(state: GameState, faction: str, cmd: ParsedCommand) -> Game
             raise EngineError(str(exc), state=state, faction=faction, cmd=cmd) from exc
         new_state = _apply_town_cult_gains(new_state, faction, cmd.tile)
         new_state = _apply_town_ship_gain(new_state, faction, cmd.tile)
+        new_state = _apply_town_teleport_gain(new_state, faction, cmd.tile)
         new_state = _retry_blocked_cults(new_state, faction)
     return new_state
 

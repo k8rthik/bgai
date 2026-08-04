@@ -963,3 +963,18 @@ def test_gain_town_tw7_drives_shipping_advance_vp() -> None:
     assert s2.factions["nomads"].shipping == 2
     expected_vp = 4 + FACTIONS["nomads"].shipping.advance_vp[1]  # TW7's own VP + the ship advance
     assert s2.factions["nomads"].vp == before_vp + expected_vp
+
+
+def test_gain_town_tw7_drives_carpet_range_for_fakirs() -> None:
+    """Task-14 fix, corpus ``4pLeague_S13_D2L2_G2`` row 192/205: TW7's
+    ``carpet_range`` gain (the third of its deferred keys, alongside
+    ``GAIN_SHIP`` above) was never wired to ``FactionState.teleport_level``
+    -- Fakirs gaining TW7 with no SH built yet (``teleport_level`` still 0)
+    grants +1 exactly like an SH build's own ``GAIN_TELEPORT`` would, so
+    a build reaching carpet range 2 (base range 1 + this 1) right after
+    hard-errored "not reachable" without it."""
+    s = with_faction(_state(), "fakirs", FactionState.initial(FACTIONS["fakirs"]))
+    s = replace(s, pending=(PendingDecision(faction="fakirs", kind="gain_town", source="cluster"),))
+    before = s.factions["fakirs"].teleport_level
+    s2 = handle_gain_town(s, "fakirs", _cmd("gain_town", tile="TW7"))
+    assert s2.factions["fakirs"].teleport_level == before + 1
