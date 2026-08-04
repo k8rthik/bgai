@@ -100,6 +100,13 @@ def test_convert_pw_to_w_base_rate_spends_bowl3() -> None:
     assert fs.workers == 2 + 1
 
 
+def test_convert_pw_insufficient_bowl3_raises_engine_error_not_value_error() -> None:
+    s = _state()  # engineers power starts 3/9/0: bowl3 is empty
+    cmd = _cmd("convert", n1=3, res1="PW", n2=1, res2="W")
+    with pytest.raises(EngineError):
+        apply(s, "engineers", cmd)
+
+
 def test_convert_alchemists_c_to_vp_override_rate() -> None:
     s = _alchemists_state()
     cmd = _cmd("convert", n1=2, res1="C", n2=1, res2="VP")
@@ -137,6 +144,58 @@ def test_convert_insufficient_resources_raises() -> None:
     cmd = _cmd("convert", n1=30, res1="C", n2=10, res2="VP")
     with pytest.raises(EngineError):
         apply(s, "engineers", cmd)
+
+
+def test_convert_w_to_p_without_pending_still_raises() -> None:
+    s = _as_active(_state(), "darklings")
+    cmd = _cmd("convert", n1=1, res1="W", n2=1, res2="P")
+    with pytest.raises(EngineError):
+        apply(s, "darklings", cmd)
+
+
+def test_darklings_sh_convert_w_to_p_pending_enables_1_to_1_conversion() -> None:
+    s = _as_active(_state(), "darklings")
+    s = push_pending(s, PendingDecision(faction="darklings", kind="convert_w_to_p", amount=3))
+    s = with_faction(s, "darklings", replace(s.factions["darklings"], workers=5))
+    cmd = _cmd("convert", n1=2, res1="W", n2=2, res2="P")
+    s2 = apply(s, "darklings", cmd)
+    fs = s2.factions["darklings"]
+    assert fs.workers == 5 - 2
+    assert fs.priests == 1 + 2  # darklings starts with 1 priest
+    # Pending is metered down, not popped: 3 - 2 = 1 remaining.
+    assert s2.pending == (PendingDecision(faction="darklings", kind="convert_w_to_p", amount=1),)
+
+
+def test_darklings_sh_convert_w_to_p_pending_pops_when_fully_consumed() -> None:
+    s = _as_active(_state(), "darklings")
+    s = push_pending(s, PendingDecision(faction="darklings", kind="convert_w_to_p", amount=3))
+    s = with_faction(s, "darklings", replace(s.factions["darklings"], workers=5))
+    cmd = _cmd("convert", n1=3, res1="W", n2=3, res2="P")
+    s2 = apply(s, "darklings", cmd)
+    assert s2.factions["darklings"].workers == 5 - 3
+    assert s2.factions["darklings"].priests == 1 + 3
+    assert s2.pending == ()
+
+
+def test_darklings_sh_convert_w_to_p_exceeding_allowance_raises() -> None:
+    s = _as_active(_state(), "darklings")
+    s = push_pending(s, PendingDecision(faction="darklings", kind="convert_w_to_p", amount=2))
+    s = with_faction(s, "darklings", replace(s.factions["darklings"], workers=5))
+    cmd = _cmd("convert", n1=3, res1="W", n2=3, res2="P")
+    with pytest.raises(EngineError):
+        apply(s, "darklings", cmd)
+    # No partial mutation: pending and resources untouched.
+    assert s.factions["darklings"].workers == 5
+    assert s.pending == (PendingDecision(faction="darklings", kind="convert_w_to_p", amount=2),)
+
+
+def test_darklings_sh_convert_w_to_p_rate_must_stay_1_to_1() -> None:
+    s = _as_active(_state(), "darklings")
+    s = push_pending(s, PendingDecision(faction="darklings", kind="convert_w_to_p", amount=3))
+    s = with_faction(s, "darklings", replace(s.factions["darklings"], workers=5))
+    cmd = _cmd("convert", n1=2, res1="W", n2=1, res2="P")  # 2:1, not the allowed 1:1
+    with pytest.raises(EngineError):
+        apply(s, "darklings", cmd)
 
 
 # --------------------------------------------------------------------------

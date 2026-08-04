@@ -5,27 +5,8 @@ Dispatches on `cmd.verb` to handler functions registered in the frozen
 verbs in full; later tasks register more handlers (build/upgrade/transform/
 leech/...) into the same table without touching the dispatch mechanism.
 
-Perl references (jsnell/terra-mystica):
-- `command_convert` (`commands.pm` lines 352-399): merges
-  `factions_data.BASE_EXCHANGE_RATES` with a faction's
-  `exchange_rate_overrides` (`Game/Factions.pm` `initialize_faction`, lines
-  83-90 -- overrides win per `from`/`to` pair, base rates fill the rest),
-  then requires `to_count * rate[from][to] == from_count` exactly
-  (line 392-395) before moving resources.
-- `command_send` (`commands.pm` lines 313-350): tries cult-track slots
-  `<CULT>1..4` in order (`cults.pm` `setup_cults`: slot 1 gains 3 steps,
-  slots 2-4 gain 2 steps each -- `PRIEST_SLOT_STEPS`). The first *open*
-  slot is taken (or, if an explicit step amount was requested, the first
-  open slot whose step count matches); taking a slot marks it permanently
-  occupied and decrements the faction's `MAX_P` (our `priest_pool`) by 1.
-  If every slot is occupied, `$gain` is left at its initial `{ $cult => 1
-  }` default: the track still advances 1 step, but no slot is claimed and
-  `priest_pool` is *not* touched -- confirmed by reading the loop: it only
-  mutates `$spot`/`MAX_P`/`CULT_P` inside the `if (!$spot->{building})`
-  branch, which is never entered when nothing is open. `adjust_resource
-  $faction, "P", -1` (line 349) runs unconditionally in both cases: the
-  priest is always spent from hand, whether or not it ends up on the
-  board.
+Perl references (jsnell/terra-mystica `commands.pm`/`cults.pm`) are cited
+per handler docstring below (`handle_convert`, `handle_send`).
 """
 
 from __future__ import annotations
@@ -34,7 +15,7 @@ from collections.abc import Callable
 from dataclasses import replace
 
 from bgai.data.ledger_parser import ParsedCommand
-from bgai.engine.tm.cults import PRIEST_SLOT_STEPS, advance
+from bgai.engine.tm.cults import PRIEST_SLOT_STEPS, CultAdvance, advance
 from bgai.engine.tm.factions_data import BASE_EXCHANGE_RATES, FACTIONS
 from bgai.engine.tm.state import (
     FactionState,
@@ -46,9 +27,8 @@ from bgai.engine.tm.state import (
 
 
 class EngineError(Exception):
-    """Raised when `apply` cannot process a command; carries game context
-    (round/phase/faction/raw command text) so callers can report failures
-    without having to re-derive where in the replay they happened.
+    """Raised when `apply` can't process a command; carries game context
+    (round/phase/faction/raw command) so callers needn't re-derive it.
     """
 
     def __init__(self, message: str, *, state: GameState, faction: str, cmd: ParsedCommand) -> None:
@@ -69,8 +49,8 @@ HANDLERS: dict[str, Handler] = {}
 
 
 def register_handler(verb: str, handler: Handler) -> None:
-    """Register (or replace) the handler for `verb`. Direct `HANDLERS[verb] =
-    handler` mutation works too -- this is just the documented spelling.
+    """Register (or replace) the handler for `verb` (direct `HANDLERS[verb]
+    = handler` mutation works too; this is just the documented spelling).
     """
     HANDLERS[verb] = handler
 
@@ -81,11 +61,8 @@ _LEECH_ANSWER_VERBS = frozenset({"leech", "decline"})
 
 
 def _has_queued_leech_for(state: GameState, faction: str) -> bool:
-    """Whether any queued pending decision anywhere in the queue is a leech
-    offer for `faction`. Snellman's strict-leech option restricts this to
-    the faction's *own* first queued offer (`acting.pm`); for now (this
-    task) any of that faction's queued leech offers may be answered
-    out-of-turn -- Task 8 tightens this to strict-leech semantics.
+    """Any queued leech offer for `faction`, anywhere in the queue. Strict
+    `acting.pm` semantics (only the faction's own head offer) is Task 8's.
     """
     return any(p.faction == faction and p.kind == "leech" for p in state.pending)
 
@@ -131,6 +108,7 @@ _RESOURCE_ATTR: dict[str, str] = {"C": "coins", "W": "workers", "P": "priests", 
 
 
 def _get_resource(fs: FactionState, res: str) -> int:
+    """Current amount of `res` held by `fs` (PW = usable/bowl3 power)."""
     if res == "PW":
         return fs.power.usable
     return getattr(fs, _RESOURCE_ATTR[res])
@@ -139,25 +117,28 @@ def _get_resource(fs: FactionState, res: str) -> int:
 def _with_resource_delta(
     state: GameState, faction: str, fs: FactionState, res: str, delta: int, cmd: ParsedCommand
 ) -> FactionState:
-    """Apply `delta` units of `res` to `fs`, raising `EngineError` if that
-    would take a resource negative (system-boundary validation -- Perl lets
-    `adjust_resource` go negative and relies on upstream legality checks
-    that don't exist yet in this engine; we fail fast instead).
+    """Apply `delta` units of `res` to `fs`; raises `EngineError` (not a raw
+    `ValueError`) if that would take a resource negative.
     """
     if res == "PW":
-        power = fs.power.spend(-delta) if delta < 0 else fs.power.gain(delta)
+        try:
+            power = fs.power.spend(-delta) if delta < 0 else fs.power.gain(delta)
+        except ValueError as exc:
+            # Power.spend raises ValueError on insufficient bowl3; Power.gain
+            # only rejects n < 0, which callers here never pass.
+            raise EngineError(str(exc), state=state, faction=faction, cmd=cmd) from exc
         return replace(fs, power=power)
 
-    attr = _RESOURCE_ATTR[res]
-    new_value = getattr(fs, attr) + delta
+    current = _get_resource(fs, res)
+    new_value = current + delta
     if new_value < 0:
         raise EngineError(
-            f"{faction} cannot afford {-delta} {res} (has {getattr(fs, attr)})",
+            f"{faction} cannot afford {-delta} {res} (has {current})",
             state=state,
             faction=faction,
             cmd=cmd,
         )
-    return replace(fs, **{attr: new_value})
+    return replace(fs, **{_RESOURCE_ATTR[res]: new_value})
 
 
 def _exchange_rate(faction: str, res1: str, res2: str) -> int | None:
@@ -170,15 +151,96 @@ def _exchange_rate(faction: str, res1: str, res2: str) -> int | None:
     return BASE_EXCHANGE_RATES.get(res1, {}).get(res2)
 
 
+def _find_pending_index(state: GameState, faction: str, kind: str) -> int | None:
+    for i, p in enumerate(state.pending):
+        if p.faction == faction and p.kind == kind:
+            return i
+    return None
+
+
+def _pending_head_is(state: GameState, faction: str, kind: str) -> bool:
+    return (
+        bool(state.pending)
+        and state.pending[0].faction == faction
+        and state.pending[0].kind == kind
+    )
+
+
+def _consume_pending_amount(
+    pending: tuple[PendingDecision, ...], index: int, used: int
+) -> tuple[PendingDecision, ...]:
+    """Reduce the `amount` on `pending[index]` by `used`, dropping the entry
+    entirely once it reaches 0.
+    """
+    entry = pending[index]
+    remaining = entry.amount - used
+    if remaining > 0:
+        return pending[:index] + (replace(entry, amount=remaining),) + pending[index + 1 :]
+    return pending[:index] + pending[index + 1 :]
+
+
+def _advance_track(
+    state: GameState, faction: str, fs: FactionState, cult: str, steps: int
+) -> CultAdvance:
+    return advance(
+        state.cults[faction][cult],
+        steps,
+        keys_available=fs.keys,
+        track_open=state.cult_10[cult] is None,
+    )
+
+
+def _apply_cult_advance(
+    state: GameState, faction: str, fs: FactionState, cult: str, result: CultAdvance
+) -> tuple[GameState, FactionState]:
+    """Fold a `cults.advance` result into `state`/`fs`: track position,
+    `cult_10` ownership + key spend, `cult_blocked`, and threshold power.
+    Shared by `handle_gain_cult` and `handle_send`; callers still owe
+    `with_faction` plus any handler-specific `fs` fields (priests, etc).
+    """
+    new_cults = {f: dict(v) for f, v in state.cults.items()}
+    new_cults[faction][cult] = result.new_value
+
+    new_cult_10 = dict(state.cult_10)
+    new_keys = fs.keys
+    new_cult_blocked = fs.cult_blocked
+    if result.key_spent:
+        new_keys -= 1
+        new_cult_10[cult] = faction
+    if result.blocked_at_9:
+        new_cult_blocked = fs.cult_blocked | {cult}
+
+    new_state = replace(state, cults=new_cults, cult_10=new_cult_10)
+    new_fs = replace(
+        fs, power=fs.power.gain(result.power_gained), keys=new_keys, cult_blocked=new_cult_blocked
+    )
+    return new_state, new_fs
+
+
 # --------------------------------------------------------------------------
 # Handlers
 # --------------------------------------------------------------------------
 
 
 def handle_convert(state: GameState, faction: str, cmd: ParsedCommand) -> GameState:
+    """`convert N res1 to M res2`. Darklings' SH grants a one-shot "up to 3
+    W to P at 1:1" allowance (`commands.pm` `command_convert` lines 383-387,
+    counter seeded to 3 by `resources.pm` line 52). No base/override rate
+    covers W->P otherwise, so this models the allowance as a queued
+    `PendingDecision(faction, kind="convert_w_to_p", amount=N)` -- Task 8
+    pushes it on SH build; this handler only consumes it, decrementing
+    `amount` per call and popping at 0.
+    """
     assert cmd.res1 is not None and cmd.res2 is not None
     assert cmd.n1 is not None and cmd.n2 is not None
+
     rate = _exchange_rate(faction, cmd.res1, cmd.res2)
+    w_to_p_pending_index: int | None = None
+    if rate is None and cmd.res1 == "W" and cmd.res2 == "P":
+        w_to_p_pending_index = _find_pending_index(state, faction, "convert_w_to_p")
+        if w_to_p_pending_index is not None:
+            rate = 1
+
     if rate is None:
         raise EngineError(
             f"no exchange rate from {cmd.res1} to {cmd.res2}", state=state, faction=faction, cmd=cmd
@@ -191,10 +253,30 @@ def handle_convert(state: GameState, faction: str, cmd: ParsedCommand) -> GameSt
             faction=faction,
             cmd=cmd,
         )
+
+    if w_to_p_pending_index is not None:
+        allowance = state.pending[w_to_p_pending_index].amount
+        if cmd.n2 > allowance:
+            raise EngineError(
+                f"{faction} may convert at most {allowance} more W to P this SH allowance, "
+                f"not {cmd.n2}",
+                state=state,
+                faction=faction,
+                cmd=cmd,
+            )
+
     fs = state.factions[faction]
     fs = _with_resource_delta(state, faction, fs, cmd.res1, -cmd.n1, cmd)
     fs = _with_resource_delta(state, faction, fs, cmd.res2, cmd.n2, cmd)
-    return with_faction(state, faction, fs)
+    new_state = with_faction(state, faction, fs)
+
+    if w_to_p_pending_index is not None:
+        new_state = replace(
+            new_state,
+            pending=_consume_pending_amount(state.pending, w_to_p_pending_index, cmd.n2),
+        )
+
+    return new_state
 
 
 def handle_burn(state: GameState, faction: str, cmd: ParsedCommand) -> GameState:
@@ -208,10 +290,9 @@ def handle_burn(state: GameState, faction: str, cmd: ParsedCommand) -> GameState
 
 
 def handle_noop(state: GameState, faction: str, cmd: ParsedCommand) -> GameState:
-    """`wait`/`done`/`resign`/`annotation`/`setup`: no state effect here.
-    Turn advancement (`done`), faction elimination (`resign`), and phase
-    anchoring (`setup`) belong to the round/turn-order machinery of a later
-    task; this task only guarantees these verbs dispatch cleanly.
+    """`wait`/`done`/`resign`/`annotation`/`setup`: no state effect here --
+    turn advancement/elimination/phase anchoring is later tasks' round
+    machinery; this task only guarantees these verbs dispatch cleanly.
     """
     return state
 
@@ -224,79 +305,53 @@ def handle_lose_resource(state: GameState, faction: str, cmd: ParsedCommand) -> 
 
 
 def handle_lose_spade(state: GameState, faction: str, cmd: ParsedCommand) -> GameState:
-    """No-op stub: spade/terrain balance bookkeeping is Task 9's
-    (`terraform.py` owns spade accounting); this task only registers the
-    verb so `apply` doesn't reject `-Nspade` rows as unknown.
+    """No-op stub: spade/terrain balance is Task 9's (`terraform.py`); this
+    only registers the verb so `apply` doesn't reject `-Nspade` as unknown.
     """
     return state
 
 
 def handle_lose_marker(state: GameState, faction: str, cmd: ParsedCommand) -> GameState:
     """No-op stub: `-FREE_D`/`-FREE_TP`/`-FREE_TF`/`-BRIDGE` retire a
-    one-shot marker granted by a build/special action. Tracking those
-    markers on `FactionState` is deferred to whichever later task
-    (Task 9/10) introduces the build/special-action handlers that grant
-    them; this task only registers the verb.
+    one-shot marker from a build/special action; tracking those on
+    `FactionState` is deferred to Task 9/10's build handlers.
     """
     return state
 
 
 def handle_convert_marker(state: GameState, faction: str, cmd: ParsedCommand) -> GameState:
     """No-op bookkeeping row for `[+-]NCONVERT_X_TO_Y` (e.g. Darklings SH's
-    `-3CONVERT_W_TO_P`). Per `commands.pm` `command_convert` lines 383-387,
-    the faction's `CONVERT_W_TO_P` counter only *enables* a temporarily
-    better W->P exchange rate for a normal `convert` command (which does
-    the real W/P movement via `handle_convert`); this row records that the
-    one-shot allowance was granted/spent, not an independent resource
-    move. Documented deferral: if corpus replay later shows a bare
-    `convert_marker` row with no companion `convert` row in the same turn,
-    this handler will need to perform the W/P move itself.
+    `-3CONVERT_W_TO_P`): a receipt, not an instruction. The real W/P move
+    happens through `handle_convert`'s `convert 3w to 3p`, gated by the
+    `convert_w_to_p` pending it consumes (see that docstring; Task 8 pushes
+    the pending on SH build). Deferral: if replay shows a bare
+    `convert_marker` with no companion `convert`/pending, this will need to
+    move W/P itself.
     """
     return state
 
 
 def handle_gain_cult(state: GameState, faction: str, cmd: ParsedCommand) -> GameState:
+    """`+N<CULT>`: advance `faction`'s track by N (default 1). If a
+    `cult_choice` pending is queued at this faction's head, this row is its
+    answer and pops it (Cultists' leech choice, ACTA/BON2/FAV-action steps,
+    town-tile cult gains).
+    """
     assert cmd.cult is not None
     cult = cmd.cult
     steps = cmd.n1 if cmd.n1 is not None else 1
     fs = state.factions[faction]
 
-    result = advance(
-        state.cults[faction][cult],
-        steps,
-        keys_available=fs.keys,
-        track_open=state.cult_10[cult] is None,
-    )
+    result = _advance_track(state, faction, fs, cult, steps)
+    new_state, new_fs = _apply_cult_advance(state, faction, fs, cult, result)
+    if _pending_head_is(state, faction, "cult_choice"):
+        new_state = pop_pending(new_state, 0)
 
-    new_cults = {f: dict(v) for f, v in state.cults.items()}
-    new_cults[faction][cult] = result.new_value
-
-    new_cult_10 = dict(state.cult_10)
-    new_keys = fs.keys
-    new_cult_blocked = fs.cult_blocked
-    if result.key_spent:
-        new_keys -= 1
-        new_cult_10[cult] = faction
-    if result.blocked_at_9:
-        new_cult_blocked = fs.cult_blocked | {cult}
-
-    new_fs = replace(
-        fs, power=fs.power.gain(result.power_gained), keys=new_keys, cult_blocked=new_cult_blocked
-    )
-
-    new_pending = state.pending
-    if new_pending and new_pending[0].faction == faction and new_pending[0].kind == "cult_choice":
-        new_pending = new_pending[1:]
-
-    new_state = replace(state, cults=new_cults, cult_10=new_cult_10, pending=new_pending)
     return with_faction(new_state, faction, new_fs)
 
 
 def handle_lose_cult(state: GameState, faction: str, cmd: ParsedCommand) -> GameState:
-    """Plain retreat: no power refund for losing thresholds already earned
-    (matches the base game's cult-track rules -- power gained on the way up
-    is never clawed back on the way down).
-    """
+    """Plain retreat: no power refund for thresholds already earned."""
     assert cmd.cult is not None
     cult = cmd.cult
     steps = cmd.n1 if cmd.n1 is not None else 1
@@ -309,6 +364,12 @@ def handle_lose_cult(state: GameState, faction: str, cmd: ParsedCommand) -> Game
 
 
 def handle_send(state: GameState, faction: str, cmd: ParsedCommand) -> GameState:
+    """`send p to CULT[ for N]` (`commands.pm` `command_send` lines 313-350):
+    first open slot wins (matching step `N` if given), costing 1
+    `priest_pool`. If every slot is full the track still advances 1 step
+    but no slot/`priest_pool` is touched -- the priest is always spent from
+    hand either way (line 349's `adjust_resource` is unconditional).
+    """
     assert cmd.cult is not None
     cult = cmd.cult
     fs = state.factions[faction]
@@ -331,12 +392,7 @@ def handle_send(state: GameState, faction: str, cmd: ParsedCommand) -> GameState
             f"no open {cmd.n1}-step spot on {cult} track", state=state, faction=faction, cmd=cmd
         )
 
-    result = advance(
-        state.cults[faction][cult],
-        steps,
-        keys_available=fs.keys,
-        track_open=state.cult_10[cult] is None,
-    )
+    result = _advance_track(state, faction, fs, cult, steps)
 
     new_priest_slots = dict(state.priest_slots)
     if slot_index is not None:
@@ -344,34 +400,15 @@ def handle_send(state: GameState, faction: str, cmd: ParsedCommand) -> GameState
         updated[slot_index] = faction
         new_priest_slots[cult] = tuple(updated)
 
-    new_cults = {f: dict(v) for f, v in state.cults.items()}
-    new_cults[faction][cult] = result.new_value
-
-    new_cult_10 = dict(state.cult_10)
-    new_keys = fs.keys
-    new_cult_blocked = fs.cult_blocked
-    if result.key_spent:
-        new_keys -= 1
-        new_cult_10[cult] = faction
-    if result.blocked_at_9:
-        new_cult_blocked = fs.cult_blocked | {cult}
-
     new_priest_pool = fs.priest_pool - 1 if slot_index is not None else fs.priest_pool
     if new_priest_pool < 0:
         raise EngineError(
             f"{faction} has no priest_pool budget left", state=state, faction=faction, cmd=cmd
         )
 
-    new_fs = replace(
-        fs,
-        priests=fs.priests - 1,
-        priest_pool=new_priest_pool,
-        power=fs.power.gain(result.power_gained),
-        keys=new_keys,
-        cult_blocked=new_cult_blocked,
-    )
-
-    new_state = replace(state, cults=new_cults, priest_slots=new_priest_slots, cult_10=new_cult_10)
+    new_state, new_fs = _apply_cult_advance(state, faction, fs, cult, result)
+    new_state = replace(new_state, priest_slots=new_priest_slots)
+    new_fs = replace(new_fs, priests=fs.priests - 1, priest_pool=new_priest_pool)
     return with_faction(new_state, faction, new_fs)
 
 
