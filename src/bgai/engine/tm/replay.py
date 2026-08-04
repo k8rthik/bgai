@@ -529,15 +529,48 @@ def replay_game(
         oracle_cult = delta["cult"] if delta is not None else None
         try:
             state = _apply_pending_drops(state, row, setup.dropped_at_row)
-            if not state.factions[faction].dropped:
+            # Round 0 (SETUP_DWELLINGS/SETUP_BONUS) is the one place a
+            # dropped faction's own ledger row is not applied under its own
+            # name. `commands.pm`'s `$assert_active_faction` (~1217-1221)
+            # skips its "is active player" check entirely when
+            # `$game{round} == 0`, and `acting.pm`'s `setup_action` (called
+            # from both `command_build` and `command_pass`) blindly
+            # `shift_setup_order()`s the *front* of the queue regardless of
+            # which faction's command triggered it -- so a stale,
+            # already-in-flight client submission from a faction that just
+            # dropped still gets processed by the *server*, but against
+            # whichever faction `setup_order`'s front now names post-drop
+            # (this engine's own `active_faction(state)`, already
+            # recomputed by `_apply_pending_drops` above), not the identity
+            # baked into the stale request. Verified against both corpus
+            # `4pLeague_S22_D3L1_G1` (mermaids drops; row 33's ledger
+            # `faction` is still "mermaids", raw command `build F4`, but the
+            # raw game JSON's final `map` has F4 colored green -- witches'
+            # home color, the faction `active_faction(state)` computes as
+            # next in `setup_order` once mermaids' entries are filtered
+            # out) and `4pLeague_S22_D3L1_G6` (witches drops; row 31 "build
+            # F3" ends up yellow -- nomads' color, and nomads' row 137
+            # later upgrades F3 with no intervening "build F3" from nomads
+            # anywhere in the ledger, so row 31 must be where that dwelling
+            # actually landed). A dropped faction's *own* row remains a
+            # true no-op for every other phase (round > 0 genuinely
+            # enforces active-only, per `_apply_pending_drops`'s docstring)
+            # -- this substitution is narrowly scoped to round 0.
+            apply_faction = faction
+            if state.factions[faction].dropped and state.phase in (
+                Phase.SETUP_DWELLINGS,
+                Phase.SETUP_BONUS,
+            ):
+                apply_faction = active_faction(state)
+            if not state.factions[apply_faction].dropped:
                 was_income = state.phase == Phase.INCOME
                 state = _ensure_actions_phase_started(state, cmds)
                 if was_income and state.phase != Phase.INCOME:
                     other_income_done = set()
                 apply_cmds = _dedupe_income_commands(cmds)
-                state = _apply_row_commands(state, faction, apply_cmds, oracle_cult=oracle_cult)
+                state = _apply_row_commands(state, apply_faction, apply_cmds, oracle_cult=oracle_cult)
                 state, other_income_done, cult_income_done = _advance_after_row(
-                    state, faction, cmds, other_income_done, cult_income_done
+                    state, apply_faction, cmds, other_income_done, cult_income_done
                 )
         except Exception as exc:  # noqa: BLE001 -- loud, contextualized failure
             return ReplayResult(
