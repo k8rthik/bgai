@@ -481,22 +481,41 @@ def test_final_scoring_applies_cult_network_and_resource_vp_and_stays_finished()
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.skip(reason="needs Task 13 replay harness")
 def test_replayed_final_vp_matches_games_meta_final_vp() -> None:
     """End-to-end cross-check against ``games_meta.parquet``'s
-    ``final_vp`` column: replay a full reference game's ledger
+    ``final_vp`` column: replay the reference game's full ledger
     (``moves.parquet``) through ``apply()`` start to finish -- including
     round 6's ``score_vp``/``score_resources`` rows dispatched to
     ``handle_score_vp``/``handle_score_resources`` above -- and assert
     each faction's resulting ``FactionState.vp`` equals its
-    ``games_meta.final_vp`` entry for that game. This task's tests
-    validate the scoring *arithmetic* (tie-split rules, network geometry,
-    resource conversion) against corpus row values directly; this
-    specific assertion additionally requires a row-grouping replay
-    harness that sequences every verb through the full setup ->
-    income -> actions -> cleanup -> ... -> final-scoring pipeline
-    (``round_flow.py``'s "Task 12 contract" docstring, step 7's replay
-    mode) -- that harness is Task 13's own deliverable, not this one's.
-    Un-skip once it exists.
+    ``games_meta.final_vp`` entry. Un-skipped now that Task 13's replay
+    harness (``replay.py``) exists; reuses its private row-driving
+    helpers directly (``_iter_rows``/``_advance_after_row``) since
+    ``replay_game``'s frozen ``ReplayResult`` API deliberately exposes no
+    final ``GameState`` -- only pass/fail plus mismatches -- for this
+    module's own oracle checks to reach into.
     """
-    raise NotImplementedError("blocked on Task 13's replay harness")
+    import json
+
+    import polars as pl
+
+    from bgai.engine.tm.replay import _advance_after_row, _iter_rows
+    from bgai.engine.tm.round_flow import start_setup
+    from bgai.engine.tm.state import GameState
+
+    game_id = "4pLeague_S10_D1L1_G1"
+    moves_df = pl.read_parquet("data/datasets/moves.parquet")
+    games_meta = pl.read_parquet("data/datasets/games_meta.parquet")
+
+    game_moves = moves_df.filter(pl.col("game_id") == game_id).sort(["row", "seq"])
+    state = start_setup(GameState.initial(load_setup(game_id)))
+    other_done: set[str] = set()
+    cult_done: set[str] = set()
+    for row, faction, cmds in _iter_rows(game_moves):
+        for cmd in cmds:
+            state = apply(state, faction, cmd)
+        state, other_done, cult_done = _advance_after_row(state, faction, cmds, other_done, cult_done)
+
+    expected = json.loads(games_meta.filter(pl.col("game_id") == game_id)["final_vp"][0])
+    for faction, vp in expected.items():
+        assert state.factions[faction].vp == vp, faction
