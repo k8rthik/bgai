@@ -445,6 +445,27 @@ def _start_full_move_reset(fs: FactionState) -> FactionState:
     return replace(fs, teleported_hex=None, cult_blocked=frozenset())
 
 
+def _first_eligible_index(state: GameState, turn_order: tuple[str, ...], start: int = 0) -> int:
+    """First index ``>= start`` in ``turn_order`` whose faction is neither
+    ``passed`` nor ``FactionState.dropped`` -- falls back to ``start`` if
+    every remaining entry is ineligible (defensive; every real game keeps
+    at least one live faction through round 6). Used wherever
+    ``active_index`` is (re)seeded to a fresh value rather than stepped
+    forward one faction at a time from an already-valid position
+    (``_advance_actions`` below already skips dropped/passed factions when
+    stepping, but a freshly *seeded* ``active_index`` -- ``begin_actions``'
+    round-start ``turn_order[0]`` -- was never validated at all before this
+    task-14 fix: a faction dropped mid-``SETUP_BONUS`` could still land as
+    round 1's ``active_faction`` simply for sitting at seat index 0,
+    corpus ``4pLeague_S21_D3L1_G4`` row 47).
+    """
+    for idx in range(start, len(turn_order)):
+        fs = state.factions[turn_order[idx]]
+        if not fs.passed and not fs.dropped:
+            return idx
+    return start
+
+
 def begin_actions(state: GameState) -> GameState:
     """``Phase.INCOME`` -> ``Phase.ACTIONS`` once every income row for the
     round has been applied (Task 12 contract, step 4). Resets every
@@ -457,7 +478,8 @@ def begin_actions(state: GameState) -> GameState:
     if state.phase != Phase.INCOME:
         raise ValueError(f"begin_actions called outside Phase.INCOME (got {state.phase})")
     new_factions = {name: _start_full_move_reset(fs) for name, fs in state.factions.items()}
-    return replace(state, phase=Phase.ACTIONS, active_index=0, factions=new_factions)
+    active_index = _first_eligible_index(state, state.turn_order)
+    return replace(state, phase=Phase.ACTIONS, active_index=active_index, factions=new_factions)
 
 
 # --------------------------------------------------------------------------

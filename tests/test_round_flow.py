@@ -276,6 +276,26 @@ def test_begin_actions_rejects_wrong_phase() -> None:
         begin_actions(_state())  # already ACTIONS
 
 
+def test_begin_actions_skips_a_dropped_faction_at_turn_order_zero() -> None:
+    """Task-14 fix: ``begin_actions`` previously always seeded
+    ``active_index=0`` unconditionally -- if ``turn_order[0]`` happened
+    to be a faction that dropped earlier in the game (e.g. mid the
+    *previous* round's ``SETUP_BONUS``/``ACTIONS`` phase), round 1's very
+    first ``active_faction`` would wrongly be that dropped faction, since
+    ``_advance_actions``'s own dropped-skip logic only ever runs when
+    *stepping forward* from an already-valid position, never when
+    ``active_index`` is freshly seeded. Corpus: ``4pLeague_S21_D3L1_G4``
+    row 47, darklings (seat index 0, dropped mid-``SETUP_BONUS`` at row
+    41) wrongly blocked engineers' very first round-1 action.
+    """
+    s = replace(_state(), phase=Phase.INCOME, active_index=2)
+    assert s.turn_order[0] == "engineers"
+    s = _rich(s, "engineers", dropped=True)
+    s2 = begin_actions(s)
+    assert s2.phase == Phase.ACTIONS
+    assert active_faction(s2) == "darklings"
+
+
 def test_begin_actions_clears_teleported_hex_for_every_faction() -> None:
     """The round's first active faction (``turn_order[0]``) never goes
     through ``_advance_actions``'s own reset, so ``begin_actions`` is the

@@ -305,6 +305,22 @@ def test_dropped_faction_mid_setup_bonus_loses_its_bonus_tile_pick(
     assert result.mismatches == ()
 
 
+def test_dropped_faction_never_strands_round_1_active_index_at_seat_zero(
+    frames: tuple[pl.DataFrame, pl.DataFrame],
+) -> None:
+    """``4pLeague_S21_D3L1_G4``: darklings (seat index 0) drops mid-
+    ``SETUP_BONUS`` (row 41); ``round_flow.begin_actions``'s
+    ``_first_eligible_index`` fix (that function's own citation trail)
+    is what lets round 1 correctly start with engineers instead of
+    wrongly re-seeding ``active_index=0`` straight back onto the dropped
+    darklings. A full clean replay.
+    """
+    moves_df, deltas_df = frames
+    result = replay_game("4pLeague_S21_D3L1_G4", moves_df, deltas_df)
+    assert result.error is None, result.error
+    assert result.mismatches == ()
+
+
 # --------------------------------------------------------------------------
 # Task 14: ACTC compound-turn bundling (round_flow.is_turn_boundary)
 # --------------------------------------------------------------------------
