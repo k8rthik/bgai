@@ -426,3 +426,16 @@ register_handler("lose_resource", handle_lose_resource)
 register_handler("lose_spade", handle_lose_spade)
 register_handler("lose_marker", handle_lose_marker)
 register_handler("convert_marker", handle_convert_marker)
+
+
+# --------------------------------------------------------------------------
+# Side-effect imports: modules that register additional verbs into
+# HANDLERS on import (Task 8's build/upgrade/bridge/favor/town/leech/
+# decline). Placed at the bottom, after every symbol those modules import
+# from here (EngineError, push_pending, pop_pending, register_handler,
+# state helpers) is already defined, so this is not a circular import:
+# `actions_build`/`leech` import *from* this module at their own top, and
+# by the time Python reaches these lines this module's own top-to-bottom
+# execution has already bound everything they need.
+from bgai.engine.tm import actions_build as _actions_build  # noqa: E402,F401
+from bgai.engine.tm import leech as _leech  # noqa: E402,F401

@@ -77,6 +77,14 @@ class FactionState:
     passed: bool
     actions_used: frozenset[str]
     cult_blocked: frozenset[str]
+    bridges_built: int = 0
+    """Count of bridges placed so far (``factions_data.BRIDGE_COUNT`` cap
+    of 3); added by Task 8 -- a migration on top of the task-3 frozen
+    shape, per this module's own docstring ("later tasks add fields via
+    migration rather than repurposing these"). ``state.bridges`` is a
+    flat, faction-agnostic set of hex-pairs, so nothing else on
+    `GameState`/`FactionState` could answer "how many bridges has X built".
+    """
 
     @classmethod
     def initial(cls, data: FactionData) -> FactionState:
@@ -99,6 +107,7 @@ class FactionState:
             passed=False,
             actions_used=frozenset(),
             cult_blocked=frozenset(),
+            bridges_built=0,
         )
 
 
