@@ -1,0 +1,395 @@
+"""Replay harness: drive a crawled game's ledger through ``apply()`` and
+cross-check the result against the ``deltas.parquet`` oracle.
+
+This is the module where every earlier task's handler meets a real game for
+the first time -- ``round_flow.py``'s "Task 12 contract" docstring already
+specifies the exact call sequence a row-grouping caller owes the engine;
+this module *is* that caller.
+
+**Row grouping.** ``moves.parquet`` has no per-row "this is the
+turn-owning verb" flag, but the contract only needs one boolean per ledger
+row: does this row belong to the currently-active main-track faction
+(``_MAIN_TRACK_VERBS`` -- exactly round_flow's own list: build/upgrade/
+action/advance/pass/send/dig/transform/bridge/connect), or is it a
+sub-decision answer (leech/decline/gain_favor/gain_town/gain_cult) or a
+bookkeeping row (setup/income/score_*)? "Does any command in this row use a
+main-track verb" is sufficient: multi-verb rows always bundle their
+main-track verb with same-turn sub-decisions ("dig 1. build A3. connect
+R1. gain_town TW1", one Mermaids turn, corpus row 208 -- round_flow's own
+docstring cites this), and every real player turn contains exactly one
+main-track verb (pass included). This one test decides ``advance_turn``
+eligibility across all three phases that use it (``SETUP_DWELLINGS``/
+``SETUP_BONUS``/``ACTIONS`` -- ``advance_turn`` is a documented no-op for
+``INCOME``/``CLEANUP``/``FINISHED``).
+
+``other_income_for_faction``/``cult_income_for_faction``/
+``all_income_for_faction`` rows are gate-exempt and phase-agnostic
+(round_flow's Step-1 finding: row order is provably irrelevant), so this
+harness tracks which factions have received each income component *this
+round* and fires ``begin_actions``/``end_of_round`` once every faction is
+accounted for, mirroring rather than re-deriving the corpus's own
+grouping. The ``end_of_round`` check runs before the ``begin_actions``
+check each row so a same-row ``all_income_for_faction`` batch
+(``merge-income-phases``, not exercised by the reference game or the
+first 10 corpus games -- see this module's tests) can't spuriously fire
+``begin_actions`` off carry-over bookkeeping from the ``end_of_round``
+call that just ran.
+
+**Deltas oracle.** After every command of a ledger row has been applied
+(and any phase transition above has run), if ``deltas.parquet`` has a row
+for ``(game_id, row, faction)`` its ``vp``/``c``/``w``/``p`` *absolute*
+values, ``pw`` bowl string, and ``cult`` string are compared against the
+just-applied state for that faction (task brief). A mismatch never aborts
+the replay outright -- it is collected as a :class:`Mismatch` and replay
+continues, up to ``stop_after`` mismatches, so one bad row doesn't hide
+the next distinct bug class. An exception raised by ``apply()`` (or by the
+phase-transition calls above) *does* abort -- caught, wrapped with row
+context, and returned as :class:`ReplayResult.error`.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+from collections import Counter
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import polars as pl
+
+from bgai.data.ledger_parser import Kind, ParsedCommand
+from bgai.engine.tm.apply import apply
+from bgai.engine.tm.round_flow import advance_turn, begin_actions, end_of_round, start_setup
+from bgai.engine.tm.setup import load_setup
+from bgai.engine.tm.state import GameState, Phase, cult_string
+
+_MAIN_TRACK_VERBS = frozenset(
+    {"build", "upgrade", "action", "advance", "pass", "send", "dig", "transform", "bridge", "connect"}
+)
+_OTHER_INCOME_VERBS = frozenset({"other_income_for_faction", "all_income_for_faction"})
+_CULT_INCOME_VERBS = frozenset({"cult_income_for_faction", "all_income_for_faction"})
+
+_MOVES_PATH = Path("data/datasets/moves.parquet")
+_DELTAS_PATH = Path("data/datasets/deltas.parquet")
+_GAMES_META_PATH = Path("data/datasets/games_meta.parquet")
+
+
+@dataclass(frozen=True)
+class Mismatch:
+    game_id: str
+    row: int
+    faction: str
+    field: str
+    expected: str
+    actual: str
+    raw: str
+
+
+@dataclass(frozen=True)
+class ReplayResult:
+    game_id: str
+    rows_checked: int
+    mismatches: tuple[Mismatch, ...]
+    error: str | None
+
+
+# --------------------------------------------------------------------------
+# Row reconstruction: moves.parquet record -> ParsedCommand
+# --------------------------------------------------------------------------
+
+_COMMAND_FIELDS = (
+    "loc", "loc2", "building", "tile", "cult", "color", "target", "reason", "res1", "res2", "n1", "n2",
+)
+
+
+def _reconstruct_raw(rec: dict[str, Any]) -> str:
+    """``moves.parquet`` doesn't carry the original ledger text -- this
+    rebuilds a readable stand-in from the parsed fields, used only for
+    ``EngineError`` context and ``Mismatch.raw`` diagnostics (never
+    re-parsed).
+    """
+    parts = [str(rec["verb"])]
+    for key in _COMMAND_FIELDS:
+        value = rec[key]
+        if value is not None:
+            parts.append(f"{key}={value}")
+    return " ".join(parts)
+
+
+def _parsed_command_from_row(rec: dict[str, Any]) -> ParsedCommand:
+    return ParsedCommand(
+        verb=rec["verb"],
+        kind=Kind(rec["kind"]),
+        raw=_reconstruct_raw(rec),
+        **{field: rec[field] for field in _COMMAND_FIELDS},
+    )
+
+
+def _iter_rows(game_moves: pl.DataFrame) -> list[tuple[int, str, tuple[ParsedCommand, ...]]]:
+    """``(row, faction, commands)`` triples in ledger order (``row`` then
+    ``seq`` ascending -- caller sorts). One faction per row (verified
+    against the corpus: no row ever mixes two factions' commands).
+    """
+    rows: list[tuple[int, str, tuple[ParsedCommand, ...]]] = []
+    current_row: int | None = None
+    current_faction = ""
+    current_cmds: list[ParsedCommand] = []
+    for rec in game_moves.iter_rows(named=True):
+        row = int(rec["row"])
+        if row != current_row:
+            if current_row is not None:
+                rows.append((current_row, current_faction, tuple(current_cmds)))
+            current_row = row
+            current_faction = rec["faction"]
+            current_cmds = []
+        current_cmds.append(_parsed_command_from_row(rec))
+    if current_row is not None:
+        rows.append((current_row, current_faction, tuple(current_cmds)))
+    return rows
+
+
+def _delta_lookup(deltas_df: pl.DataFrame, game_id: str) -> dict[tuple[int, str], dict[str, Any]]:
+    game_deltas = deltas_df.filter(pl.col("game_id") == game_id)
+    return {(int(rec["row"]), rec["faction"]): rec for rec in game_deltas.iter_rows(named=True)}
+
+
+# --------------------------------------------------------------------------
+# Deltas-oracle comparison (unit-tested standalone on a synthetic case --
+# see tests/test_replay.py -- before it is ever run against real games).
+# --------------------------------------------------------------------------
+
+
+def _row_mismatches(
+    game_id: str, row: int, faction: str, state: GameState, delta: dict[str, Any], raw: str
+) -> list[Mismatch]:
+    fs = state.factions[faction]
+    checks = (
+        ("vp", delta["vp_value"], fs.vp),
+        ("c", delta["c_value"], fs.coins),
+        ("w", delta["w_value"], fs.workers),
+        ("p", delta["p_value"], fs.priests),
+        ("pw", delta["pw"], fs.power.as_str()),
+        ("cult", delta["cult"], cult_string(state, faction)),
+    )
+    return [
+        Mismatch(
+            game_id=game_id, row=row, faction=faction, field=field,
+            expected=str(expected), actual=str(actual), raw=raw,
+        )
+        for field, expected, actual in checks
+        if str(expected) != str(actual)
+    ]
+
+
+# --------------------------------------------------------------------------
+# Phase-transition driving (round_flow.py's "Task 12 contract")
+# --------------------------------------------------------------------------
+
+
+def _advance_after_row(
+    state: GameState,
+    faction: str,
+    cmds: tuple[ParsedCommand, ...],
+    other_income_done: set[str],
+    cult_income_done: set[str],
+) -> tuple[GameState, set[str], set[str]]:
+    if any(cmd.verb in _MAIN_TRACK_VERBS for cmd in cmds):
+        state = advance_turn(state)
+
+    for cmd in cmds:
+        if cmd.verb in _OTHER_INCOME_VERBS:
+            other_income_done.add(faction)
+        if cmd.verb in _CULT_INCOME_VERBS:
+            cult_income_done.add(faction)
+
+    all_factions = set(state.setup.factions)
+    if state.phase == Phase.CLEANUP and cult_income_done >= all_factions:
+        state = end_of_round(state)
+        cult_income_done = set()
+        other_income_done = set()
+    if state.phase == Phase.INCOME and other_income_done >= all_factions:
+        state = begin_actions(state)
+        other_income_done = set()
+
+    return state, other_income_done, cult_income_done
+
+
+# --------------------------------------------------------------------------
+# Public entry point
+# --------------------------------------------------------------------------
+
+
+def replay_game(
+    game_id: str, moves_df: pl.DataFrame, deltas_df: pl.DataFrame, *, stop_after: int = 5
+) -> ReplayResult:
+    """Replay one game's ledger through ``apply()``, cross-checking every
+    row against the ``deltas.parquet`` oracle (module docstring).
+    """
+    try:
+        setup = load_setup(game_id)
+    except Exception as exc:  # noqa: BLE001 -- loud, contextualized failure
+        return ReplayResult(game_id=game_id, rows_checked=0, mismatches=(), error=str(exc))
+
+    state = start_setup(GameState.initial(setup))
+
+    game_moves = moves_df.filter(pl.col("game_id") == game_id).sort(["row", "seq"])
+    delta_lookup = _delta_lookup(deltas_df, game_id)
+
+    mismatches: list[Mismatch] = []
+    rows_checked = 0
+    other_income_done: set[str] = set()
+    cult_income_done: set[str] = set()
+
+    for row, faction, cmds in _iter_rows(game_moves):
+        raw = "; ".join(cmd.raw for cmd in cmds)
+        try:
+            for cmd in cmds:
+                state = apply(state, faction, cmd)
+            state, other_income_done, cult_income_done = _advance_after_row(
+                state, faction, cmds, other_income_done, cult_income_done
+            )
+        except Exception as exc:  # noqa: BLE001 -- loud, contextualized failure
+            return ReplayResult(
+                game_id=game_id,
+                rows_checked=rows_checked,
+                mismatches=tuple(mismatches),
+                error=f"row {row} ({faction}, {raw!r}): {exc}",
+            )
+
+        rows_checked += 1
+        delta = delta_lookup.get((row, faction))
+        if delta is not None:
+            mismatches.extend(_row_mismatches(game_id, row, faction, state, delta, raw))
+            if len(mismatches) >= stop_after:
+                break
+
+    return ReplayResult(game_id=game_id, rows_checked=rows_checked, mismatches=tuple(mismatches), error=None)
+
+
+# --------------------------------------------------------------------------
+# CLI: `uv run python -m bgai.engine.tm.replay --limit N [--game-id X] [--report out.json]`
+# --------------------------------------------------------------------------
+
+
+def _select_game_ids(limit: int, game_id: str | None) -> list[str]:
+    if game_id is not None:
+        return [game_id]
+    games_meta = pl.read_parquet(_GAMES_META_PATH).sort("game_id")
+    return games_meta["game_id"].to_list()[:limit]
+
+
+def _mismatch_verb(mismatch: Mismatch) -> str:
+    """First token of the reconstructed row text -- the responsible verb,
+    for the CLI's (verb, field) frequency triage.
+    """
+    return mismatch.raw.split(" ", 1)[0]
+
+
+def _max_row_reached(moves_df: pl.DataFrame, game_id: str, rows_checked: int) -> int | None:
+    """The ledger ``row`` id of the last row this replay actually reached
+    (``rows_checked`` distinct rows in, or ``None`` if none were).  Used to
+    bound the per-faction pass-rate denominator to rows the replay actually
+    saw, rather than every oracle row in the game (relevant when a replay
+    stopped early on an error or ``stop_after``).
+    """
+    if rows_checked == 0:
+        return None
+    distinct_rows = (
+        moves_df.filter(pl.col("game_id") == game_id)
+        .select("row")
+        .unique()
+        .sort("row")["row"]
+        .to_list()
+    )
+    return distinct_rows[rows_checked - 1] if rows_checked <= len(distinct_rows) else distinct_rows[-1]
+
+
+def _faction_pass_rates(
+    moves_df: pl.DataFrame, deltas_df: pl.DataFrame, result: ReplayResult
+) -> dict[str, tuple[int, int]]:
+    """``{faction: (clean_rows, total_oracle_rows_reached)}`` for one game,
+    bounded to the rows this replay actually reached.
+    """
+    max_row = _max_row_reached(moves_df, result.game_id, result.rows_checked)
+    if max_row is None:
+        return {}
+    game_deltas = deltas_df.filter((pl.col("game_id") == result.game_id) & (pl.col("row") <= max_row))
+    totals = Counter(game_deltas["faction"].to_list())
+    mismatched_rows: dict[str, set[int]] = {}
+    for m in result.mismatches:
+        mismatched_rows.setdefault(m.faction, set()).add(m.row)
+    return {
+        faction: (total - len(mismatched_rows.get(faction, ())), total) for faction, total in totals.items()
+    }
+
+
+def _print_report(results: list[ReplayResult], moves_df: pl.DataFrame, deltas_df: pl.DataFrame) -> None:
+    all_mismatches: list[Mismatch] = []
+    faction_clean: Counter[str] = Counter()
+    faction_total: Counter[str] = Counter()
+
+    for result in results:
+        status = "FAIL" if result.error or result.mismatches else "PASS"
+        print(
+            f"{status} {result.game_id}: rows_checked={result.rows_checked} "
+            f"mismatches={len(result.mismatches)} error={result.error}"
+        )
+        all_mismatches.extend(result.mismatches)
+        for faction, (clean, total) in _faction_pass_rates(moves_df, deltas_df, result).items():
+            faction_clean[faction] += clean
+            faction_total[faction] += total
+
+    if faction_total:
+        print("\nPer-faction row pass rates:")
+        for faction, total in sorted(faction_total.items()):
+            clean = faction_clean[faction]
+            print(f"  {faction}: {clean}/{total} ({100 * clean / total:.1f}%)")
+
+    if all_mismatches:
+        print("\nMismatch summary (verb, field) by frequency:")
+        by_verb_field: Counter[tuple[str, str]] = Counter(
+            (_mismatch_verb(m), m.field) for m in all_mismatches
+        )
+        for (verb, field), count in by_verb_field.most_common():
+            print(f"  {count:4d}  {verb} / {field}")
+
+
+def _write_report(path: str, results: list[ReplayResult]) -> None:
+    payload = [
+        {
+            "game_id": r.game_id,
+            "rows_checked": r.rows_checked,
+            "error": r.error,
+            "mismatches": [
+                {
+                    "row": m.row, "faction": m.faction, "field": m.field,
+                    "expected": m.expected, "actual": m.actual, "raw": m.raw,
+                }
+                for m in r.mismatches
+            ],
+        }
+        for r in results
+    ]
+    Path(path).write_text(json.dumps(payload, indent=2))
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description="Replay crawled games against apply() + the deltas oracle.")
+    parser.add_argument("--limit", type=int, default=10)
+    parser.add_argument("--game-id", type=str, default=None)
+    parser.add_argument("--report", type=str, default=None)
+    args = parser.parse_args(argv)
+
+    moves_df = pl.read_parquet(_MOVES_PATH)
+    deltas_df = pl.read_parquet(_DELTAS_PATH)
+    game_ids = _select_game_ids(args.limit, args.game_id)
+
+    results = [replay_game(gid, moves_df, deltas_df) for gid in game_ids]
+    _print_report(results, moves_df, deltas_df)
+    if args.report:
+        _write_report(args.report, results)
+
+
+if __name__ == "__main__":
+    main()
