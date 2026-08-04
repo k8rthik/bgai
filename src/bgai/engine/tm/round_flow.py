@@ -131,14 +131,16 @@ Bonus-tile coin accumulation
 --------------------------------------------------------------------------
 
 Corpus cross-check (same reference game): a bonus tile not chosen by
-anyone this round accrues +1 coin at cleanup (``GameState.bonus_coins``,
-seeded to 0 for every tile at ``GameState.initial``). Row 83, nomads takes
-BON7 (unclaimed since round 1) and gains exactly 1 C; row 298, nomads
-takes BON4 (unclaimed for 4 rounds) gains exactly 4 C; row 300, engineers
-takes BON9 (unclaimed 3 rounds) gains exactly 3 C. ``actions_pass.py``'s
+anyone this round accrues +1 coin (``GameState.bonus_coins``, seeded to 0
+for every tile at ``GameState.initial``). Row 83, nomads takes BON7
+(unclaimed since round 1) and gains exactly 1 C; row 298, nomads takes
+BON4 (unclaimed for 4 rounds) gains exactly 4 C; row 300, engineers takes
+BON9 (unclaimed 3 rounds) gains exactly 3 C. ``actions_pass.py``'s
 ``handle_pass`` pays this out and zeroes the taken tile's counter;
-``end_of_round`` below increments every tile *not currently held by any
-faction* by 1.
+``begin_actions`` below (task-14 Q2 fix -- see its own docstring for the
+``acting.pm`` citation) increments every tile *not currently held by any
+faction* by 1, once each round's own income is fully resolved, right
+before that round's ``Phase.ACTIONS`` begins.
 
 --------------------------------------------------------------------------
 Turn advancement: the central design
@@ -491,12 +493,41 @@ def begin_actions(state: GameState) -> GameState:
     round, but the round's very first active faction (``turn_order[0]``)
     never goes through that path, so this is the other of the two reset
     points Perl's own ``start_full_move`` collapses into one call.
+
+    Also fires the bonus-coin bump (``_bumped_bonus_coins`` -- moved here
+    from ``end_of_round``/``_advance_setup_bonus``, task-14 Q2 fix):
+    ``acting.pm``'s ``in_income_terrain_unlock`` (~546-554) calls
+    ``command_start()`` only once every round's income is fully resolved,
+    right *before* ``Phase.ACTIONS`` begins -- not at ``Phase.CLEANUP``'s
+    own tail end, which is one full income window too early. The
+    difference is invisible for a faction that never drops (the bump
+    lands before that faction's own next turn either way), but it matters
+    for a bonus tile released by an admin/AFK drop *during* the following
+    round's own income window (``drop-idle-players.pl`` re-runs
+    ``evaluate_game`` over a ledger with a literal ``drop-faction``
+    command spliced in -- same ``commands.pm:1576-1600`` handler as an
+    in-game drop, no separate code path): the old ``end_of_round``
+    call-site had already bumped every *still-held* tile for the
+    upcoming round before the drop-releases-tile event even happened, so
+    the newly-released tile started that round's accumulation at 0 and
+    was short by exactly the 1 coin a tile that was *never* held during
+    that round's own command_start would have earned. Corpus:
+    ``4pLeague_S56_D3L3_G2`` (BON1, engineers drops mid round 2's income,
+    cultists picks it up for 1 C at row 164), ``4pLeague_S56_D3L4_G5``
+    (BON6, round 5), ``4pLeague_S64_D3L1_G1`` (similar shape) -- all 3
+    were short by exactly 1 C before this fix, clean after.
     """
     if state.phase != Phase.INCOME:
         raise ValueError(f"begin_actions called outside Phase.INCOME (got {state.phase})")
     new_factions = {name: _start_full_move_reset(fs) for name, fs in state.factions.items()}
     active_index = _first_eligible_index(state, state.turn_order)
-    return replace(state, phase=Phase.ACTIONS, active_index=active_index, factions=new_factions)
+    return replace(
+        state,
+        phase=Phase.ACTIONS,
+        active_index=active_index,
+        factions=new_factions,
+        bonus_coins=_bumped_bonus_coins(state),
+    )
 
 
 # --------------------------------------------------------------------------
@@ -508,15 +539,27 @@ def _bumped_bonus_coins(state: GameState) -> dict[str, int]:
     """+1 coin on every bonus tile no faction currently holds
     (``commands.pm`` ``command_start``, lines 899-904: ``for (keys
     %{$game{pool}}) { next if !/^BON/; next if !$game{pool}{$_};
-    $game{bonus_coins}{$_}{C}++; }``). ``command_start`` fires on *every*
-    round transition, including the very first (``$game{round}++`` from 0
-    to 1) -- this is why ``_advance_setup_bonus`` below calls this helper
-    too, not just ``end_of_round`` (module docstring's own "Bonus-tile
-    coin accumulation" section already cites this exact mechanic; task-13
-    report, reference-game row 83 -- nomads takes BON7 for 1 C at row 83,
-    still round 1's own ACTIONS phase, which only checks out if BON7
-    already carried 1 accumulated coin from the SETUP_BONUS -> round-1
-    transition, since round 1's own cleanup hasn't happened yet by then).
+    $game{bonus_coins}{$_}{C}++; }``).
+
+    Sole call site is ``begin_actions`` (task-14 Q2 fix -- see that
+    function's own docstring for the full citation trail and corpus
+    evidence). Earlier revisions called this from ``end_of_round``
+    (``Phase.CLEANUP`` -> next round's ``Phase.INCOME``) and/or
+    ``_advance_setup_bonus`` (``Phase.SETUP_BONUS`` -> round 1's
+    ``Phase.INCOME``), reasoning that ``command_start`` fires on every
+    ``$game{round}++`` -- true, but ``acting.pm``'s
+    ``in_income_terrain_unlock`` (~546-554) shows ``command_start()``
+    actually fires *after* that round's own income is fully resolved,
+    right before ``Phase.ACTIONS`` begins, not at the round-transition's
+    own start. Calling it any earlier is invisible for a faction that
+    never drops (the bump lands before that faction's own next turn
+    either way) but undercounts a tile released by a drop *during* the
+    following round's own income window by exactly 1 coin (task-14
+    report, Q2, has 3 corpus games this broke). Still true that round 1
+    goes through this exact path too (task-13 report, reference-game row
+    83 -- nomads takes BON7 for 1 C at row 83, still round 1's own
+    ACTIONS phase, which only checks out if BON7 already carried 1
+    accumulated coin by the time ``begin_actions`` runs for round 1).
     """
     held_bonus = {fs.bonus for fs in state.factions.values() if fs.bonus is not None}
     new_bonus_coins = dict(state.bonus_coins)
@@ -529,8 +572,11 @@ def _bumped_bonus_coins(state: GameState) -> dict[str, int]:
 def end_of_round(state: GameState) -> GameState:
     """``Phase.CLEANUP`` -> next round's ``Phase.INCOME`` (or
     ``Phase.FINISHED`` after round 6) -- module docstring, Task 12
-    contract step 6: bonus-tile coin accumulation, per-round balance
-    resets, and next round's turn order.
+    contract step 6: per-round balance resets and next round's turn
+    order. Bonus-tile coin accumulation does *not* happen here (task-14
+    Q2 fix -- moved to ``begin_actions``, see its docstring): ``acting.
+    pm``'s ``command_start()`` fires after the *next* round's own income
+    is resolved, not at this round's cleanup.
 
     ``spades_available`` is deliberately **not** reset here (task-13 fix:
     an earlier revision zeroed it alongside ``actions_used``/
@@ -546,8 +592,6 @@ def end_of_round(state: GameState) -> GameState:
     """
     if state.phase != Phase.CLEANUP:
         raise ValueError(f"end_of_round called outside Phase.CLEANUP (got {state.phase})")
-
-    new_bonus_coins = _bumped_bonus_coins(state)
 
     new_factions = {
         name: replace(fs, actions_used=frozenset(), extra_actions=0, passed=False)
@@ -592,7 +636,6 @@ def end_of_round(state: GameState) -> GameState:
         state,
         factions=new_factions,
         power_actions_taken=frozenset(),
-        bonus_coins=new_bonus_coins,
         turn_order=new_turn_order,
         passed_order=(),
         active_index=0,
@@ -672,15 +715,15 @@ def _advance_setup_bonus(state: GameState) -> GameState:
     next_index = _first_live_setup_index(state, state.turn_order, state.active_index + 1)
     if next_index is not None:
         return replace(state, active_index=next_index)
-    # command_start's bonus-coin bump fires here too (_bumped_bonus_coins'
-    # own docstring) -- this is round 1's "$game{round}++", from 0 to 1.
+    # No bonus-coin bump here (task-14 Q2 fix -- moved to begin_actions,
+    # which now covers round 1's own "$game{round}++" from 0 to 1 too,
+    # once round 1's own income is resolved).
     return replace(
         state,
         phase=Phase.INCOME,
         round=1,
         turn_order=state.setup.factions,
         active_index=0,
-        bonus_coins=_bumped_bonus_coins(state),
     )
 
 
