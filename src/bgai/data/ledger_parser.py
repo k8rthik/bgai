@@ -62,6 +62,19 @@ _RES = r"(?:PW|VP|[CWP]|power|coins?|workers?|priests?)"
 _Maker = Callable[[re.Match, str], ParsedCommand]
 
 
+def _normalize_hex_ref(text: str) -> str:
+    """Land hexes are keyed uppercase ("A1".."I13"); river hexes are keyed
+    lowercase ("r0".."r35", ``board.py``'s own docstring). Every other
+    location-bearing rule here only ever matches land hexes, so a blanket
+    ``.upper()`` was correct for them -- but ``connect``'s grammar accepts
+    a bare river-hex reference too (``r\\d+``), case-insensitively per
+    ``re.IGNORECASE``, and blindly uppercasing that produced "R1" instead
+    of the board's actual "r1" key, a lookup miss (task-13 report,
+    reference-game row 208: ``connect r1`` -- "unknown hex 'R1'").
+    """
+    return text.lower() if text[:1] in ("r", "R") and text[1:].isdigit() else text.upper()
+
+
 def _rule(pattern: str, maker: _Maker) -> tuple[re.Pattern, _Maker]:
     return re.compile(pattern, re.IGNORECASE), maker
 
@@ -154,7 +167,7 @@ _RULES: list[tuple[re.Pattern, _Maker]] = [
         r"^connect\s+([a-z]\d+|r\d+)(?::([a-z]\d+|r\d+))?$",
         lambda m, raw: ParsedCommand(
             "connect", Kind.DECISION, raw,
-            loc=m[1].upper(), loc2=m[2].upper() if m[2] else None,
+            loc=_normalize_hex_ref(m[1]), loc2=_normalize_hex_ref(m[2]) if m[2] else None,
         ),
     ),
     _rule(

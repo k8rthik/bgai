@@ -127,6 +127,13 @@ def test_early_era_variants() -> None:
     assert (dig.n1, dig.loc) == (1, "I8")
     conn = cmd("connect e4:f2")
     assert (conn.loc, conn.loc2) == ("E4", "F2")
+    # River hexes are keyed lowercase on the board ("r0".."r35",
+    # board.py's own docstring) -- unlike land hexes, a bare river-hex
+    # `connect` reference must stay lowercase, not get the blanket
+    # `.upper()` land hexes need (task-13 report, reference-game row 208:
+    # "connect r1" produced "R1", a board.hexes lookup miss).
+    assert cmd("connect r1").loc == "r1"
+    assert cmd("connect R1").loc == "r1"
     assert cmd("-SPADE").verb == "lose_spade"
     assert cmd("-2SPADE").n1 == 2
     assert cmd("-FREE_D").reason == "FREE_D"
