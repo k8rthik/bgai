@@ -68,16 +68,46 @@ Ported from the reference implementation (jsnell/terra-mystica, MIT):
   originating build (pushed by :func:`queue_leech` alongside the batch of
   offers, ``amount`` = count of nonzero-amount offers, ``source`` =
   builder name) still tracks *how many offers remain unanswered* (needed
-  to detect "the last offer was just declined" for the "not_taken" case)
-  and *whether the "taken" effect already fired this batch* (via
-  ``options``, so a second accept in the same batch doesn't push a second
-  ``cult_choice``) -- but the effect itself now fires through
-  ``factions.hooks.HOOKS["cultists"].on_leech_resolved`` (see that hook's
-  docstring), called exactly at the two Perl-faithful trigger points
-  (first accept; last-offer-of-an-all-declined-batch), not once per raw
-  offer resolution. This satisfies the brief's literal instruction
-  ("Cultists: ``HOOKS["cultists"].on_leech_resolved``") which the prior
-  revision left unwired.
+  to detect "the last offer was just declined") and *whether the "taken"
+  effect already fired this batch* (via ``options``, so a second accept
+  in the same batch doesn't push a second ``cult_choice``) -- the "taken"
+  effect itself fires through
+  ``factions.hooks.HOOKS["cultists"].on_leech_resolved(..., accepted=True)``
+  (see that hook's docstring), called at the first-accept trigger point,
+  not once per raw offer resolution. This satisfies the brief's literal
+  instruction ("Cultists: ``HOOKS["cultists"].on_leech_resolved``") which
+  a prior revision left unwired.
+
+- **"not_taken" is granted directly off the ledger's own bracket row, not
+  inferred from the resolving decline.** ``add_row_for_effect``
+  (``ledger.pm`` 119-131) is an *unbuffered* immediate push straight onto
+  the ledger's row array, while the ordinary row a command produces is
+  only pushed later, when that row's *buffered* collector flushes
+  (``finish_row``, ``ledger.pm`` 78-112, called once at the end of
+  processing a full submitted move). Since ``cultist_maybe_gain_power``
+  (called synchronously *during* ``command_decline``'s own execution,
+  commands.pm 537) uses the unbuffered path, its bracket row
+  (``"[all opponents declined power]"``) always lands **one position
+  before** the resolving ``decline`` row's own summary in final ledger
+  order -- even though the decline logically, causally precedes it.
+  Verified against the corpus (task-13 report follow-up,
+  ``4pLeague_S10_D1L1_G5`` row 208): the reference's ``deltas.parquet``
+  checkpoint at the bracket row already reflects the +1 PW, one full row
+  before the ``decline`` command that (in this engine's original design)
+  would have driven it. Inferring the gain from ``handle_decline`` alone
+  therefore always lands it one row late.
+
+  Fixed by having ``ledger_parser.py`` recognize this exact bracket text
+  as its own verb (``cultist_leech_bonus``, not the generic
+  ``annotation``) and granting ``FACTIONS[faction].leech_effect
+  ["not_taken"]`` directly off *that* row (:func:`handle_cultist_leech_bonus`
+  below) -- the row's own ``faction`` field is already the Cultists
+  player, so no offer/pending lookup is even needed.
+  ``_resolve_cultist_watch``'s ``accepted=False`` branch still walks the
+  watch marker down to zero and pops it (state hygiene: no dangling
+  ``cultist_leech_watch`` pending once a batch is fully answered) but no
+  longer grants any resource itself -- ``HOOKS["cultists"]
+  .on_leech_resolved(..., accepted=False)`` is now a no-op passthrough.
 
 **Zero-cap decision** (task brief: "capped by Power.gainable(); no offer
 if cap is 0 (verify vs Perl)"): verified above against ``note_leech`` --
@@ -110,12 +140,16 @@ _FIRED_OPTION = "taken_effect_fired"
 
 class _CultistsHooks(FactionHooks):
     """Cultists' ``leech_effect`` (``factions_data.py``): ``on_leech_resolved``
-    is called by :func:`_resolve_cultist_watch` at exactly the two
-    Perl-faithful trigger points (see module docstring) -- ``accepted=True``
-    means "the first accepted offer of this build's batch just resolved"
-    (``leech_effect["taken"]``, unconditional); ``accepted=False`` means
-    "the last offer of an all-declined batch just resolved"
-    (``leech_effect["not_taken"]``, gated by ``errata_cultist_power``).
+    is called by :func:`_resolve_cultist_watch` at the accept trigger point
+    (see module docstring) -- ``accepted=True`` means "the first accepted
+    offer of this build's batch just resolved" (``leech_effect["taken"]``,
+    unconditional: pushes a ``cult_choice`` pending, resolved by a later
+    explicit ``+CULT`` row). ``accepted=False`` ("the last offer of an
+    all-declined batch just resolved") is a no-op here: ``leech_effect
+    ["not_taken"]`` is granted directly off the ledger's own
+    ``"[all opponents declined power]"`` bracket row instead
+    (:func:`handle_cultist_leech_bonus`, module docstring) -- inferring it
+    from the resolving decline would land it one ledger row late.
     """
 
     def on_leech_resolved(self, state: GameState, faction: str, accepted: bool) -> GameState:
@@ -123,10 +157,7 @@ class _CultistsHooks(FactionHooks):
             return push_pending(
                 state, PendingDecision(faction=faction, kind="cult_choice", amount=1)
             )
-        if not state.setup.options.errata_cultist_power:
-            return state
-        fs = state.factions[faction]
-        return with_faction(state, faction, replace(fs, power=fs.power.gain(1)))
+        return state
 
 
 HOOKS["cultists"] = _CultistsHooks()
@@ -354,5 +385,37 @@ def handle_decline(state: GameState, faction: str, cmd: ParsedCommand) -> GameSt
     return _decline_one(state, faction, cmd)
 
 
+def handle_cultist_leech_bonus(state: GameState, faction: str, cmd: ParsedCommand) -> GameState:
+    """``"[all opponents declined power]"`` (``ledger_parser.py``'s
+    ``cultist_leech_bonus`` rule, module docstring): grant
+    ``FACTIONS[faction].leech_effect["not_taken"]`` (``{"PW": 1}`` for
+    Cultists) directly to the row's own acting faction. No offer/pending
+    lookup needed -- the ledger row itself already names who gets it and
+    the raw ledger only ever contains this bracket when
+    ``errata-cultist-power`` produced it, but the option is still checked
+    here for defense (``cultist_maybe_gain_power``, commands.pm 576).
+    """
+    if not state.setup.options.errata_cultist_power:
+        raise EngineError(
+            "cultist_leech_bonus row seen without errata_cultist_power set",
+            state=state,
+            faction=faction,
+            cmd=cmd,
+        )
+    gain = FACTIONS[faction].leech_effect.get("not_taken", {})
+    fs = state.factions[faction]
+    for key, amount in gain.items():
+        if not amount:
+            continue
+        if key == "PW":
+            fs = replace(fs, power=fs.power.gain(amount))
+        elif key == "VP":
+            fs = replace(fs, vp=fs.vp + amount)
+        else:
+            raise ValueError(f"unhandled leech_effect.not_taken key {key!r} for {faction}")
+    return with_faction(state, faction, fs)
+
+
 register_handler("leech", handle_leech)
 register_handler("decline", handle_decline)
+register_handler("cultist_leech_bonus", handle_cultist_leech_bonus)

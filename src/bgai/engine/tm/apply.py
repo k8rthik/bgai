@@ -79,6 +79,12 @@ _ORDER_EXEMPT_VERBS = frozenset(
         "all_income_for_faction",
         "score_vp",
         "score_resources",
+        # Cultists' "[all opponents declined power]" bracket (`leech.py`'s
+        # `handle_cultist_leech_bonus`, `ledger_parser.py`'s
+        # `cultist_leech_bonus` rule): fires mid-processing of some *other*
+        # faction's `decline`/capped `leech` row, so it can land on a ledger
+        # row where Cultists themselves are not `active_faction`.
+        "cultist_leech_bonus",
     }
 )
 _LEECH_ANSWER_VERBS = frozenset({"leech", "decline"})

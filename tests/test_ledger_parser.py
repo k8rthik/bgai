@@ -85,10 +85,20 @@ def test_gain_rows_are_decisions_for_tiles_and_bookkeeping_for_cults() -> None:
 
 def test_annotations_and_misc() -> None:
     assert cmd("[opponent accepted power]").kind == Kind.ANNOTATION
-    assert cmd("[all opponents declined power]").kind == Kind.ANNOTATION
     assert cmd("wait").kind == Kind.DECISION
     assert cmd("setup").kind == Kind.BOOKKEEPING
     assert cmd("done").kind == Kind.DECISION
+
+
+def test_cultist_leech_bonus_bracket_is_its_own_verb_not_a_generic_annotation() -> None:
+    """Task-13 report follow-up (``4pLeague_S10_D1L1_G5`` row 208):
+    ``"[all opponents declined power]"`` carries a real state change
+    (Cultists' ``leech_effect.not_taken``) that lands on this exact ledger
+    row -- unlike other bracket text, it can't be discarded as a
+    no-op ``annotation`` (``leech.py``'s module docstring has the full
+    ordering citation for why)."""
+    move = cmd("[all opponents declined power]")
+    assert (move.verb, move.kind) == ("cultist_leech_bonus", Kind.BOOKKEEPING)
 
 
 def test_real_world_variants() -> None:

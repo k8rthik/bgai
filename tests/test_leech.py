@@ -16,7 +16,13 @@ from bgai.data.ledger_parser import Kind, ParsedCommand
 from bgai.engine.tm.apply import EngineError, apply
 from bgai.engine.tm.board import base_board
 from bgai.engine.tm.factions_data import FACTIONS
-from bgai.engine.tm.leech import handle_decline, handle_leech, offers_for_build, queue_leech
+from bgai.engine.tm.leech import (
+    handle_cultist_leech_bonus,
+    handle_decline,
+    handle_leech,
+    offers_for_build,
+    queue_leech,
+)
 from bgai.engine.tm.power import Power
 from bgai.engine.tm.setup import load_setup
 from bgai.engine.tm.state import (
@@ -376,7 +382,15 @@ def test_apply_lets_cultists_answer_cult_choice_mid_batch_through_the_gate() -> 
     assert s3.factions["cultists"].power.bowl3 == s2.factions["cultists"].power.bowl3 + 1
 
 
-def test_cultists_all_decline_grants_power_under_errata_option() -> None:
+def test_cultists_all_decline_clears_the_watch_but_grants_nothing_from_decline_itself() -> None:
+    """Task-13 report follow-up (``4pLeague_S10_D1L1_G5`` row 208):
+    ``handle_decline`` no longer grants the ``not_taken`` power itself --
+    that now comes directly off the ledger's own
+    ``"[all opponents declined power]"`` bracket row
+    (``test_cultist_leech_bonus_grants_not_taken_power_directly`` below),
+    since inferring it from the resolving decline lands it one ledger row
+    late (``leech.py``'s module docstring). ``handle_decline`` still walks
+    the watch marker to zero and pops it either way."""
     s = _cultists_seeded()
     s = replace(
         s, setup=replace(s.setup, options=replace(s.setup.options, errata_cultist_power=True))
@@ -385,10 +399,10 @@ def test_cultists_all_decline_grants_power_under_errata_option() -> None:
     before = s.factions["cultists"].power
     s2 = handle_decline(s, "darklings", _cmd("decline", n1=2, target="cultists"))
     assert s2.pending == ()
-    assert s2.factions["cultists"].power == before.gain(1)
+    assert s2.factions["cultists"].power == before
 
 
-def test_cultists_all_decline_without_errata_option_grants_nothing() -> None:
+def test_cultists_all_decline_without_errata_option_also_grants_nothing() -> None:
     s = _cultists_seeded()
     s = replace(
         s, setup=replace(s.setup, options=replace(s.setup.options, errata_cultist_power=False))
@@ -398,6 +412,30 @@ def test_cultists_all_decline_without_errata_option_grants_nothing() -> None:
     s2 = handle_decline(s, "darklings", _cmd("decline", n1=2, target="cultists"))
     assert s2.pending == ()
     assert s2.factions["cultists"].power == before
+
+
+def test_cultist_leech_bonus_grants_not_taken_power_directly() -> None:
+    """``handle_cultist_leech_bonus`` (``ledger_parser.py``'s
+    ``cultist_leech_bonus`` verb): grants ``leech_effect["not_taken"]``
+    (``{"PW": 1}``) straight to the row's own faction, independent of any
+    pending/watch bookkeeping -- this is what actually lands the +1 PW at
+    the ledger's checkpoint (task-13 report follow-up, reference row 208)."""
+    s = _cultists_seeded()
+    s = replace(
+        s, setup=replace(s.setup, options=replace(s.setup.options, errata_cultist_power=True))
+    )
+    before = s.factions["cultists"].power
+    s2 = handle_cultist_leech_bonus(s, "cultists", _cmd("cultist_leech_bonus"))
+    assert s2.factions["cultists"].power == before.gain(1)
+
+
+def test_cultist_leech_bonus_without_errata_option_is_rejected() -> None:
+    s = _cultists_seeded()
+    s = replace(
+        s, setup=replace(s.setup, options=replace(s.setup.options, errata_cultist_power=False))
+    )
+    with pytest.raises(EngineError):
+        handle_cultist_leech_bonus(s, "cultists", _cmd("cultist_leech_bonus"))
 
 
 def test_non_cultists_builder_never_gets_a_watch_marker() -> None:

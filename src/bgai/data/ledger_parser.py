@@ -245,6 +245,24 @@ _RULES: list[tuple[re.Pattern, _Maker]] = [
         lambda m, raw: ParsedCommand("setup", Kind.BOOKKEEPING, raw),
     ),
     _rule(
+        # Cultists' (Game/Factions/Cultists.pm `leech_effect.not_taken`)
+        # "all opponents declined" bonus: `commands.pm`'s
+        # `cultist_maybe_gain_power` (558-586) logs this via
+        # `$ledger->add_row_for_effect` -- an *unbuffered*, immediate
+        # ledger-array push that lands **before** the resolving
+        # `decline`/capped-`leech` row's own (buffered, `finish_row`-flushed)
+        # summary row in final ledger order, even though it fires
+        # synchronously *during* that row's command processing
+        # (`leech.py`'s module docstring has the full ordering citation).
+        # Parsed as its own verb (not a generic ``annotation``) so
+        # ``leech.py`` can grant the faction's ``leech_effect.not_taken``
+        # gain directly off this row instead of trying to infer it from the
+        # *following* row's decline command, which would land the state
+        # change one row late relative to this checkpoint.
+        r"^\[all opponents declined power\]$",
+        lambda m, raw: ParsedCommand("cultist_leech_bonus", Kind.BOOKKEEPING, raw),
+    ),
+    _rule(
         r"^\[.*\]$",
         lambda m, raw: ParsedCommand("annotation", Kind.ANNOTATION, raw),
     ),
