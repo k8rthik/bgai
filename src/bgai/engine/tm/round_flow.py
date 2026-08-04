@@ -399,6 +399,18 @@ def end_of_round(state: GameState) -> GameState:
     ``Phase.FINISHED`` after round 6) -- module docstring, Task 12
     contract step 6: bonus-tile coin accumulation, per-round balance
     resets, and next round's turn order.
+
+    ``spades_available`` is deliberately **not** reset here (task-13 fix:
+    an earlier revision zeroed it alongside ``actions_used``/
+    ``extra_actions``/``passed``, with no Perl citation backing that
+    reset -- ``commands.pm`` never touches ``$faction->{SPADE}`` at
+    ``command_start``, only ever inside ``command_dig``/``command_
+    transform``/the ``-SPADE`` branch). Reference-game row 96-98 proves
+    it must survive: round 1's own WATER->SPADE cult-income tile grants
+    darklings 1 spade at cleanup (row 96, still round 1's tile), and row
+    98 -- *after* this function has already run (``round`` is 2, still
+    ``Phase.INCOME``) -- spends that exact spade on a ``transform``. A
+    reset here would zero it out before darklings ever gets to spend it.
     """
     if state.phase != Phase.CLEANUP:
         raise ValueError(f"end_of_round called outside Phase.CLEANUP (got {state.phase})")
@@ -406,9 +418,7 @@ def end_of_round(state: GameState) -> GameState:
     new_bonus_coins = _bumped_bonus_coins(state)
 
     new_factions = {
-        name: replace(
-            fs, actions_used=frozenset(), spades_available=0, extra_actions=0, passed=False
-        )
+        name: replace(fs, actions_used=frozenset(), extra_actions=0, passed=False)
         for name, fs in state.factions.items()
     }
 

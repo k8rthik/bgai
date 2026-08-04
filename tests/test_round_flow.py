@@ -219,7 +219,11 @@ def test_end_of_round_increments_bonus_coins_only_on_untaken_tiles() -> None:
             assert s2.bonus_coins[tile] == 1
 
 
-def test_end_of_round_resets_per_round_balances() -> None:
+def test_end_of_round_resets_per_round_balances_but_not_spades() -> None:
+    """``spades_available`` deliberately survives ``end_of_round`` (that
+    function's own docstring, task-13 fix): reference-game rows 96-98
+    need a cleanup-granted cult-income spade to still be there for a
+    ``transform`` two rows -- and one ``end_of_round`` call -- later."""
     s = replace(_state(), phase=Phase.CLEANUP)
     s = _rich(
         s,
@@ -233,7 +237,7 @@ def test_end_of_round_resets_per_round_balances() -> None:
     s2 = end_of_round(s)
     fs = s2.factions["engineers"]
     assert fs.actions_used == frozenset()
-    assert fs.spades_available == 0
+    assert fs.spades_available == 2  # NOT reset
     assert fs.extra_actions == 0
     assert fs.passed is False
     assert s2.power_actions_taken == frozenset()
