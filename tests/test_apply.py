@@ -29,6 +29,7 @@ from bgai.engine.tm.state import (
     FactionState,
     GameState,
     PendingDecision,
+    Phase,
     active_faction,
     with_faction,
 )
@@ -423,6 +424,24 @@ def test_apply_rejects_out_of_turn_non_exempt_move() -> None:
     cmd = _cmd("burn", n1=1)
     with pytest.raises(EngineError):
         apply(s, "darklings", cmd)
+
+
+def test_apply_allows_any_verb_out_of_turn_during_income_or_cleanup_phase() -> None:
+    """``Phase.INCOME``/``Phase.CLEANUP`` have no active turn-order faction
+    at all (round_flow.py's own docstring) -- reference-game row 98
+    (task-13 report) needs exactly this: a cult-income SPADE payout forces
+    an immediate ``transform`` from the granted faction, sandwiched
+    between round N's cult-income batch and round N+1's other-income
+    batch, both still inside Phase.INCOME. A genuine main-track verb
+    (here, ``burn`` -- simplest to exercise without board setup) from a
+    non-active faction succeeds in either phase, unlike Phase.ACTIONS
+    (``test_apply_rejects_out_of_turn_non_exempt_move`` above)."""
+    for phase in (Phase.INCOME, Phase.CLEANUP):
+        s = replace(_state(), phase=phase)
+        assert active_faction(s) == "engineers"
+        before = s.factions["darklings"].power
+        s2 = apply(s, "darklings", _cmd("burn", n1=1))
+        assert s2.factions["darklings"].power == before.burn(1)
 
 
 def test_apply_allows_wait_out_of_turn() -> None:

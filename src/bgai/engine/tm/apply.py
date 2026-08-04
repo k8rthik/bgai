@@ -21,6 +21,7 @@ from bgai.engine.tm.state import (
     FactionState,
     GameState,
     PendingDecision,
+    Phase,
     active_faction,
     with_faction,
 )
@@ -102,6 +103,23 @@ def apply(state: GameState, faction: str, cmd: ParsedCommand) -> GameState:
     """The engine's single entry point: dispatch `cmd` for `faction`."""
     exempt = (
         cmd.verb in _ORDER_EXEMPT_VERBS
+        # Phase.INCOME/Phase.CLEANUP have no "active" turn-order faction at
+        # all (round_flow.py's own docstring) -- every row during these two
+        # phases names its own grantee/actor directly, regardless of verb.
+        # This was previously only granted to the three income verbs
+        # themselves, but the same reasoning covers a genuine main-track
+        # verb here too: a cult-income grant that includes SPADE (round 1's
+        # own WATER->SPADE tile, e.g.) forces that faction to immediately
+        # `transform` before the "other income" batch runs for anyone
+        # (Perl's `command_start_planning`, commands.pm 1124-1160: cult
+        # income is granted per-faction, and a resulting live SPADE pauses
+        # that faction right there -- `$faction->{SPADE}` gates the next
+        # step -- before `command_start`'s round++ and the "other" batch
+        # proceed). Reference-game row 98 is exactly this: darklings
+        # `transform H7 to black`, round=2 already but still Phase.INCOME,
+        # sandwiched between round 1's cult_income rows (94-97) and round
+        # 2's other_income rows (100-103) -- task-13 report.
+        or state.phase in (Phase.INCOME, Phase.CLEANUP)
         or (
             cmd.verb in _LEECH_ANSWER_VERBS and _has_queued_pending_of_kind(state, faction, "leech")
         )
