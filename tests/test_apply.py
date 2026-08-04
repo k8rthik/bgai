@@ -377,11 +377,25 @@ def test_lose_spade_decrements_the_real_balance() -> None:
     assert s2.factions["engineers"].spades_available == 1
 
 
-def test_lose_marker_is_a_documented_noop_stub() -> None:
-    s = _state()
+def test_lose_marker_retires_the_matching_pending() -> None:
+    """Task 10 (``actions_power.py``) replaces the Task 7 no-op stub with a
+    real pop of the matching outstanding marker pending -- see that
+    module's docstring (real corpus rows: ``action ACT1. -BRIDGE``,
+    ``action ACTW. -FREE_D``, ``action ACTS. -FREE_TP``,
+    ``action ACTN. -FREE_TF``).
+    """
+    s = _as_active(_state(), "engineers")
+    s = push_pending(s, PendingDecision(faction="engineers", kind="bridge", amount=1))
     cmd = _cmd("lose_marker", kind=Kind.BOOKKEEPING, reason="BRIDGE")
     s2 = apply(s, "engineers", cmd)
-    assert s2 == s
+    assert s2.pending == ()
+
+
+def test_lose_marker_with_no_outstanding_pending_raises() -> None:
+    s = _as_active(_state(), "engineers")
+    cmd = _cmd("lose_marker", kind=Kind.BOOKKEEPING, reason="BRIDGE")
+    with pytest.raises(EngineError):
+        apply(s, "engineers", cmd)
 
 
 def test_convert_marker_is_a_documented_noop_bookkeeping_row() -> None:

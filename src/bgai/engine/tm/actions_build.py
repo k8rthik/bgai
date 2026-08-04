@@ -3,21 +3,35 @@
 Ported from the reference implementation (jsnell/terra-mystica, MIT),
 ``src/commands.pm``:
 
-- ``command_build`` (148-256): unknown/occupied hex (156-159); a
-  ``FREE_D`` marker (161-164, 207-210) makes the build free and
-  terraform-optional -- **not yet wired here**, see the seam note on the
-  color check below (Task 10 owns ``FREE_D``); otherwise wrong-color is a
-  hard error (``tf_needed``, 171); ``pay``/``gain`` only outside round 0
-  (224-227, ``$free = ($game{round} == 0)`` at 152); ``note_leech`` (239,
-  this module's ``leech.queue_leech``); ``advance_track`` for D count/cost
-  (241); ``detect_towns_from`` (252, ``_maybe_queue_town``). Score-tile
-  BUILD VP (244-245) is explicitly **not** applied -- reserved for a
-  `score_vp` row handler (Task 12).
+- ``command_build`` (148-256): unknown/occupied hex (156-159); a live
+  ``FREE_D`` marker (161-164) makes the build free and skips the
+  reachability check (Task 10, ``actions_power.py``'s Witches'-Ride
+  finding: ``build_color_ok``, ``map.pm`` 657-664, is **never** bypassed --
+  the target must still already be the faction's home color; what
+  ``FREE_D``/``TELEPORT_NO_TF`` remove is cost and the ``check_reachable``
+  call, 207-227, only ever reached from the non-``TELEPORT_NO_TF`` branch).
+  Ported here as a queued ``PendingDecision(kind="free_d")`` (pushed by
+  ``actions_power.py``'s ACTW handler), consumed by ``handle_build`` below.
+  Wrong-color is otherwise still a hard error (``tf_needed``, 171);
+  ``pay``/``gain`` only outside round 0 (224-227, ``$free = ($game{round}
+  == 0)`` at 152); ``note_leech`` (239, this module's ``leech.queue_leech``)
+  fires **unconditionally**, ``FREE_D`` build included (Task 10 cross-check
+  against the corpus's ``action ACTW. build X`` rows: always followed by
+  ordinary opponent ``Leech`` rows when adjacent); ``advance_track`` for D
+  count/cost (241); ``detect_towns_from`` (252, ``_maybe_queue_town``).
+  Score-tile BUILD VP (244-245) is explicitly **not** applied -- reserved
+  for a `score_vp` row handler (Task 12).
 - ``command_upgrade`` (258-311): wrong-color is always a hard error
   (266-267, no ``FREE_D``-style bypass for upgrades). ``note_leech`` fires
-  *before* cost (280) for the D->TP neighbour-cost rule (282-293): a
-  ``FREE_TP`` marker (Task 9/10, Swarmlings ACTS) makes it free;
-  otherwise, **only when ``%this_leech`` came back empty** (no adjacent
+  *before* cost (280) for the D->TP neighbour-cost rule (282-293): a live
+  ``FREE_TP`` marker (Swarmlings ACTS, Task 10 -- queued as
+  ``PendingDecision(kind="free_tp")`` by ``actions_power.py``, consumed by
+  ``handle_upgrade`` below) makes it free, matching ``command_upgrade``'s
+  own ``$faction->{FREE_TP}`` branch (284-287) -- but the leech offers
+  were already computed *before* this branch runs, so a free ACTS upgrade
+  still queues ordinary leech (cross-checked against the corpus's
+  ``action ACTS. Upgrade X to TP`` rows); otherwise, **only when
+  ``%this_leech`` came back empty** (no adjacent
   opponent building of a different color) does this block manually
   pre-pay the ``C`` portion of the advance cost a *second* time --
   ``advance_track`` (301) pays the *full* ``advance_cost`` (W and C)
@@ -128,6 +142,17 @@ def _find_pending(state: GameState, faction: str, kind: str, cmd: ParsedCommand)
     raise EngineError(
         f"no {kind!r} pending queued for {faction}", state=state, faction=faction, cmd=cmd
     )
+
+
+def _find_pending_optional(state: GameState, faction: str, kind: str) -> int | None:
+    """Like ``_find_pending``, but ``None`` (not ``EngineError``) when no
+    matching pending is queued -- used for markers (``free_d``/``free_tp``)
+    whose absence is the *normal* case, not a caller error.
+    """
+    for i, p in enumerate(state.pending):
+        if p.faction == faction and p.kind == kind:
+            return i
+    return None
 
 
 def _consume_amount(
@@ -357,10 +382,9 @@ def handle_build(state: GameState, faction: str, cmd: ParsedCommand) -> GameStat
     setup = state.phase == Phase.SETUP_DWELLINGS
     color = FACTIONS[faction].color
     if hex_state.color != color:
-        # Seam for Task 10: a FREE_D marker (Witches' Ride, ACTW) allows a
-        # build on ANY empty non-river hex regardless of color, with no
-        # terraform. This handler has no FREE_D pending to check yet --
-        # Task 10 must look for one here and bypass this check when found.
+        # ACTW's FREE_D marker (module docstring) does NOT bypass this
+        # check -- build_color_ok is never skipped in Perl, only cost and
+        # reachability are.
         raise EngineError(
             f"{hex_key} is {hex_state.color}, not {faction}'s home color {color}",
             state=state,
@@ -368,7 +392,9 @@ def handle_build(state: GameState, faction: str, cmd: ParsedCommand) -> GameStat
             cmd=cmd,
         )
 
-    if not setup and hex_key not in reachable(state, faction):
+    free_d_index = None if setup else _find_pending_optional(state, faction, "free_d")
+
+    if not setup and free_d_index is None and hex_key not in reachable(state, faction):
         raise EngineError(
             f"{hex_key} is not reachable by {faction}", state=state, faction=faction, cmd=cmd
         )
@@ -383,13 +409,16 @@ def handle_build(state: GameState, faction: str, cmd: ParsedCommand) -> GameStat
             cmd=cmd,
         )
 
-    if not setup:
+    if not setup and free_d_index is None:
         fs = _pay(state, faction, fs, d_track.cost, cmd)
 
     fs = replace(fs, buildings={**fs.buildings, "D": fs.buildings["D"] | {hex_key}})
     new_hexes = dict(state.hexes)
     new_hexes[hex_key] = replace(hex_state, building="D", owner=faction)
     new_state = replace(with_faction(state, faction, fs), hexes=new_hexes)
+
+    if free_d_index is not None:
+        new_state = pop_pending(new_state, free_d_index)
 
     if not setup:
         new_state = leech.queue_leech(new_state, faction, hex_key)
@@ -438,7 +467,11 @@ def handle_upgrade(state: GameState, faction: str, cmd: ParsedCommand) -> GameSt
 
     offers = leech.offers_for_build(state, faction, hex_key)
 
-    if new_type == "TP":
+    free_tp_index = _find_pending_optional(state, faction, "free_tp") if new_type == "TP" else None
+
+    if free_tp_index is not None:
+        cost: dict[str, int] = {}
+    elif new_type == "TP":
         cost = dict(track.cost)
         if not offers:  # no adjacent opponent building -> isolated surcharge
             cost["C"] = cost.get("C", 0) * 2
@@ -456,6 +489,9 @@ def handle_upgrade(state: GameState, faction: str, cmd: ParsedCommand) -> GameSt
     new_hexes = dict(state.hexes)
     new_hexes[hex_key] = replace(hex_state, building=new_type, owner=faction)
     new_state = replace(with_faction(state, faction, fs), hexes=new_hexes)
+
+    if free_tp_index is not None:
+        new_state = pop_pending(new_state, free_tp_index)
 
     gain = track.build_gain[level_index] if level_index < len(track.build_gain) else {}
     new_state = _apply_build_gain(new_state, faction, gain)

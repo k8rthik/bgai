@@ -312,9 +312,12 @@ def handle_lose_resource(state: GameState, faction: str, cmd: ParsedCommand) -> 
 
 
 def handle_lose_marker(state: GameState, faction: str, cmd: ParsedCommand) -> GameState:
-    """No-op stub: `-FREE_D`/`-FREE_TP`/`-FREE_TF`/`-BRIDGE` retire a
-    one-shot marker from a build/special action; tracking those on
-    `FactionState` is deferred to Task 9/10's build handlers.
+    """No-op placeholder: `-FREE_D`/`-FREE_TP`/`-FREE_TF`/`-BRIDGE` retire a
+    one-shot marker from a build/special action. Task 10's
+    `actions_power.handle_lose_marker` (module-bottom import below)
+    replaces this entry with the real implementation once markers are
+    tracked as queued `PendingDecision`s -- this body never runs once that
+    import has happened.
     """
     return state
 
@@ -435,16 +438,22 @@ register_handler("convert_marker", handle_convert_marker)
 # --------------------------------------------------------------------------
 # Side-effect imports: modules that register additional verbs into
 # HANDLERS on import (Task 8's build/upgrade/bridge/favor/town/leech/
-# decline; Task 9's dig/transform/lose_spade). Placed at the bottom, after
-# every symbol those modules import from here (EngineError, push_pending,
-# pop_pending, register_handler, state helpers) is already defined, so
-# this is not a circular import: `actions_build`/`leech`/`actions_terraform`
-# import *from* this module at their own top, and by the time Python
-# reaches these lines this module's own top-to-bottom execution has
-# already bound everything they need. `actions_terraform`'s real
-# `lose_spade` handler is registered here too, replacing the placeholder
-# entry this module never installs anymore (see `handle_lose_resource`'s
-# neighbours above -- the no-op stub used to live here, Task 9 owns it).
+# decline; Task 9's dig/transform/lose_spade; Task 10's action/lose_marker).
+# Placed at the bottom, after every symbol those modules import from here
+# (EngineError, push_pending, pop_pending, register_handler, state helpers)
+# is already defined, so this is not a circular import:
+# `actions_build`/`leech`/`actions_terraform`/`actions_power` import *from*
+# this module at their own top, and by the time Python reaches these lines
+# this module's own top-to-bottom execution has already bound everything
+# they need. `actions_terraform`'s real `lose_spade` handler is registered
+# here too, replacing the placeholder entry this module never installs
+# anymore (see `handle_lose_resource`'s neighbours above -- the no-op stub
+# used to live here, Task 9 owns it). `actions_power`'s real `lose_marker`
+# handler similarly replaces `handle_lose_marker` above (Task 10) -- import
+# order among these four doesn't matter for correctness (only
+# `actions_power` ever registers "lose_marker"; none of the others touch
+# it), so they are kept alphabetical for the import-sorter.
 from bgai.engine.tm import actions_build as _actions_build  # noqa: E402,F401
+from bgai.engine.tm import actions_power as _actions_power  # noqa: E402,F401
 from bgai.engine.tm import actions_terraform as _actions_terraform  # noqa: E402,F401
 from bgai.engine.tm import leech as _leech  # noqa: E402,F401

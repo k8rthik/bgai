@@ -46,10 +46,13 @@ class PendingDecision:
     """A forced sub-decision queued ahead of the turn-order successor.
 
     ``kind`` values used by later tasks: "leech", "gain_favor", "gain_town",
-    "cult_choice", "convert_w_to_p", "bonus_choice", "spade_use". (Task 9's
-    initial "halflings_spades" kind was retired -- a Halflings SH's spade
-    grant is applied immediately by ``actions_build.py`` instead, see that
-    module's docstring; kept out of this list so it doesn't get reused.)
+    "cult_choice", "convert_w_to_p", "bonus_choice", "spade_use", "bridge",
+    "free_d", "free_tp", "free_tf". (Task 9's initial "halflings_spades"
+    kind was retired -- a Halflings SH's spade grant is applied immediately
+    by ``actions_build.py`` instead, see that module's docstring; kept out
+    of this list so it doesn't get reused. "bridge"/"free_d"/"free_tp"/
+    "free_tf" are Task 10's one-shot markers from ACT1/ACTE, ACTW, ACTS,
+    and ACTN respectively -- see ``actions_power.py``'s module docstring.)
     """
 
     faction: str
@@ -96,6 +99,17 @@ class FactionState:
     grants (Task 10) feed the same balance -- ``actions_terraform.py``
     treats it as the single source of truth regardless of source.
     """
+    extra_actions: int = 0
+    """Chaos Magicians' ACTC "double turn" ticket -- ``$faction->{allowed_actions}``
+    in ``resources.pm``/``acting.pm`` (``adjust_resource``'s ``GAIN_ACTION``
+    branch, line ~289: ``$faction->{allowed_actions} += $delta``). ACTC's
+    ``gain => { GAIN_ACTION => 2 }`` (Constants.pm ``%actions``) sets this to
+    2; ``actions_power.py`` only sets the counter, it never consumes it --
+    Task 11's turn-advancement flow owns spending it back down (one full
+    turn per unit) before returning control to the next faction in
+    ``turn_order``. Added by Task 10 -- another migration on top of the
+    task-3 frozen shape, per this module's docstring.
+    """
 
     @classmethod
     def initial(cls, data: FactionData) -> FactionState:
@@ -120,6 +134,7 @@ class FactionState:
             cult_blocked=frozenset(),
             bridges_built=0,
             spades_available=0,
+            extra_actions=0,
         )
 
 

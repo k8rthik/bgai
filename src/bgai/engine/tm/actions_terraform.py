@@ -96,9 +96,9 @@ from __future__ import annotations
 from dataclasses import replace
 
 from bgai.data.ledger_parser import ParsedCommand
-from bgai.engine.tm.apply import EngineError, register_handler
+from bgai.engine.tm.apply import EngineError, pop_pending, register_handler
 from bgai.engine.tm.board import RIVER
-from bgai.engine.tm.connectivity import reachable
+from bgai.engine.tm.connectivity import directly_adjacent, reachable
 from bgai.engine.tm.factions.hooks import HOOKS, FactionHooks, hooks_for
 from bgai.engine.tm.factions_data import COLOR_WHEEL, FACTIONS
 from bgai.engine.tm.state import FactionState, GameState, with_faction
@@ -295,9 +295,35 @@ def handle_dig(state: GameState, faction: str, cmd: ParsedCommand) -> GameState:
     return with_faction(state, faction, fs)
 
 
+def _find_pending_optional(state: GameState, faction: str, kind: str) -> int | None:
+    """``actions_build.py``'s identically-named helper, duplicated locally
+    (same no-cross-coupling rationale this module already documents for
+    ``_apply_extra_dig_gain``).
+    """
+    for i, p in enumerate(state.pending):
+        if p.faction == faction and p.kind == kind:
+            return i
+    return None
+
+
+def _directly_adjacent_to_own_building(state: GameState, faction: str, hex_key: str) -> bool:
+    """``TF_NEED_HEX_ADJACENCY`` (module docstring, ACTN): ``hex_key`` must
+    be directly adjacent (bridges included) to at least one of ``faction``'s
+    own building hexes -- a strictly narrower test than ``reachable()``,
+    which also allows shipping/teleport range.
+    """
+    fs = state.factions[faction]
+    own = frozenset().union(*fs.buildings.values()) if fs.buildings else frozenset()
+    return any(hex_key in directly_adjacent(state, b) for b in own)
+
+
 def handle_transform(state: GameState, faction: str, cmd: ParsedCommand) -> GameState:
     """``transform HEX[ to COLOR]``: spend ``spades_available`` to recolor
-    an unoccupied, non-river, reachable hex (module docstring).
+    an unoccupied, non-river, reachable hex (module docstring). A live
+    ``free_tf`` pending (Nomads ACTN, Task 10 -- ``actions_power.py``'s
+    module docstring) instead requires direct hex adjacency to one of
+    ``faction``'s own buildings, forces the target to home color, costs 0
+    spades, and is consumed (popped) rather than ``spades_available``.
     """
     assert cmd.loc is not None
     hex_key = cmd.loc
@@ -319,7 +345,19 @@ def handle_transform(state: GameState, faction: str, cmd: ParsedCommand) -> Game
             faction=faction,
             cmd=cmd,
         )
-    if hex_key not in reachable(state, faction):
+
+    free_tf_index = _find_pending_optional(state, faction, "free_tf")
+
+    if free_tf_index is not None:
+        if not _directly_adjacent_to_own_building(state, faction, hex_key):
+            raise EngineError(
+                f"{hex_key} is not directly adjacent to a {faction} building "
+                "(ACTN requires direct hex adjacency)",
+                state=state,
+                faction=faction,
+                cmd=cmd,
+            )
+    elif hex_key not in reachable(state, faction):
         raise EngineError(
             f"{hex_key} is not reachable by {faction}", state=state, faction=faction, cmd=cmd
         )
@@ -327,7 +365,9 @@ def handle_transform(state: GameState, faction: str, cmd: ParsedCommand) -> Game
     fs = state.factions[faction]
     home_color = FACTIONS[faction].color
     requested_color = _alias_color(cmd.color) if cmd.color is not None else None
-    if requested_color is not None:
+    if free_tf_index is not None:
+        proposed_color = requested_color if requested_color is not None else home_color
+    elif requested_color is not None:
         proposed_color = requested_color
     else:
         proposed_color = _default_target_color(hex_state.color, home_color, fs.spades_available)
@@ -347,20 +387,36 @@ def handle_transform(state: GameState, faction: str, cmd: ParsedCommand) -> Game
             f"{hex_key} is already {effective_color}", state=state, faction=faction, cmd=cmd
         )
 
-    cost = hooks_for(faction).spade_transform_cost(state, faction, hex_state.color, effective_color)
-    if cost > fs.spades_available:
-        raise EngineError(
-            f"{faction} has {fs.spades_available} spades available, needs {cost} to "
-            f"transform {hex_key}",
-            state=state,
-            faction=faction,
-            cmd=cmd,
+    if free_tf_index is not None:
+        if effective_color != home_color:
+            raise EngineError(
+                f"{faction} must transform to home color {home_color} using ACTN, "
+                f"not {effective_color}",
+                state=state,
+                faction=faction,
+                cmd=cmd,
+            )
+        cost = 0
+    else:
+        cost = hooks_for(faction).spade_transform_cost(
+            state, faction, hex_state.color, effective_color
         )
+        if cost > fs.spades_available:
+            raise EngineError(
+                f"{faction} has {fs.spades_available} spades available, needs {cost} to "
+                f"transform {hex_key}",
+                state=state,
+                faction=faction,
+                cmd=cmd,
+            )
     fs = replace(fs, spades_available=fs.spades_available - cost)
 
     new_hexes = dict(state.hexes)
     new_hexes[hex_key] = replace(hex_state, color=effective_color)
-    return replace(with_faction(state, faction, fs), hexes=new_hexes)
+    new_state = replace(with_faction(state, faction, fs), hexes=new_hexes)
+    if free_tf_index is not None:
+        new_state = pop_pending(new_state, free_tf_index)
+    return new_state
 
 
 def handle_lose_spade(state: GameState, faction: str, cmd: ParsedCommand) -> GameState:
