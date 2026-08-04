@@ -185,7 +185,19 @@ class GameState:
             round=0,
             phase=Phase.SETUP_DWELLINGS,
             turn_order=setup.factions,
-            passed_order=setup.factions,
+            passed_order=(),
+            # ``handle_pass`` (``actions_pass.py``) appends the real
+            # per-faction pass order fresh over round 1's own ACTIONS
+            # phase; ``end_of_round`` reads it once (under
+            # ``variable_turn_order``) then resets it to `()` for the next
+            # round -- seeding this with `setup.factions` (an earlier
+            # revision's choice, no Perl citation) instead of empty meant
+            # round 1's passed_order carried 4 *extra*, unwanted leading
+            # entries into round 2's turn_order (task-13 report,
+            # reference-game row 105: round 2's `turn_order` came out
+            # length-8, "seat order + real round-1 pass order" concatenated,
+            # so `turn_order[0]` was `engineers` instead of `nomads`, the
+            # faction that actually passed first in round 1).
             active_index=0,
             pending=(),
             hexes=_initial_hexes(),

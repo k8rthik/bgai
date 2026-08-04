@@ -45,6 +45,15 @@ def test_turn_order_matches_seat_order() -> None:
     assert s.pending == ()
 
 
+def test_initial_passed_order_is_empty() -> None:
+    """``passed_order`` starts empty, not seeded with seat order (task-13
+    fix): ``handle_pass`` appends round 1's real pass order fresh onto it,
+    and a seat-order seed left 4 unwanted leading entries in round 2's
+    ``turn_order`` under ``variable_turn_order`` (reference-game row 105)."""
+    s = GameState.initial(load_setup("4pLeague_S10_D1L1_G1"))
+    assert s.passed_order == ()
+
+
 def test_faction_initial_defaults() -> None:
     s = GameState.initial(load_setup("4pLeague_S10_D1L1_G1"))
     eng = s.factions["engineers"]
