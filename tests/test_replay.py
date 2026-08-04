@@ -22,7 +22,7 @@ from dataclasses import replace
 import polars as pl
 import pytest
 
-from bgai.engine.tm.replay import Mismatch, _release_finished_drops, _row_mismatches, replay_game
+from bgai.engine.tm.replay import Mismatch, _apply_pending_drops, _row_mismatches, replay_game
 from bgai.engine.tm.setup import load_setup
 from bgai.engine.tm.state import GameState, cult_string, with_faction
 
@@ -168,50 +168,54 @@ def test_seat_order_rotation_without_variable_turn_order(
     assert result.rows_checked > 300
 
 
-def test_release_finished_drops_leaves_a_still_playing_faction_alone() -> None:
+def test_apply_pending_drops_leaves_a_not_yet_dropped_faction_alone() -> None:
     """A dropped faction hasn't necessarily dropped *yet* by any given
-    row -- ``_release_finished_drops`` only releases it once the ledger
-    has moved strictly past its last-ever appearance, never before."""
+    row -- ``_apply_pending_drops`` only applies the drop once the ledger
+    has moved strictly past its exact ``dropped_at_row`` entry, never
+    before."""
     state = GameState.initial(load_setup(GAME_ID))
     fs = replace(state.factions["darklings"], bonus="BON1")
     state = with_faction(state, "darklings", fs)
-    state2 = _release_finished_drops(state, row=50, dropped_last_row={"darklings": 60})
+    state2 = _apply_pending_drops(state, row=50, dropped_at_row={"darklings": 60})
     assert state2.factions["darklings"].bonus == "BON1"
-    assert not state2.factions["darklings"].passed
+    assert not state2.factions["darklings"].dropped
 
 
-def test_release_finished_drops_releases_bonus_and_marks_passed_once_past_last_row() -> None:
-    """Task-14 fix: proactively releases a dropped faction's held bonus
-    tile (and marks it passed) as soon as the ledger crosses its last-
-    ever appearance -- earlier than ``_skip_dropped_factions``'s reactive
-    trigger, which only fires once *another* faction's turn-order
-    mismatch reveals the drop. Matters for ``round_flow._bumped_bonus_
-    coins`` timing (that function's own citation trail): a tile still
-    marked "held" too long accrues no coins for the rounds in between.
+def test_apply_pending_drops_releases_bonus_and_marks_dropped_once_past_the_drop_row() -> None:
+    """Task-14 fix (dropped-faction ledger model): the raw ledger's own
+    ``"<faction> dropped from the game"`` comment (``GameSetup.
+    dropped_at_row`` docstring) pins the exact row the drop happened --
+    ``_apply_pending_drops`` applies it, proactively, the moment the
+    ledger crosses that row: releases the held bonus tile and permanently
+    marks the faction ``dropped`` (excluded from turn order for the rest
+    of the game, unlike the old ``passed``-based marker this replaced,
+    which round_flow's own ``end_of_round`` would have reset every
+    round). Matters for ``round_flow._bumped_bonus_coins`` timing (that
+    function's own citation trail): a tile still marked "held" too long
+    accrues no coins for the rounds in between.
     """
     state = GameState.initial(load_setup(GAME_ID))
     fs = replace(state.factions["darklings"], bonus="BON1")
     state = with_faction(state, "darklings", fs)
-    state2 = _release_finished_drops(state, row=61, dropped_last_row={"darklings": 60})
+    state2 = _apply_pending_drops(state, row=61, dropped_at_row={"darklings": 60})
     assert state2.factions["darklings"].bonus is None
-    assert state2.factions["darklings"].passed
+    assert state2.factions["darklings"].dropped
 
 
-def test_dropped_faction_is_skipped_in_the_round_robin(
+def test_dropped_faction_is_excluded_from_turn_order(
     frames: tuple[pl.DataFrame, pl.DataFrame],
 ) -> None:
     """``4pLeague_S12_D2L1_G6``: darklings drops (raw JSON ``"dropped":
-    1``) partway through round 1, after playing real early moves --
-    ``GameSetup.dropped_factions``/``replay._skip_dropped_factions``
-    reactively skip its turn once the ledger's own silence about it makes
-    that clear, since no ``drop-faction`` ledger verb exists to pinpoint
-    exactly when. Pins the replay reaching well past where the dropped
-    faction's turn would otherwise strand the harness (row 51's turn-order
-    gate, then row 111's ``pass is not legal during INCOME``, both fixed
-    together) -- not necessarily a fully clean replay for this specific
-    game, since dropped-faction games can carry other, unrelated
-    mismatches this task's loop didn't chase further.
+    1``, ledger comment "darklings dropped from the game" at row 62)
+    partway through round 1, after playing real early moves. Pins the
+    replay reaching well past where the dropped faction's turn would
+    otherwise strand the harness (row 51's turn-order gate, then row
+    111's ``pass is not legal during INCOME``, both fixed together) --
+    not necessarily a fully clean replay for this specific game, since
+    dropped-faction games can carry other, unrelated mismatches this
+    task's loop didn't chase further.
     """
+    assert load_setup("4pLeague_S12_D2L1_G6").dropped_at_row == {"darklings": 62}
     moves_df, deltas_df = frames
     result = replay_game("4pLeague_S12_D2L1_G6", moves_df, deltas_df)
     assert result.rows_checked > 130

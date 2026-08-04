@@ -117,15 +117,14 @@ def _replay_to_final_state(game_id: str, moves_df: pl.DataFrame) -> GameState:
     ``replay_game``'s frozen ``ReplayResult`` deliberately exposes no
     final state, so this mirrors its private row-driving loop directly
     (same pattern as ``test_scoring.py``'s ``test_replayed_final_vp_
-    matches_games_meta_final_vp``, generalized to any game_id). No
-    other_income_done/cult_income_done income-phase bookkeeping is
-    threaded through here since every REGRESSION_SET/STRESS_OUTLIERS game
-    is a normal 4-faction game with a complete income-row set for every
-    round (none of them are dropped-faction games) -- the plain
-    ``_advance_after_row``-equivalent phase transitions in ``replay_game``
-    matter for those edge cases, not for this curated set.
+    matches_games_meta_final_vp``, generalized to any game_id). Also
+    applies ``_apply_pending_drops`` per row like ``replay_game`` does --
+    ``4pLeague_S15_D1L1_G1`` (in ``REGRESSION_SET``) is itself a
+    dropped-faction game (witches, ledger row 363), which is exactly why
+    ``test_regression_set_final_vp_matches_games_meta`` below excludes a
+    dropped faction's own VP from the cross-check.
     """
-    from bgai.engine.tm.replay import _advance_after_row, _ensure_actions_phase_started
+    from bgai.engine.tm.replay import _advance_after_row, _apply_pending_drops, _ensure_actions_phase_started
     from bgai.engine.tm.state import Phase
 
     setup = load_setup(game_id)
@@ -133,7 +132,8 @@ def _replay_to_final_state(game_id: str, moves_df: pl.DataFrame) -> GameState:
     game_moves = moves_df.filter(pl.col("game_id") == game_id).sort(["row", "seq"])
     other_income_done: set[str] = set()
     cult_income_done: set[str] = set()
-    for _row, faction, cmds in _iter_rows(game_moves):
+    for row, faction, cmds in _iter_rows(game_moves):
+        state = _apply_pending_drops(state, row, setup.dropped_at_row)
         was_income = state.phase == Phase.INCOME
         state = _ensure_actions_phase_started(state, cmds)
         if was_income and state.phase != Phase.INCOME:
@@ -154,23 +154,24 @@ def test_regression_set_final_vp_matches_games_meta(
     (which only ever checks *running* VP, not the round-6 scoring block's
     net effect) can't see on its own.
 
-    Skips a dropped faction's own VP (``GameSetup.dropped_factions``):
-    ``4pLeague_S15_D1L1_G1``'s witches drops after row 357 and never
-    appears in the ledger again, including round 6's own ``score_vp``/
-    ``score_resources`` rows -- there is *no* ledger evidence to replay
-    a dropped faction's final scoring from at all, dropped or not
-    (``replay_game`` itself only ever replays real rows, same
-    limitation), so ``games_meta.final_vp``'s number for that faction
-    (apparently computed by Perl through some other means entirely for a
-    dropped player) is not reproducible by ledger replay and is out of
-    scope here -- every *other* (non-dropped) faction in every game
-    still gets the full cross-check.
+    Skips a dropped faction's own VP (``GameSetup.dropped_at_row``):
+    ``4pLeague_S15_D1L1_G1``'s witches drops at ledger row 363 (its own
+    "witches dropped from the game" comment) and never appears in the
+    ledger again with any real commands after row 357, including round
+    6's own ``score_vp``/``score_resources`` rows -- there is *no* ledger
+    evidence to replay a dropped faction's final scoring from at all,
+    dropped or not (``replay_game`` itself only ever replays real rows,
+    same limitation), so ``games_meta.final_vp``'s number for that
+    faction (apparently computed by Perl through some other means
+    entirely for a dropped player) is not reproducible by ledger replay
+    and is out of scope here -- every *other* (non-dropped) faction in
+    every game still gets the full cross-check.
     """
     moves_df = pl.read_parquet("data/datasets/moves.parquet")
     for game_id in REGRESSION_SET:
         state = _replay_to_final_state(game_id, moves_df)
         expected = json.loads(games_meta.filter(pl.col("game_id") == game_id)["final_vp"][0])
         for faction, vp in expected.items():
-            if faction in state.setup.dropped_factions:
+            if faction in state.setup.dropped_at_row:
                 continue
             assert state.factions[faction].vp == vp, f"{game_id}/{faction}"

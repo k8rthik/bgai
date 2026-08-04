@@ -117,6 +117,21 @@ class FactionState:
     ``turn_order``. Added by Task 10 -- another migration on top of the
     task-3 frozen shape, per this module's docstring.
     """
+    dropped: bool = False
+    """``$faction->{dropped}`` (``commands.pm``'s ``drop-faction`` handler,
+    ~1584) -- an AFK/timed-out player, permanently excluded from turn
+    order for the rest of the game the instant it is set: never reset by
+    ``round_flow.end_of_round`` (unlike ``passed``, which resets every
+    round), mirroring ``acting.pm``'s own ``!$_->{dropped}`` filter
+    everywhere turn order is computed (``next_faction_in_turn``,
+    ``in_play``'s ``all_passed`` check, ``factions_in_order($no_dummy)``).
+    Set by ``replay.py`` the moment the ledger crosses the exact row
+    ``GameSetup.dropped_at_row`` records for this faction -- see that
+    field's docstring for the full citation trail on why this row (not a
+    heuristic "last row seen") is the correct signal. Added by Task 14 --
+    another migration on top of the task-3 frozen shape, per this
+    module's docstring.
+    """
     teleported_hex: str | None = None
     """``$faction->{TELEPORT_TO}`` (``map.pm`` ``check_reachable`` lines
     244-250 / ``commands.pm`` ``command_transform`` line 629): the hex, if

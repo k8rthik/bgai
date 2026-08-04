@@ -627,8 +627,15 @@ def _advance_actions(state: GameState) -> GameState:
     for step in range(1, n + 1):
         idx = (state.active_index + step) % n
         next_faction = state.turn_order[idx]
-        if not state.factions[next_faction].passed:
-            state = with_faction(state, next_faction, _start_full_move_reset(state.factions[next_faction]))
+        next_fs = state.factions[next_faction]
+        # A dropped faction (``FactionState.dropped`` docstring) is
+        # permanently excluded from turn order, exactly like
+        # ``acting.pm``'s own ``!$_->{dropped}`` filter -- checked
+        # alongside ``passed`` (which resets every round; ``dropped``
+        # never does) rather than folded into it, so the two stay
+        # independently readable at every call site.
+        if not next_fs.passed and not next_fs.dropped:
+            state = with_faction(state, next_faction, _start_full_move_reset(next_fs))
             return replace(state, active_index=idx)
     return replace(state, phase=Phase.CLEANUP)
 

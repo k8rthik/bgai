@@ -68,6 +68,7 @@ from __future__ import annotations
 import argparse
 import json
 from collections import Counter
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -217,95 +218,49 @@ def _row_mismatches(
 # --------------------------------------------------------------------------
 
 
-def _dropped_last_row(moves_df: pl.DataFrame, game_id: str, dropped_factions: frozenset[str]) -> dict[str, int]:
-    """The last ledger ``row`` each dropped faction ever appears in, for
-    ``_release_finished_drops`` below -- precomputed once per game (not
-    inferrable from a single row in isolation)."""
-    if not dropped_factions:
-        return {}
-    game_moves = moves_df.filter(
-        (pl.col("game_id") == game_id) & (pl.col("faction").is_in(list(dropped_factions)))
-    )
-    return {
-        faction: int(sub["row"].max())
-        for faction, sub in game_moves.group_by("faction", maintain_order=True)
-    }
+def _apply_pending_drops(state: GameState, row: int, dropped_at_row: Mapping[str, int]) -> GameState:
+    """Apply every faction's drop event whose exact ledger row
+    (``GameSetup.dropped_at_row``, sourced straight from the raw ledger's
+    own ``"<faction> dropped from the game"`` comment) the replay has now
+    moved past -- proactively and precisely, mirroring ``commands.pm``'s
+    ``drop-faction`` handler (~1578-1602) as the single atomic event it
+    is in real Perl: ``allowed_actions`` zeroed (this engine's
+    ``extra_actions``), the held bonus tile released back to the pool
+    (``find_bonus_to_discard``/``adjust_resource(-1)``), and the faction
+    permanently marked ``FactionState.dropped`` -- excluded from turn
+    order for the rest of the game by ``round_flow._advance_actions``'s
+    own ``not fs.dropped`` check, matching ``acting.pm``'s ``!dropped``
+    filter everywhere (``next_faction_in_turn``, ``in_play``'s
+    ``all_passed``).
 
+    Called once per iterated row, before that row's commands are applied.
+    A drop's own comment row is comment-only (no ``commands`` key), so it
+    never survives into ``moves.parquet`` (``build_moves.py`` skips any
+    ledger row without one) and is therefore never itself an iterated row
+    here -- this function is how its effect still lands, exactly once,
+    the first time ``row`` moves strictly past it.
 
-def _release_finished_drops(state: GameState, row: int, dropped_last_row: dict[str, int]) -> GameState:
-    """Release a dropped faction's held bonus tile (and mark it passed for
-    the round-robin) as soon as the ledger has moved *past* the last row
-    it ever appears in -- proactively, regardless of whose turn it
-    currently is, rather than waiting for ``_skip_dropped_factions``'s
-    reactive turn-order-mismatch trigger below.
-
-    Timing matters here in a way it doesn't for ``_skip_dropped_factions``:
-    ``round_flow._bumped_bonus_coins`` only accretes a coin onto a bonus
-    tile *not currently held by anyone* each round-end, so a tile the
-    real drop event already released stays wrongly "held" (accruing
-    nothing) for every round between the real drop and whenever this
-    harness's own detection finally catches up -- undershooting the pool
-    by exactly that many coins for whoever eventually takes it. Corpus:
-    several games where a *different* (non-dropped) faction later
-    hard-errors "cannot afford N C" taking an upgrade whose bonus-tile-
-    funded coins came up short for this reason. Precomputing the dropped
-    faction's actual last ledger appearance (``_dropped_last_row``) and
-    releasing right after the ledger crosses it -- instead of only once
-    some other faction's turn-order mismatch reveals the drop -- closes
-    most of that gap; it is still not necessarily the *exact* real-Perl
-    drop row (no ledger verb pinpoints that), just the earliest row this
-    harness can prove the drop by.
+    Every applicable drop is committed to ``state`` before any turn-order
+    fixup runs, so a fixup that lands on a second faction whose own drop
+    row is also ``< row`` (both dropped within the same processed-row gap)
+    sees it as already ``dropped`` too, rather than depending on dict
+    iteration order.
     """
-    for faction, last_row in dropped_last_row.items():
-        if row <= last_row:
-            continue
-        fs = state.factions.get(faction)
-        if fs is None or (fs.passed and fs.bonus is None):
-            continue
-        state = with_faction(state, faction, replace(fs, passed=True, bonus=None))
-    return state
-
-
-def _skip_dropped_factions(state: GameState, faction: str) -> GameState:
-    """A dropped faction (``GameSetup.dropped_factions`` docstring) leaves
-    no further ledger trace of its own once it drops -- no explicit
-    ``drop-faction`` verb this ledger grammar recognizes, no more main-
-    track rows, ever. So the only signal this harness gets that faction
-    ``X`` has dropped *by this point* is exactly the situation this
-    function handles: the ledger's next real row belongs to a *different*
-    faction than whoever ``active_faction`` currently says should go.
-    If that active faction is one this game's raw JSON snapshot confirms
-    dropped at some point, treat it as passed (round_flow's existing
-    skip-in-round-robin mechanic, reused rather than duplicated) and
-    advance past it -- repeated in case more than one dropped faction is
-    queued up back to back. A non-dropped active faction is left alone;
-    that mismatch is a real engine bug and should still raise loudly from
-    ``apply()``'s own gate.
-
-    Also releases any bonus tile the dropped faction was holding back to
-    the pool (``bonus=None``) -- ``commands.pm``'s own ``drop-faction``
-    handler does this immediately as part of the drop event itself
-    (``find_bonus_to_discard``/``adjust_resource($faction, $discard,
-    -1)``, commands.pm ~1593-1596), which this ledger grammar has no verb
-    for either. Safe to repeat every round this function reactively
-    detects the drop (``passed`` resets every round, so this fires again
-    each time) -- once ``bonus`` is already ``None`` the second and later
-    calls are no-ops. Corpus: ``4pLeague_S12_D2L1_G7`` row 149, witches
-    can't take BON3 because darklings (dropped at row 39's setup pick,
-    never releasing it) still shows as holding it.
-    """
-    if state.phase != Phase.ACTIONS:
-        return state
-    dropped = state.setup.dropped_factions
-    if not dropped:
-        return state
-    for _ in range(len(state.setup.factions)):
-        current = active_faction(state)
-        if current == faction or current not in dropped:
-            return state
-        fs = state.factions[current]
-        if not fs.passed or fs.bonus is not None:
-            state = with_faction(state, current, replace(fs, passed=True, bonus=None))
+    newly_dropped = [
+        faction
+        for faction, drop_row in dropped_at_row.items()
+        if row > drop_row and not state.factions[faction].dropped
+    ]
+    for faction in newly_dropped:
+        fs = state.factions[faction]
+        state = with_faction(state, faction, replace(fs, dropped=True, bonus=None, extra_actions=0))
+    # If the faction that just dropped happened to still be
+    # ``active_faction`` (e.g. it dropped between its own last action and
+    # the next row this harness sees), ``round_flow._advance_actions``'s
+    # existing skip-forward loop -- now dropped-aware -- resolves it in
+    # one call, however many consecutive dropped/passed factions in a row
+    # that takes.
+    if newly_dropped and state.phase == Phase.ACTIONS and active_faction(state) in newly_dropped:
         state = advance_turn(state)
     return state
 
@@ -336,15 +291,6 @@ def _apply_row_commands(state: GameState, faction: str, cmds: tuple[ParsedComman
     row where *every* command is a never-starts-action verb (e.g. a lone
     ``transform`` row).
     """
-    if any(cmd.verb in _MAIN_TRACK_VERBS for cmd in cmds):
-        # Gate-exempt sub-decision rows (leech/decline/...) never belong to
-        # the active faction by design -- only a genuine main-track row's
-        # faction mismatch is evidence a dropped faction's turn needs
-        # skipping (``_skip_dropped_factions`` docstring); calling this
-        # unconditionally would misfire on an ordinary leech/decline row
-        # sandwiched between two other factions' real turns and skip a
-        # faction that hasn't actually dropped *yet*.
-        state = _skip_dropped_factions(state, faction)
     prev_verb: str | None = None
     open_action = False
     any_main_track = False
@@ -451,7 +397,6 @@ def replay_game(
 
     game_moves = moves_df.filter(pl.col("game_id") == game_id).sort(["row", "seq"])
     delta_lookup = _delta_lookup(deltas_df, game_id)
-    dropped_last_row = _dropped_last_row(moves_df, game_id, setup.dropped_factions)
 
     mismatches: list[Mismatch] = []
     rows_checked = 0
@@ -461,7 +406,7 @@ def replay_game(
     for row, faction, cmds in _iter_rows(game_moves):
         raw = "; ".join(cmd.raw for cmd in cmds)
         try:
-            state = _release_finished_drops(state, row, dropped_last_row)
+            state = _apply_pending_drops(state, row, setup.dropped_at_row)
             was_income = state.phase == Phase.INCOME
             state = _ensure_actions_phase_started(state, cmds)
             if was_income and state.phase != Phase.INCOME:

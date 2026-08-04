@@ -36,7 +36,8 @@ from __future__ import annotations
 import gzip
 import json
 import re
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 
@@ -45,6 +46,7 @@ import polars as pl
 from bgai.engine.tm.tiles import ScoringTile
 
 _BON_ID_RE = re.compile(r"BON\d+")
+_DROP_COMMENT_RE = re.compile(r"^(\w+) dropped from the game$")
 
 # CSV option-name -> GameOptions field name. Anything not in this table
 # (e.g. "email-notify", "loose-lose-cult") is a real corpus option but not
@@ -104,21 +106,41 @@ class GameSetup:
     score_tiles: tuple[ScoringTile, ...]  # len 6, round 1..6
     bonus_tiles: tuple[str, ...]  # sorted BON ids in this game's pool
     player_count: int
-    dropped_factions: frozenset[str] = frozenset()
-    """Factions the raw JSON's final snapshot marks ``"dropped": 1``
-    (``commands.pm``'s ``command drop-faction``: ``$faction->{dropped}=1;
-    $faction->{allowed_actions}=0; ...; $game{acting}->dismiss_action
-    ($faction, undef);`` -- dismissed from turn rotation for the rest of
-    the game, immediately). A real, fairly common corpus phenomenon (an
-    AFK/timed-out player), not covered by Task 2's 10 ``nofaction*``
-    known-bad games -- a dropped faction still played real early-game
-    moves (build/upgrade rows) before dropping, so it can't be treated as
-    unloadable/excluded outright; ``replay.py`` uses this set to
-    reactively skip a dropped faction's turn once the ledger's own
-    silence about them (no further main-track row ever appears) makes it
-    clear they've dropped, without knowing the exact row -- see that
-    module's docstring. 189 of 3563 corpus games have at least one
-    dropped faction (task-14 report).
+    dropped_at_row: Mapping[str, int] = field(default_factory=dict)
+    """``{faction: ledger row index}`` for every faction the raw JSON's
+    final snapshot marks ``"dropped": 1`` -- the exact row of that
+    faction's own ``"<faction> dropped from the game"`` ledger *comment*
+    (``commands.pm``'s ``drop-faction`` handler, ~1578-1602: sets
+    ``$faction->{dropped}=1``/``allowed_actions=0``, releases its held
+    bonus tile via ``find_bonus_to_discard``/``adjust_resource(-1)``,
+    drops it from ``setup_order``, then ``$game{ledger}->add_comment("$f
+    dropped from the game")`` as the last step of that same event -- all
+    one atomic ledger moment in real Perl, not a range). A real, fairly
+    common corpus phenomenon (an AFK/timed-out player), not covered by
+    Task 2's 10 ``nofaction*`` known-bad games (a *different* code path,
+    ``drop-faction playerN`` for a player who never even joined --
+    ``register_faction`` with ``dropped=>1`` baked in from the start,
+    which never emits this comment and has no rows to key off of; those
+    10 games already fail to load for unrelated reasons before this
+    matters). A dropped (non-``nofaction``) faction still played real
+    early-game moves before dropping, so it can't be treated as
+    unloadable/excluded outright.
+
+    This is a precise, deterministic signal read straight from the same
+    event Perl itself recorded -- not inferred from the faction's last
+    surviving ``moves.parquet`` row (an earlier revision's heuristic,
+    which conflated "stopped acting" with "the admin actually marked them
+    dropped," often several rows or even whole rounds apart, since a
+    comment-only row carries no ``commands`` and so is itself invisible
+    to ``moves.parquet``/``deltas.parquet``, both of which
+    ``build_moves.py`` builds only from rows that have a ``commands``
+    key). Verified 1:1 against the full corpus: every one of the 179
+    non-``nofaction`` games with at least one ``"dropped": 1`` faction has
+    exactly one such comment per dropped faction, no duplicates, no
+    misses. ``replay.py`` uses this map to apply the drop -- release the
+    bonus tile, exclude the faction from turn order -- proactively, at
+    the exact row, rather than reactively once some other faction's
+    turn-order mismatch reveals it.
     """
 
 
@@ -223,15 +245,26 @@ def _resolve_bonus_tiles(
     return bonus_tiles
 
 
-def _resolve_dropped_factions(raw: dict[str, object]) -> frozenset[str]:
-    factions = raw.get("factions")
-    if not isinstance(factions, dict):
-        return frozenset()
-    return frozenset(
-        name
-        for name, info in factions.items()
-        if isinstance(info, dict) and info.get("dropped")
-    )
+def _resolve_dropped_at_row(raw: dict[str, object]) -> Mapping[str, int]:
+    """``GameSetup.dropped_at_row`` docstring: scan the raw ledger's own
+    comment rows for ``"<faction> dropped from the game"`` -- the exact
+    row ``commands.pm``'s ``drop-faction`` handler adds as the last step
+    of the drop event itself.
+    """
+    ledger = raw.get("ledger")
+    if not isinstance(ledger, list):
+        return {}
+    rows: dict[str, int] = {}
+    for row_idx, row in enumerate(ledger):
+        if not isinstance(row, dict):
+            continue
+        comment = row.get("comment")
+        if not isinstance(comment, str):
+            continue
+        match = _DROP_COMMENT_RE.match(comment)
+        if match:
+            rows[match.group(1)] = row_idx
+    return rows
 
 
 def load_setup(game_id: str, raw_dir: Path = Path("data/raw/games")) -> GameSetup:
@@ -243,7 +276,7 @@ def load_setup(game_id: str, raw_dir: Path = Path("data/raw/games")) -> GameSetu
     factions = _resolve_seat_order(game_id, raw)
     score_tiles = _resolve_score_tiles(game_id, raw)
     bonus_tiles = _resolve_bonus_tiles(game_id, raw, player_count)
-    dropped_factions = _resolve_dropped_factions(raw)
+    dropped_at_row = _resolve_dropped_at_row(raw)
 
     return GameSetup(
         game_id=game_id,
@@ -252,5 +285,5 @@ def load_setup(game_id: str, raw_dir: Path = Path("data/raw/games")) -> GameSetu
         score_tiles=score_tiles,
         bonus_tiles=bonus_tiles,
         player_count=player_count,
-        dropped_factions=dropped_factions,
+        dropped_at_row=dropped_at_row,
     )
