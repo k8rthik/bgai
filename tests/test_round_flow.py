@@ -531,6 +531,23 @@ def test_advance_turn_spends_extra_actions_without_moving_to_next_faction() -> N
     assert active_faction(s4) == "darklings"
 
 
+def test_advance_turn_clears_cult_blocked_for_the_newly_active_faction() -> None:
+    """Task-14 fix, corpus ``4pLeague_S10_D3L1_G4`` row 329/336: a cult
+    step capped at 9 for lack of a key does not carry into a *later*
+    turn -- Perl's ``start_full_move`` deletes ``$faction->{cult_blocked}``
+    every fresh full action (``_start_full_move_reset`` docstring). A key
+    gained in a different, later turn has nothing queued to retry once
+    this reset has run (contrast ``test_gain_town_retries_a_cult_blocked_
+    at_9_once_its_own_key_covers_it`` in ``test_actions_build.py``, whose
+    block and retrying key land in the *same* turn/row, never touching
+    this reset at all)."""
+    s = _state()
+    s = _rich(s, "darklings", cult_blocked=frozenset({"FIRE"}))
+    s2 = advance_turn(s)  # engineers -> darklings
+    assert active_faction(s2) == "darklings"
+    assert s2.factions["darklings"].cult_blocked == frozenset()
+
+
 def test_advance_turn_clears_teleported_hex_for_the_newly_active_faction() -> None:
     """``FactionState.teleported_hex`` docstring, task-14 fix: Perl's
     ``start_full_move`` deletes ``TELEPORT_TO`` every time a faction

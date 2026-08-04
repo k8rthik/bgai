@@ -865,6 +865,15 @@ def _retry_blocked_cults(state: GameState, faction: str) -> GameState:
     FAV5 grant (2 FIRE steps, 8->10) blocked at 9 with 0 keys; the very
     next command in the row, ``gain_town TW7``, grants exactly the 1 key
     needed and should retroactively bump FIRE to 10.
+
+    This is a *same-turn-only* retry: ``fs.cult_blocked`` itself is reset
+    every fresh full action (Perl's ``start_full_move``, this engine's
+    ``round_flow._start_full_move_reset``, task-14 fix), so a key gained
+    in a *later*, different turn never reaches this function with a
+    matching ``cult_blocked`` entry to retry at all -- corpus
+    ``4pLeague_S10_D3L1_G4``, chaosmagicians' FIRE stays capped at 9 from
+    row 329 through the rest of the game, even though row 336's
+    ``gain_town TW3`` (a different turn) grants another key.
     """
     fs = state.factions[faction]
     blocked = fs.cult_blocked

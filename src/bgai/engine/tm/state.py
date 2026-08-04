@@ -82,6 +82,13 @@ class FactionState:
     passed: bool
     actions_used: frozenset[str]
     cult_blocked: frozenset[str]
+    """Cult tracks currently capped at 9 for lack of a key
+    (``cults.advance``'s ``blocked_at_9``/``actions_build.py``'s
+    ``_retry_blocked_cults``). Reset to empty every fresh full action
+    (``round_flow._start_full_move_reset``, task-14 fix, mirroring Perl's
+    ``start_full_move``'s ``delete $faction->{cult_blocked}``) -- a block
+    from one turn does not carry into a later turn's key grants; only a
+    same-turn key retries it."""
     bridges_built: int = 0
     """Count of bridges placed so far (``factions_data.BRIDGE_COUNT`` cap
     of 3); added by Task 8 -- a migration on top of the task-3 frozen

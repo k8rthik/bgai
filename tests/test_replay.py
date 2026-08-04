@@ -140,3 +140,22 @@ def test_actc_bundled_row_replays_past_its_own_row_without_a_turn_order_error(
     assert result.error is None, result.error
     assert result.mismatches == ()
     assert result.rows_checked > 309
+
+
+def test_cult_blocked_does_not_survive_into_a_later_turn(
+    frames: tuple[pl.DataFrame, pl.DataFrame],
+) -> None:
+    """``4pLeague_S10_D3L1_G4``: chaosmagicians' FIRE cult step is capped
+    at 9 for lack of a key at row 329 (``gain_favor FAV5``); a key arrives
+    7 rows/one full turn-cycle later at row 336 (``gain_town TW3``), in a
+    different turn. Before the task-14 fix, ``round_flow.py``'s turn
+    machinery never reset ``FactionState.cult_blocked`` between turns, so
+    ``_retry_blocked_cults`` wrongly retroactively bumped FIRE to 10 at
+    row 336 -- Perl's own ``start_full_move`` deletes that memory every
+    fresh turn, so a key from an unrelated later turn has nothing queued
+    to retry."""
+    moves_df, deltas_df = frames
+    result = replay_game("4pLeague_S10_D3L1_G4", moves_df, deltas_df)
+    assert result.error is None, result.error
+    assert result.mismatches == ()
+    assert result.rows_checked > 300

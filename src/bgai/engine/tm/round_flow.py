@@ -417,22 +417,43 @@ register_handler("cult_income_for_faction", handle_income_row)
 register_handler("all_income_for_faction", handle_income_row)
 
 
+def _start_full_move_reset(fs: FactionState) -> FactionState:
+    """``acting.pm``'s ``start_full_move`` (~227-238): every time a faction
+    starts a brand-new full action, Perl resets several transient markers
+    -- ``delete $faction->{TELEPORT_TO}`` and ``delete $faction->{cult_
+    blocked}`` among them (this engine's ``teleported_hex``/
+    ``cult_blocked``; ``allowed_sub_actions``/``allowed_build_locations``/
+    ``require_home_terrain_tf``/``disable_spade_decline`` have no engine
+    equivalent to reset). A faction capped at 9 on some cult track for
+    lack of a key does **not** carry that memory into a later turn -- a
+    key gained in a *different*, later turn has nothing queued to retry
+    (task-14 fix; corpus evidence: ``4pLeague_S10_D3L1_G4`` row 329 blocks
+    chaosmagicians' FIRE at 9, and gaining a key from an unrelated
+    ``gain_town`` 7 rows/one full turn-cycle later at row 336 does *not*
+    retroactively bump it to 10 -- contrast ``_retry_blocked_cults``'s own
+    *same-row* reference case, ``4pLeague_S10_D1L1_G6`` row 315, where the
+    block and the retrying key land in the same turn). No-op (returns
+    ``fs`` unchanged) when neither field needs clearing, so callers can
+    use this unconditionally without manufacturing spurious no-op
+    ``replace`` calls.
+    """
+    if fs.teleported_hex is None and not fs.cult_blocked:
+        return fs
+    return replace(fs, teleported_hex=None, cult_blocked=frozenset())
+
+
 def begin_actions(state: GameState) -> GameState:
     """``Phase.INCOME`` -> ``Phase.ACTIONS`` once every income row for the
-    round has been applied (Task 12 contract, step 4). Clears every
-    faction's ``teleported_hex`` (``FactionState`` docstring, task-14
-    fix) -- ``_advance_actions`` below resets it for whichever faction
-    becomes newly active *during* the round, but the round's very first
-    active faction (``turn_order[0]``) never goes through that path, so
-    this is the other of the two reset points Perl's own
-    ``start_full_move`` collapses into one call.
+    round has been applied (Task 12 contract, step 4). Resets every
+    faction via ``_start_full_move_reset`` -- ``_advance_actions`` below
+    does the same for whichever faction becomes newly active *during* the
+    round, but the round's very first active faction (``turn_order[0]``)
+    never goes through that path, so this is the other of the two reset
+    points Perl's own ``start_full_move`` collapses into one call.
     """
     if state.phase != Phase.INCOME:
         raise ValueError(f"begin_actions called outside Phase.INCOME (got {state.phase})")
-    new_factions = {
-        name: replace(fs, teleported_hex=None) if fs.teleported_hex is not None else fs
-        for name, fs in state.factions.items()
-    }
+    new_factions = {name: _start_full_move_reset(fs) for name, fs in state.factions.items()}
     return replace(state, phase=Phase.ACTIONS, active_index=0, factions=new_factions)
 
 
@@ -569,9 +590,9 @@ def _advance_actions(state: GameState) -> GameState:
     fs = state.factions[faction]
     if fs.extra_actions > 0:
         # A fresh full action for the *same* faction (ACTC ticket) is
-        # still a new ``start_full_move`` in Perl terms -- ``teleported_hex``
-        # resets here too (``FactionState`` docstring, task-14 fix).
-        new_fs = replace(fs, extra_actions=fs.extra_actions - 1, teleported_hex=None)
+        # still a new ``start_full_move`` in Perl terms -- reset here too
+        # (``_start_full_move_reset`` docstring, task-14 fix).
+        new_fs = replace(_start_full_move_reset(fs), extra_actions=fs.extra_actions - 1)
         return with_faction(state, faction, new_fs)
 
     n = len(state.turn_order)
@@ -579,9 +600,7 @@ def _advance_actions(state: GameState) -> GameState:
         idx = (state.active_index + step) % n
         next_faction = state.turn_order[idx]
         if not state.factions[next_faction].passed:
-            next_fs = state.factions[next_faction]
-            if next_fs.teleported_hex is not None:
-                state = with_faction(state, next_faction, replace(next_fs, teleported_hex=None))
+            state = with_faction(state, next_faction, _start_full_move_reset(state.factions[next_faction]))
             return replace(state, active_index=idx)
     return replace(state, phase=Phase.CLEANUP)
 
