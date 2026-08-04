@@ -332,6 +332,36 @@ def test_gain_cult_pops_matching_cult_choice_pending_at_head() -> None:
     assert s2.cults["darklings"]["WATER"] == 2  # darklings starts WATER=1
 
 
+def test_gain_cult_is_exempt_from_the_turn_order_gate_with_no_pending_at_all() -> None:
+    """Task-14 fix: ``ledger_parser.py`` always parses ``+N<cult>`` as
+    ``Kind.BOOKKEEPING`` -- never a player decision, so it's unconditionally
+    gate-exempt now, not just when a ``cult_choice`` pending exists. Corpus
+    ``4pLeague_S24_D3L2_G2`` row 400: a bare bookkeeping ``gain_cult`` row
+    for cultists lands while engineers is ``active_faction``, no pending
+    of any kind behind it."""
+    s = _as_active(_state(), "engineers")
+    assert active_faction(s) != "darklings"
+    cmd = _cmd("gain_cult", kind=Kind.BOOKKEEPING, cult="WATER", n1=1)
+    s2 = apply(s, "darklings", cmd)  # would raise "acted out of turn" pre-fix
+    assert s2.cults["darklings"]["WATER"] == 2
+
+
+def test_convert_is_exempt_from_the_turn_order_gate() -> None:
+    """Task-14 fix: ``commands.pm``'s ``command_convert`` never calls
+    ``require_subaction``/``require_action`` -- a resource exchange costs
+    no turn at all in Perl, regardless of ``active_faction``. Corpus
+    ``4pLeague_S31_D1L1_G7`` row 220: a Cultists reactive cascade
+    (``gain_cult; gain_town; convert``) lands while mermaids is
+    ``active_faction``; the trailing ``convert`` used to still hit the
+    strict gate even after ``gain_cult``/``gain_town`` were exempted."""
+    s = _as_active(_state(), "mermaids")
+    assert active_faction(s) != "engineers"
+    fs = with_faction(s, "engineers", replace(s.factions["engineers"], power=Power(0, 0, 3)))
+    cmd = _cmd("convert", kind=Kind.DECISION, res1="PW", res2="C", n1=1, n2=1)
+    s2 = apply(fs, "engineers", cmd)  # would raise "acted out of turn" pre-fix
+    assert s2.factions["engineers"].coins == s.factions["engineers"].coins + 1
+
+
 def test_lose_cult_retreats_with_no_power_refund() -> None:
     s = _as_active(_state(), "darklings")  # darklings WATER starts at 1
     cmd = _cmd("lose_cult", kind=Kind.BOOKKEEPING, cult="WATER", n1=1)

@@ -95,16 +95,37 @@ _ORDER_EXEMPT_VERBS = frozenset(
         # faction's turn -- corpus `4pLeague_S8_D3L3_G2` row 371, cultists'
         # `lose_cult` lands while mermaids is `active_faction`).
         "lose_cult",
+        # `+N<cult>` (task-14 fix): the ledger grammar (`ledger_parser.py`)
+        # always parses this as ``Kind.BOOKKEEPING``, never a player
+        # decision -- it is *always* a companion/automatic grant riding
+        # along some other event (ACTA's own gain, BON2/FAV6's gain, a
+        # cult_choice answer, TW5/TW6's town-tile grant, ...), never a
+        # move a faction submits on its own. Previously only exempted
+        # when a queued ``cult_choice`` pending existed (the one case the
+        # 10-game reference sample exercised); the broader corpus also
+        # has a reactive Cultists cult-track gain triggered by some
+        # *other* faction's action, landing interstitially between that
+        # faction's own turn rows with no pending of any kind behind it
+        # at all -- corpus e.g. `4pLeague_S24_D3L2_G2` row 400, a bare
+        # bookkeeping `gain_cult` row for cultists while engineers is
+        # `active_faction`. Unconditional exemption (matching every other
+        # bookkeeping-kind verb in this set) covers both cases with no
+        # narrower rule needed.
+        "gain_cult",
+        # `convert` (task-14 fix): ``commands.pm``'s ``command_convert``
+        # (352-...) never calls ``require_subaction``/``require_action`` at
+        # all -- a resource exchange is free and unconditionally available
+        # whenever the game is in "play" state, not gated by turn rotation.
+        # Trailing `convert` rows bundled into a Cultists reactive cascade
+        # (this same row's `gain_cult`/`gain_town`/`gain_favor`, all
+        # already exempt above) previously still hit the strict gate --
+        # corpus `4pLeague_S31_D1L1_G7` row 220, `4pLeague_S66_D3L2_G2`
+        # row 377: `gain_cult ...; gain_town ...; convert ...` while a
+        # different faction is `active_faction`.
+        "convert",
     }
 )
 _LEECH_ANSWER_VERBS = frozenset({"leech", "decline"})
-# `+CULT` answering an outstanding `cult_choice` pending (Cultists'
-# leech_effect "taken" cult step, pushed mid-batch by leech.py -- see that
-# module's docstring): the Cultists' answer can legitimately sit behind
-# still-outstanding sibling leech offers from the same build in the pending
-# queue, so this needs the same anywhere-in-queue exemption as leech/decline,
-# not just an active_faction()-is-literally-me check.
-_CULT_CHOICE_ANSWER_VERBS = frozenset({"gain_cult"})
 # `gain_town`/`gain_favor` answering their own outstanding pending, when it
 # lands *outside* the triggering build's own turn -- task-14 fix,
 # `loose-lose-cult` corpus row 371 (`4pLeague_S8_D3L3_G2`): cultists'
@@ -149,10 +170,6 @@ def apply(state: GameState, faction: str, cmd: ParsedCommand) -> GameState:
         or state.phase in (Phase.INCOME, Phase.CLEANUP)
         or (
             cmd.verb in _LEECH_ANSWER_VERBS and _has_queued_pending_of_kind(state, faction, "leech")
-        )
-        or (
-            cmd.verb in _CULT_CHOICE_ANSWER_VERBS
-            and _has_queued_pending_of_kind(state, faction, "cult_choice")
         )
         or (
             cmd.verb in _QUEUED_PENDING_ANSWER_VERBS
