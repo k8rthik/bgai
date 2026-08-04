@@ -240,6 +240,38 @@ def test_dropped_factions_still_standing_building_avoids_the_isolated_tp_surchar
     assert result.mismatches == ()
 
 
+def test_dropped_faction_mid_setup_dwellings_loses_both_snake_slots(
+    frames: tuple[pl.DataFrame, pl.DataFrame],
+) -> None:
+    """``4pLeague_S45_D3L4_G1``: darklings drops at row 30, exactly when
+    its own forward-order dwelling pick would start (round 0,
+    ``Phase.SETUP_DWELLINGS``) -- ``round_flow._first_live_setup_index``
+    fix (that function's own citation trail): darklings loses *both* its
+    dwelling-snake slots (forward and reverse) outright, not just the one
+    it was about to take. A full clean replay, not just past row 30/31.
+    """
+    moves_df, deltas_df = frames
+    result = replay_game("4pLeague_S45_D3L4_G1", moves_df, deltas_df)
+    assert result.error is None, result.error
+    assert result.mismatches == ()
+
+
+def test_dropped_faction_mid_setup_bonus_loses_its_bonus_tile_pick(
+    frames: tuple[pl.DataFrame, pl.DataFrame],
+) -> None:
+    """``4pLeague_S12_D2L1_G4``: engineers drops at row 38, mid-
+    ``Phase.SETUP_BONUS`` (after its own dwelling picks, before its own
+    reverse-order bonus-tile pick) -- same
+    ``round_flow._first_live_setup_index`` fix, exercised on the
+    ``SETUP_BONUS`` phase instead of ``SETUP_DWELLINGS``. A full clean
+    replay.
+    """
+    moves_df, deltas_df = frames
+    result = replay_game("4pLeague_S12_D2L1_G4", moves_df, deltas_df)
+    assert result.error is None, result.error
+    assert result.mismatches == ()
+
+
 # --------------------------------------------------------------------------
 # Task 14: ACTC compound-turn bundling (round_flow.is_turn_boundary)
 # --------------------------------------------------------------------------

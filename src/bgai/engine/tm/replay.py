@@ -256,11 +256,17 @@ def _apply_pending_drops(state: GameState, row: int, dropped_at_row: Mapping[str
         state = with_faction(state, faction, replace(fs, dropped=True, bonus=None, extra_actions=0))
     # If the faction that just dropped happened to still be
     # ``active_faction`` (e.g. it dropped between its own last action and
-    # the next row this harness sees), ``round_flow._advance_actions``'s
-    # existing skip-forward loop -- now dropped-aware -- resolves it in
-    # one call, however many consecutive dropped/passed factions in a row
-    # that takes.
-    if newly_dropped and state.phase == Phase.ACTIONS and active_faction(state) in newly_dropped:
+    # the next row this harness sees), ``round_flow.advance_turn``'s
+    # phase-appropriate skip-forward loop (``_advance_setup_dwellings``/
+    # ``_advance_setup_bonus``/``_advance_actions``, all now dropped-aware)
+    # resolves it in one call, however many consecutive dropped entries
+    # that takes -- not gated to ``Phase.ACTIONS`` alone (task-14 fix,
+    # corpus: several games drop a faction mid-``SETUP_DWELLINGS``/
+    # ``SETUP_BONUS``, before round 1 even starts, e.g.
+    # ``4pLeague_S45_D3L4_G1`` row 30). ``advance_turn`` is already a
+    # documented no-op outside these three phases, so calling it
+    # unconditionally here is safe.
+    if newly_dropped and active_faction(state) in newly_dropped:
         state = advance_turn(state)
     return state
 

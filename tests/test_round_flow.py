@@ -407,6 +407,33 @@ def test_setup_dwellings_wrong_order_build_raises() -> None:
         apply(s, "darklings", _cmd("build", loc="G5"))
 
 
+def test_advance_setup_dwellings_skips_every_remaining_slot_of_a_dropped_faction() -> None:
+    """``commands.pm``'s ``drop-faction`` handler removes *every*
+    remaining ``setup_order`` entry for the dropped faction outright
+    (~1597-1599), not just the very next one -- a faction that drops
+    before its own forward-order dwelling turn arrives loses *both* its
+    slots (forward and reverse) in one shot. Corpus:
+    ``4pLeague_S45_D3L4_G1``, darklings drops at row 30, exactly when its
+    own forward pick would start; the reverse-order pass a few rows later
+    goes straight from swarmlings' own forward pick to swarmlings' own
+    reverse pick with no darklings row between (task-14 fix).
+    """
+    s = GameState.initial(load_setup(GAME_ID))
+    s = start_setup(s)
+    # order: engineers, darklings, nomads, mermaids, mermaids, nomads,
+    # darklings, engineers, nomads (test_setup_dwellings_order_gives_...
+    # below pins this exact sequence). Drop darklings right after
+    # engineers' first (forward) pick.
+    assert active_faction(s) == "engineers"
+    s = apply(s, "engineers", _cmd("build", loc="E7"))
+    s = advance_turn(s)
+    assert active_faction(s) == "darklings"
+    s = with_faction(s, "darklings", replace(s.factions["darklings"], dropped=True))
+    s = advance_turn(s)
+    # darklings' forward slot is gone -- nomads goes next, not darklings.
+    assert active_faction(s) == "nomads"
+
+
 def test_setup_dwellings_order_gives_nomads_a_third_and_earlier_factions_two() -> None:
     from bgai.engine.tm.round_flow import _setup_dwellings_order
 

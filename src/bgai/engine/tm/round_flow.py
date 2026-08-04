@@ -589,17 +589,49 @@ def start_setup(state: GameState) -> GameState:
     return replace(state, turn_order=_setup_dwellings_order(state.setup), active_index=0)
 
 
+def _first_live_setup_index(state: GameState, turn_order: tuple[str, ...], start: int) -> int | None:
+    """First index ``>= start`` in ``turn_order`` whose faction is not
+    (yet) ``FactionState.dropped`` -- ``None`` if every remaining entry
+    belongs to a dropped faction. ``commands.pm``'s ``drop-faction``
+    handler removes *every remaining* ``setup_order`` entry for the
+    dropped faction outright the moment the drop happens (~1597-1599:
+    ``$game{acting}->setup_order([grep {$_->[0] ne $f} @{...setup_order()}])``),
+    not just the very next one -- a faction that drops before its own
+    setup turn ever arrives loses *both* its dwelling-snake slots
+    (forward and reverse) and its bonus-tile pick outright, in one shot.
+    Corpus: ``4pLeague_S45_D3L4_G1``, darklings drops at row 30, exactly
+    when its own forward-order dwelling turn would start (row 29 is
+    cultists' forward pick) -- row 31 (engineers) is the very next row,
+    and darklings never gets *either* dwelling pick, confirmed by the
+    reverse-order pass a few rows later skipping straight from
+    swarmlings to swarmlings again (its own forward+reverse back to
+    back) with no darklings row between.
+    """
+    for idx in range(start, len(turn_order)):
+        if not state.factions[turn_order[idx]].dropped:
+            return idx
+    return None
+
+
 def _advance_setup_dwellings(state: GameState) -> GameState:
-    next_index = state.active_index + 1
-    if next_index < len(state.turn_order):
+    next_index = _first_live_setup_index(state, state.turn_order, state.active_index + 1)
+    if next_index is not None:
         return replace(state, active_index=next_index)
     reverse_seats = tuple(reversed(state.setup.factions))
-    return replace(state, phase=Phase.SETUP_BONUS, turn_order=reverse_seats, active_index=0)
+    # A faction already dropped by the time SETUP_BONUS starts (this
+    # corpus has no example past round 0's own dwelling snake, but
+    # ``_first_live_setup_index``'s own docstring citation applies here
+    # identically) never gets a bonus-tile pick either -- same
+    # ``_first_live_setup_index`` skip, starting from index 0.
+    bonus_index = _first_live_setup_index(state, reverse_seats, 0)
+    return replace(
+        state, phase=Phase.SETUP_BONUS, turn_order=reverse_seats, active_index=bonus_index or 0
+    )
 
 
 def _advance_setup_bonus(state: GameState) -> GameState:
-    next_index = state.active_index + 1
-    if next_index < len(state.turn_order):
+    next_index = _first_live_setup_index(state, state.turn_order, state.active_index + 1)
+    if next_index is not None:
         return replace(state, active_index=next_index)
     # command_start's bonus-coin bump fires here too (_bumped_bonus_coins'
     # own docstring) -- this is round 1's "$game{round}++", from 0 to 1.
