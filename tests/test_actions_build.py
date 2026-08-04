@@ -222,24 +222,48 @@ def test_build_across_tunnel_pays_teleport_cost_and_gains_vp() -> None:
     assert s2.hexes[b].owner == "dwarves"
 
 
-def test_build_skips_teleport_fee_for_a_hex_already_teleported_to() -> None:
-    """Task-14 fix, corpus ``4pLeague_S10_D3L2_G6`` row 350: dwarves
-    ``dig 1. transform A12`` at row 344 already pays the tunnel fee for
-    A12 (``FactionState.teleported_hexes`` docstring); building on that
-    same, by-then-already-recolored hex several turns later (darklings/
-    cultists/chaosmagicians all acted in between) must not pay the tunnel
-    fee a second time -- only the D building's own ordinary cost."""
+def test_build_skips_teleport_fee_for_a_hex_already_teleported_to_this_turn() -> None:
+    """``FactionState.teleported_hex`` docstring: a build on a hex this
+    faction already paid the tunnel fee for *this same turn* (e.g. an
+    explicit ``transform`` earlier in the same ledger row) is free --
+    Perl's own ``check_reachable`` returns ``({}, {})`` once
+    ``$faction->{TELEPORT_TO} eq $where``. Contrast
+    ``test_build_pays_teleport_fee_again_in_a_later_turn_for_the_same_hex``
+    below: this exemption is strictly same-turn, not permanent (corpus
+    ``4pLeague_S10_D3L2_G6`` row 350 pays the *same* hex's fee again 3
+    turns later, after ``round_flow.py``'s ``_advance_actions``/
+    ``begin_actions`` have cleared ``teleported_hex`` in between)."""
     a, b = _skip_chain()
     s = _with_dwarves(_state())
     s = _place(s, "dwarves", a, "D")
     s = _clear(s, "dwarves", b)  # already dwarves' color -- tf_needed=False
-    s = replace(s, factions={**s.factions, "dwarves": replace(s.factions["dwarves"], teleported_hexes=frozenset({b}))})
+    s = replace(s, factions={**s.factions, "dwarves": replace(s.factions["dwarves"], teleported_hex=b)})
     before = s.factions["dwarves"]
     s2 = handle_build(s, "dwarves", _cmd("build", loc=b))
     after = s2.factions["dwarves"]
     d_cost = FACTIONS["dwarves"].buildings["D"].cost
     assert after.workers == before.workers - d_cost["W"]  # no extra tunnel W charge
     assert after.vp == before.vp  # no tunnel VP gain, already paid
+
+
+def test_build_pays_teleport_fee_again_in_a_later_turn_for_the_same_hex() -> None:
+    """Task-14 fix, corpus ``4pLeague_S10_D3L2_G6`` row 350: dwarves
+    ``dig 1. transform A12`` at row 344 pays the tunnel fee for A12;
+    ``build A12`` on that same, by-then-already-recolored hex 3 turns
+    later (darklings/cultists/chaosmagicians all acted in between,
+    clearing ``teleported_hex`` at least twice) pays the *same* fee
+    again -- there is no cross-turn memory, only same-turn (contrast the
+    sibling test above)."""
+    a, b = _skip_chain()
+    s = _with_dwarves(_state())
+    s = _place(s, "dwarves", a, "D")
+    s = _clear(s, "dwarves", b)  # already dwarves' color -- tf_needed=False
+    before = s.factions["dwarves"]  # teleported_hex is None (fresh turn)
+    s2 = handle_build(s, "dwarves", _cmd("build", loc=b))
+    after = s2.factions["dwarves"]
+    d_cost = FACTIONS["dwarves"].buildings["D"].cost
+    assert after.workers == before.workers - d_cost["W"] - 2  # + tunnel's 2W (teleport_level 0)
+    assert after.vp == before.vp + 4  # tunnel's flat VP gain, paid again
     assert s2.hexes[b].building == "D"
 
 

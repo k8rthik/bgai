@@ -438,7 +438,7 @@ def handle_transform(state: GameState, faction: str, cmd: ParsedCommand) -> Game
             )
     fs = replace(fs, spades_available=fs.spades_available - cost)
 
-    if free_tf_index is None and hex_key not in fs.teleported_hexes:
+    if free_tf_index is None and hex_key != fs.teleported_hex:
         # ``map.pm`` ``transform_cost`` folds ``check_reachable``'s
         # teleport cost/gain directly into the transform's own pay/gain
         # (588-600/631-632) -- a bare ``transform`` command that can only
@@ -453,15 +453,16 @@ def handle_transform(state: GameState, faction: str, cmd: ParsedCommand) -> Game
         # ``transform`` never paid before). Skipped when a live
         # ``free_tf`` marker made this transform free already (ACTN
         # forces direct adjacency, never a tunnel), and when ``hex_key``
-        # is already in ``fs.teleported_hexes`` (``FactionState``
-        # docstring: paid once, free forever after).
+        # already equals ``fs.teleported_hex`` -- this exact hex was
+        # already paid for *this same turn* (``FactionState.teleported_hex``
+        # docstring).
         teleport_cost, teleport_vp = teleport_crossing(state, faction, hex_key)
         if teleport_cost:
             fs = _pay_resources(state, faction, fs, teleport_cost, cmd)
         if teleport_vp:
             fs = replace(fs, vp=fs.vp + teleport_vp)
         if teleport_cost or teleport_vp:
-            fs = replace(fs, teleported_hexes=fs.teleported_hexes | {hex_key})
+            fs = replace(fs, teleported_hex=hex_key)
 
     new_hexes = dict(state.hexes)
     new_hexes[hex_key] = replace(hex_state, color=effective_color)

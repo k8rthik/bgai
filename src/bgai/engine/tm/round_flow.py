@@ -355,19 +355,42 @@ def _grant_other_income(state: GameState, faction: str) -> GameState:
     return with_faction(state, faction, fs)
 
 
+def _cult_p_position(state: GameState, faction: str) -> int:
+    """``$faction->{CULT_P}`` (``commands.pm`` ``command_send`` line 334):
+    a running count, incremented once every time one of ``faction``'s
+    ``send`` commands lands on a previously-*empty* priest slot on any
+    cult track (never decremented -- landing on an already-occupied step
+    just advances the track, no ``CULT_P`` bump, per that same ``command_
+    send`` branch). This engine has no separate running counter for it,
+    but ``state.priest_slots`` (``apply.py``'s ``handle_send``) already
+    records, per track, *which* faction occupies each priest-only step --
+    the live count is exactly how many of those slots, across all 4
+    tracks, are currently this faction's (task-14 fix, corpus
+    ``4pLeague_S12_D1L1_G1`` rows 150/151: engineers/alchemists each have
+    exactly 1 occupied slot and are owed the ``temple-scoring-tile``'s
+    2 C/unit; nomads/witches have 0 and correctly get nothing).
+    """
+    return sum(1 for cult in CULTS for occupant in state.priest_slots[cult] if occupant == faction)
+
+
 def _grant_cult_income(state: GameState, faction: str) -> GameState:
     """``cult_income_for_faction``: the current round's SCORE tile's
     ``cult_income``, scaled by ``floor(position / req)`` (Step 1 finding
     above). ``tile.cult == "CULT_P"`` (the optional ``temple-scoring-tile``
     SCORE9) is not a real cult track -- ``state.cults`` has no such key --
-    and this engine has no priest-on-temple scoring mechanic elsewhere
-    either, so it is a documented no-grant no-op here rather than a
-    ``KeyError``.
+    its "position" is ``_cult_p_position`` instead (task-14 fix; an earlier
+    revision treated this as a documented no-grant no-op, which the
+    corpus disproves).
     """
     tile = state.setup.score_tiles[state.round - 1]
-    if tile.cult not in CULTS or not tile.cult_income:
+    if not tile.cult_income:
         return state
-    position = state.cults[faction][tile.cult]
+    if tile.cult == "CULT_P":
+        position = _cult_p_position(state, faction)
+    elif tile.cult in CULTS:
+        position = state.cults[faction][tile.cult]
+    else:
+        return state
     units = position // tile.req
     if units <= 0:
         return state
@@ -396,10 +419,21 @@ register_handler("all_income_for_faction", handle_income_row)
 
 def begin_actions(state: GameState) -> GameState:
     """``Phase.INCOME`` -> ``Phase.ACTIONS`` once every income row for the
-    round has been applied (Task 12 contract, step 4)."""
+    round has been applied (Task 12 contract, step 4). Clears every
+    faction's ``teleported_hex`` (``FactionState`` docstring, task-14
+    fix) -- ``_advance_actions`` below resets it for whichever faction
+    becomes newly active *during* the round, but the round's very first
+    active faction (``turn_order[0]``) never goes through that path, so
+    this is the other of the two reset points Perl's own
+    ``start_full_move`` collapses into one call.
+    """
     if state.phase != Phase.INCOME:
         raise ValueError(f"begin_actions called outside Phase.INCOME (got {state.phase})")
-    return replace(state, phase=Phase.ACTIONS, active_index=0)
+    new_factions = {
+        name: replace(fs, teleported_hex=None) if fs.teleported_hex is not None else fs
+        for name, fs in state.factions.items()
+    }
+    return replace(state, phase=Phase.ACTIONS, active_index=0, factions=new_factions)
 
 
 # --------------------------------------------------------------------------
@@ -534,13 +568,20 @@ def _advance_actions(state: GameState) -> GameState:
     faction = state.turn_order[state.active_index]
     fs = state.factions[faction]
     if fs.extra_actions > 0:
-        new_fs = replace(fs, extra_actions=fs.extra_actions - 1)
+        # A fresh full action for the *same* faction (ACTC ticket) is
+        # still a new ``start_full_move`` in Perl terms -- ``teleported_hex``
+        # resets here too (``FactionState`` docstring, task-14 fix).
+        new_fs = replace(fs, extra_actions=fs.extra_actions - 1, teleported_hex=None)
         return with_faction(state, faction, new_fs)
 
     n = len(state.turn_order)
     for step in range(1, n + 1):
         idx = (state.active_index + step) % n
-        if not state.factions[state.turn_order[idx]].passed:
+        next_faction = state.turn_order[idx]
+        if not state.factions[next_faction].passed:
+            next_fs = state.factions[next_faction]
+            if next_fs.teleported_hex is not None:
+                state = with_faction(state, next_faction, replace(next_fs, teleported_hex=None))
             return replace(state, active_index=idx)
     return replace(state, phase=Phase.CLEANUP)
 

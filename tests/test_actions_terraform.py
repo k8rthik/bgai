@@ -446,20 +446,22 @@ def test_transform_across_tunnel_pays_teleport_cost_and_gains_vp() -> None:
     assert after.spades_available == before.spades_available - 1  # recolor's own spade cost
     assert after.workers == before.workers - 2  # tunnel cost at teleport_level 0
     assert after.vp == before.vp + 4  # tunnel's flat VP gain
-    assert b in after.teleported_hexes
+    assert after.teleported_hex == b
 
 
-def test_transform_across_tunnel_is_free_for_a_hex_already_teleported_to() -> None:
-    """``FactionState.teleported_hexes`` docstring: once paid, a hex is
-    free forever after -- guards against double-charging if a later
-    command (a second bare ``transform``, or ``handle_build``'s own
-    teleport-crossing call) revisits the same hex."""
+def test_transform_across_tunnel_is_free_for_a_hex_already_teleported_to_this_turn() -> None:
+    """``FactionState.teleported_hex`` docstring: a hex already paid for
+    *this same turn* (e.g. an earlier build's own implicit transform
+    landing here, or a prior bare ``transform`` on the same hex within
+    the same compound turn) is free the second time -- strictly
+    same-turn, not permanent (``round_flow.py``'s ``_advance_actions``/
+    ``begin_actions`` clear ``teleported_hex`` every fresh turn)."""
     a, b = _skip_chain()
     s = with_faction(_state(), "dwarves", FactionState.initial(FACTIONS["dwarves"]))
     s = _place(s, "dwarves", a)
     home = FACTIONS["dwarves"].color
     s = _set_color(s, b, _one_step_neighbor(home))
-    s = _rich(s, "dwarves", spades_available=2, teleported_hexes=frozenset({b}))
+    s = _rich(s, "dwarves", spades_available=2, teleported_hex=b)
     before = s.factions["dwarves"]
     s2 = handle_transform(s, "dwarves", _cmd("transform", loc=b, color=home))
     after = s2.factions["dwarves"]

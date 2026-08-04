@@ -110,29 +110,29 @@ class FactionState:
     ``turn_order``. Added by Task 10 -- another migration on top of the
     task-3 frozen shape, per this module's docstring.
     """
-    teleported_hexes: frozenset[str] = frozenset()
-    """Hexes this faction has ever paid a ``connectivity.teleport_crossing``
-    fee (Dwarves' tunnel / Fakirs' carpet flight) to reach -- once paid, a
-    *later* command touching the same hex (a ``transform`` now, a ``build``
-    on that same hex turns later) is free, permanently, no matter how many
-    faction turns pass in between (task-14 fix, corpus evidence: game
+    teleported_hex: str | None = None
+    """``$faction->{TELEPORT_TO}`` (``map.pm`` ``check_reachable`` lines
+    244-250 / ``commands.pm`` ``command_transform`` line 629): the hex, if
+    any, this faction has *this turn* already paid a
+    ``connectivity.teleport_crossing`` fee (Dwarves' tunnel / Fakirs'
+    carpet flight) to reach. A second command touching that *same* hex
+    later in the *same* turn is free (Perl's own ``check_reachable``
+    returns ``({}, {})`` when ``TELEPORT_TO eq $where``); a command
+    touching a *different* hex the same turn is illegal in Perl ("Can't
+    use tunnel / carpet flight multiple times in one turn") and never
+    appears in this corpus, so this engine doesn't reject it, just doesn't
+    treat it as already-paid. Cleared to ``None`` every time a faction
+    starts a fresh full action (``start_full_move``'s own ``delete
+    $faction->{TELEPORT_TO}``) -- ``round_flow.py``'s ``_advance_actions``/
+    ``begin_actions`` own that reset (module docstring, task-14 fix).
+    Corpus evidence for the *lack* of any longer-lived memory: game
     ``4pLeague_S10_D3L2_G6``, dwarves ``dig 1. transform A12`` at row 344
-    pays the fee; ``build A12`` 3 turns later at row 350, after darklings/
-    cultists/chaosmagicians all acted in between, pays only the plain D
-    cost -- no second fee, even though ``connectivity.teleport_crossing``
-    is a stateless function of the *current* board and would otherwise
-    recompute the same nonzero fee both times). Perl's own equivalent,
-    ``$faction->{TELEPORT_TO}``, is a single hex slot cleared every
-    ``start_full_move`` (this engine's per-turn boundary) -- this engine
-    doesn't reproduce that per-turn reset (a set, not a single slot,
-    intentionally over-generous about "already paid") because the corpus
-    never contradicts "permanently free once paid," and Perl's own
-    ``check_reachable`` already dies outright ("Can't use tunnel / carpet
-    flight multiple times in one turn") on the one scenario a per-turn
-    reset would otherwise distinguish -- two *different* hexes tunneled to
-    in the same turn, which is illegal and never appears in this corpus.
-    Added by Task 14 -- another migration on top of the task-3 frozen
-    shape, per this module's docstring.
+    pays the fee once; ``build A12`` -- on the very same, by-then-already-
+    gray hex -- 3 turns later at row 350 (darklings/cultists/
+    chaosmagicians all acted in between, so ``TELEPORT_TO`` was cleared
+    and reset at least twice) pays the *same* fee again, in full. Added by
+    Task 14 -- another migration on top of the task-3 frozen shape, per
+    this module's docstring.
     """
 
     @classmethod

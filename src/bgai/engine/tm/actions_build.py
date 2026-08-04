@@ -560,18 +560,20 @@ def handle_build(state: GameState, faction: str, cmd: ParsedCommand) -> GameStat
         # line 76; TELEPORT_NO_TF's branch, commands.pm 207-210, never
         # calls check_reachable at all) -- the ``free_d_index is None``
         # guard on this whole block already matches that. Also skipped if
-        # ``hex_key`` is already in ``fs.teleported_hexes`` -- an earlier
-        # ``transform`` on this same hex (a separate, earlier turn even)
-        # already paid this fee (``FactionState.teleported_hexes``
-        # docstring, task-14 fix).
-        if hex_key not in fs.teleported_hexes:
+        # ``hex_key`` already equals ``fs.teleported_hex`` -- an earlier
+        # ``transform`` on this same hex *this same turn* already paid
+        # this fee (``FactionState.teleported_hex`` docstring, task-14
+        # fix); a build in a *later* turn on the same hex pays fresh
+        # (``teleported_hex`` is reset every turn, so it won't still
+        # match by then).
+        if hex_key != fs.teleported_hex:
             teleport_cost, teleport_vp = teleport_crossing(state, faction, hex_key)
             if teleport_cost:
                 fs = _pay(state, faction, fs, teleport_cost, cmd)
             if teleport_vp:
                 fs = replace(fs, vp=fs.vp + teleport_vp)
             if teleport_cost or teleport_vp:
-                fs = replace(fs, teleported_hexes=fs.teleported_hexes | {hex_key})
+                fs = replace(fs, teleported_hex=hex_key)
         fs = _pay(state, faction, fs, d_track.cost, cmd)
 
     fs = replace(fs, buildings={**fs.buildings, "D": fs.buildings["D"] | {hex_key}})

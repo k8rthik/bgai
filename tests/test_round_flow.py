@@ -164,6 +164,47 @@ def test_cult_income_spade_scores_halflings_unconditional_spade_vp_bonus() -> No
     assert s2.factions["halflings"].vp == before_vp + 1
 
 
+def test_cult_income_temple_scoring_tile_uses_priest_slot_occupancy() -> None:
+    """Task-14 fix, corpus ``4pLeague_S12_D1L1_G1`` rows 150/151 (round 2's
+    tile there is the optional SCORE9/``temple-scoring-tile``, cult
+    ``CULT_P``, req 1, income ``{"C": 2}``): engineers/alchemists each hold
+    exactly 1 occupied priest slot (a prior ``send`` that landed on an
+    empty step) and are owed 2 C; nomads/witches hold 0 and correctly get
+    nothing (sibling test below). ``CULT_P`` is not a real cult track
+    (``state.cults`` has no such key) -- ``_cult_p_position`` sources it
+    from ``state.priest_slots`` occupancy instead, mirroring
+    ``commands.pm``'s ``$faction->{CULT_P}`` counter (incremented once per
+    ``send`` that claims a previously-empty slot, ``command_send`` line
+    334).
+    """
+    from bgai.engine.tm.tiles import ScoringTile
+
+    temple_tile = ScoringTile(
+        cult="CULT_P", req=1, vp_mode="build", vp=(("TE", 4),), cult_income=(("C", 2),)
+    )
+    s = _state()
+    s = replace(s, setup=replace(s.setup, score_tiles=(temple_tile,) + s.setup.score_tiles[1:]))
+    slots = dict(s.priest_slots)
+    slots["FIRE"] = ("engineers", None, None, None)
+    s = replace(s, priest_slots=slots)
+    before = s.factions["engineers"].coins
+    s2 = handle_income_row(s, "engineers", _cmd("cult_income_for_faction"))
+    assert s2.factions["engineers"].coins == before + 2
+
+
+def test_cult_income_temple_scoring_tile_grants_nothing_with_no_occupied_slots() -> None:
+    from bgai.engine.tm.tiles import ScoringTile
+
+    temple_tile = ScoringTile(
+        cult="CULT_P", req=1, vp_mode="build", vp=(("TE", 4),), cult_income=(("C", 2),)
+    )
+    s = _state()
+    s = replace(s, setup=replace(s.setup, score_tiles=(temple_tile,) + s.setup.score_tiles[1:]))
+    before = s.factions["nomads"].coins
+    s2 = handle_income_row(s, "nomads", _cmd("cult_income_for_faction"))
+    assert s2.factions["nomads"].coins == before
+
+
 def test_all_income_for_faction_grants_both_components() -> None:
     s = replace(_state(), round=4)
     s = _rich(s, "nomads", coins=0, workers=0)
@@ -226,6 +267,19 @@ def test_begin_actions_transitions_income_to_actions() -> None:
 def test_begin_actions_rejects_wrong_phase() -> None:
     with pytest.raises(ValueError):
         begin_actions(_state())  # already ACTIONS
+
+
+def test_begin_actions_clears_teleported_hex_for_every_faction() -> None:
+    """The round's first active faction (``turn_order[0]``) never goes
+    through ``_advance_actions``'s own reset, so ``begin_actions`` is the
+    other half of Perl's ``start_full_move`` reset (``FactionState.
+    teleported_hex`` docstring, task-14 fix)."""
+    s = replace(_state(), phase=Phase.INCOME, active_index=2)
+    s = _rich(s, "engineers", teleported_hex="A1")
+    s = _rich(s, "mermaids", teleported_hex="B2")
+    s2 = begin_actions(s)
+    assert s2.factions["engineers"].teleported_hex is None
+    assert s2.factions["mermaids"].teleported_hex is None
 
 
 # --------------------------------------------------------------------------
@@ -475,6 +529,30 @@ def test_advance_turn_spends_extra_actions_without_moving_to_next_faction() -> N
     assert s3.factions["engineers"].extra_actions == 0
     s4 = advance_turn(s3)
     assert active_faction(s4) == "darklings"
+
+
+def test_advance_turn_clears_teleported_hex_for_the_newly_active_faction() -> None:
+    """``FactionState.teleported_hex`` docstring, task-14 fix: Perl's
+    ``start_full_move`` deletes ``TELEPORT_TO`` every time a faction
+    becomes newly active -- a Dwarves/Fakirs tunnel fee paid last turn
+    must not exempt this turn's tunnel use on a *different* hex (or even
+    the same one, per the corpus: ``4pLeague_S10_D3L2_G6`` row 350 pays
+    the same hex's fee again)."""
+    s = _state()
+    s = _rich(s, "darklings", teleported_hex="A1")
+    s2 = advance_turn(s)  # engineers -> darklings
+    assert active_faction(s2) == "darklings"
+    assert s2.factions["darklings"].teleported_hex is None
+
+
+def test_advance_turn_clears_teleported_hex_when_spending_an_extra_action() -> None:
+    """Same reset, for the ACTC "same faction, fresh full action" case
+    (``_advance_actions``'s ``extra_actions`` branch)."""
+    s = _state()
+    s = _rich(s, "engineers", extra_actions=1, teleported_hex="A1")
+    s2 = advance_turn(s)
+    assert active_faction(s2) == "engineers"
+    assert s2.factions["engineers"].teleported_hex is None
 
 
 def test_advance_turn_transitions_to_cleanup_once_everyone_passed() -> None:
