@@ -205,6 +205,42 @@ def test_apply_town_tile_defers_cult_step_keys() -> None:
     assert s2.cults["engineers"] == before_cults  # cult steps NOT applied here
 
 
+def test_apply_town_tile_priest_gain_clamped_to_priest_pool() -> None:
+    """``resources.pm``'s ``adjust_resource`` generic branch (lines
+    ~313-340) clamps *any* positive delta of a resource with a live
+    faction-level ``MAX_$type`` entry -- ``MAX_P`` is permanently
+    decremented by ``command_send`` (line 333) every time a priest commits
+    to a cult-track slot, so a faction that has already sent priests away
+    can no longer hold the full 7. ``apply_town_tile``'s own P grant
+    (TW3's ``+1 P``) is not exempt from this -- it goes through the same
+    ``adjust_resource`` call in Perl as every other P gain. Task-14 fix,
+    corpus ``4pLeague_S4_D1L1_G4`` row 276: darklings had already sent 2
+    priests to cult tracks (``priest_pool`` 7 -> 5) before this row's
+    ``gain_town TW3``; expected priests stays at 5 (already at the
+    faction's own reduced cap), the un-clamped ``+=`` this fix replaces
+    would have reached 6.
+    """
+    s = _fresh()
+    fs = replace(s.factions["engineers"], priests=5, priest_pool=5)
+    s = with_faction(s, "engineers", fs)
+    s2 = apply_town_tile(s, "engineers", "TW3")  # gain={"KEY": 1, "P": 1}
+    after = s2.factions["engineers"]
+    assert after.priests == 5  # already at the reduced cap -- clamped, not 6
+    assert after.keys == fs.keys + 1  # the tile's other gain keys are unaffected
+
+
+def test_apply_town_tile_priest_gain_below_pool_still_applies() -> None:
+    """Sibling of the clamp test above: when the faction is *below* its
+    (possibly already-reduced) ``priest_pool``, the grant still lands in
+    full -- the clamp only ever caps, never suppresses, a legitimate gain.
+    """
+    s = _fresh()
+    fs = replace(s.factions["engineers"], priests=3, priest_pool=6)
+    s = with_faction(s, "engineers", fs)
+    s2 = apply_town_tile(s, "engineers", "TW3")
+    assert s2.factions["engineers"].priests == 4
+
+
 def test_apply_town_tile_rejects_unknown_tile() -> None:
     with pytest.raises(ValueError):
         apply_town_tile(_fresh(), "engineers", "TW99")

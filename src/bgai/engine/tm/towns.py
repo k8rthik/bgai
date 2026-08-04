@@ -362,7 +362,22 @@ def apply_town_tile(state: GameState, faction: str, tile: str) -> GameState:
         keys=fs.keys + keys,
         coins=fs.coins + coins,
         workers=fs.workers + workers,
-        priests=fs.priests + priests,
+        # Clamped to fs.priest_pool, not a bare += -- resources.pm's
+        # adjust_resource generic branch (lines ~313-340) clamps *any*
+        # positive delta of a resource with a live faction-level MAX_$type
+        # entry, and MAX_P is exactly this engine's priest_pool
+        # (actions_power.py's ACT2 docstring has the full citation trail:
+        # command_send, commands.pm line 333, permanently decrements
+        # MAX_P by 1 per priest committed to a cult-track slot). A town
+        # tile's P grant (TW3's +1, e.g.) is not a special case in Perl --
+        # it goes through the same adjust_resource call as every other P
+        # gain -- but this module's own P grant was a bare += with no
+        # clamp at all, over-crediting a faction that had already sent
+        # priests to cult tracks (task-14 fix, corpus
+        # 4pLeague_S4_D1L1_G4 row 276: darklings already sent 2 priests to
+        # cult tracks before TW3's own +1 P; expected priests stay at 5,
+        # engine's un-clamped += reached 6).
+        priests=min(fs.priests + priests, fs.priest_pool),
         power=fs.power.gain(power_gain) if power_gain else fs.power,
         towns=fs.towns + (tile,),
     )
