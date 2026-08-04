@@ -365,11 +365,16 @@ def test_lose_resource_insufficient_raises() -> None:
         apply(s, "engineers", cmd)
 
 
-def test_lose_spade_is_a_documented_noop_stub() -> None:
+def test_lose_spade_decrements_the_real_balance() -> None:
+    """Task 9 (``actions_terraform.py``) replaces the Task 7 no-op stub with
+    a real ``spades_available`` decrement -- see that module's docstring.
+    """
     s = _state()
+    fs = replace(s.factions["engineers"], spades_available=2)
+    s = with_faction(s, "engineers", fs)
     cmd = _cmd("lose_spade", kind=Kind.BOOKKEEPING, n1=1)
     s2 = apply(s, "engineers", cmd)
-    assert s2 == s
+    assert s2.factions["engineers"].spades_available == 1
 
 
 def test_lose_marker_is_a_documented_noop_stub() -> None:

@@ -85,6 +85,15 @@ class FactionState:
     flat, faction-agnostic set of hex-pairs, so nothing else on
     `GameState`/`FactionState` could answer "how many bridges has X built".
     """
+    spades_available: int = 0
+    """Transient spade balance (``$faction->{SPADE}`` in ``resources.pm``):
+    incremented by ``dig N`` (and by absorbing a still-pending
+    ``halflings_spades`` grant), decremented by ``transform`` and by
+    ``lose_spade``; added by Task 9 -- another migration on top of the
+    task-3 frozen shape, per this module's docstring. ACT5/ACT6/BON1 spade
+    grants (Task 10) feed the same balance -- ``actions_terraform.py``
+    treats it as the single source of truth regardless of source.
+    """
 
     @classmethod
     def initial(cls, data: FactionData) -> FactionState:
@@ -108,6 +117,7 @@ class FactionState:
             actions_used=frozenset(),
             cult_blocked=frozenset(),
             bridges_built=0,
+            spades_available=0,
         )
 
 
