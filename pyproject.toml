@@ -34,3 +34,7 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "-m 'not slow'"
+markers = [
+    "slow: full 3563-game corpus checks (~70s) -- run explicitly with -m slow",
+]
