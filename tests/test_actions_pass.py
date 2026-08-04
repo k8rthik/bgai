@@ -341,6 +341,24 @@ def test_connect_founds_a_river_joined_town() -> None:
     assert set(pendings[0].source.split(",")) == {a, a2, b, b2}
 
 
+def test_connect_scopes_the_candidate_to_the_named_river_not_any_touching_river() -> None:
+    """Task-13 report follow-up, ``4pLeague_S10_D2L1_G3`` row 363: a plain
+    4-hex chain (A3=SH, A4=TE, B2=D, B3=D -- power 3+2+1+1=7, count 4,
+    already qualifying on its own) has one end (A3) touching river ``r0``
+    and the other end (B3) touching a *different* river ``r2``, which also
+    touches a separate mermaids D at C3. Connecting via ``r0`` must found
+    exactly the 4-hex chain -- not the 5-hex cluster reachable by joining
+    through ``r2`` instead, even though that merged candidate also touches
+    ``r0``'s own neighbour hexes (module docstring's "Known limitation",
+    now fixed via ``towns.river_town_candidate``)."""
+    s = _state()
+    s = _place_all(s, "mermaids", {"A3": "SH", "A4": "TE", "B2": "D", "B3": "D", "C3": "D"})
+    s2 = handle_connect(s, "mermaids", _cmd("connect", loc="r0"))
+    pendings = [p for p in s2.pending if p.kind == "gain_town" and p.faction == "mermaids"]
+    assert len(pendings) == 1
+    assert set(pendings[0].source.split(",")) == {"A3", "A4", "B2", "B3"}
+
+
 def test_connect_rejects_non_mermaids() -> None:
     _a, _a2, river, _b, _b2 = _mermaid_river_layout()
     s = _state()

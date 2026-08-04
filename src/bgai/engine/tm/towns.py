@@ -215,6 +215,50 @@ def _mermaid_candidates(state: GameState, faction: str) -> tuple[frozenset[str],
     return tuple(results)
 
 
+def river_town_candidate(state: GameState, faction: str, river: str) -> frozenset[str] | None:
+    """The single town-founding candidate a ``connect RIVER`` command
+    targets (``check_mermaid_river_connection_town``, module docstring):
+    the cluster :func:`_mermaid_river_cluster` seeds specifically from
+    ``river``, if it currently qualifies and doesn't overlap an
+    already-founded town.
+
+    **Not** the same as filtering :func:`new_towns`'s combined candidate
+    list down to whichever entries happen to touch ``river``'s neighbours:
+    that list unions a candidate per *every* river hex on the board, and
+    two of a faction's otherwise-disjoint plain clusters can each be
+    seeded from a *different* river hex yet still share a hex with a
+    *third* river's neighbour set (e.g. cluster A touches river R1
+    directly; cluster B is joined to A only via a separate river R2; a
+    "does candidate intersect R1's neighbours" test then wrongly matches
+    the R2-seeded A+B candidate for an R1 connect, since A -- part of both
+    -- touches R1). Only re-running the single-river BFS from the *named*
+    river avoids that (task-13 report follow-up,
+    ``4pLeague_S10_D2L1_G3`` row 363: mermaids' ``connect r9`` recorded a
+    6-hex candidate reachable via a *different* river instead of ``r9``'s
+    own 3-hex one, permanently marking a hex -- C4 -- as founded that a
+    later ``upgrade C4 to SH`` should still have been free to found a
+    *separate* plain town with).
+
+    Returns ``None`` if ``river`` isn't a river hex touching any of
+    ``faction``'s buildings, or the resulting cluster doesn't (yet)
+    qualify -- callers turn that into "no qualifying town cluster touches
+    river hex X".
+    """
+    if faction != "mermaids" or not _town_tiles_available(state):
+        return None
+    fs = state.factions[faction]
+    building_hexes = _faction_buildings(fs)
+    if not building_hexes:
+        return None
+    cluster = _mermaid_river_cluster(state, faction, building_hexes, river)
+    if cluster is None:
+        return None
+    founded = state.founded_towns.get(faction, ())
+    if not _qualifies(state, fs, cluster) or _overlaps_founded(cluster, founded):
+        return None
+    return cluster
+
+
 def new_towns(state: GameState, faction: str) -> tuple[frozenset[str], ...]:
     """Clusters of ``faction``'s buildings that now qualify as a town.
 

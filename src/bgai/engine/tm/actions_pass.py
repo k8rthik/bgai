@@ -60,26 +60,26 @@ Ported from the reference implementation (jsnell/terra-mystica, MIT):
   rows, which are wholly independent of that one-time free grant.
 
 - ``towns.pm`` ``check_mermaid_river_connection_town`` (``connect``, e.g.
-  ``connect R1``): re-detects Mermaids' town candidates via
-  ``towns.new_towns`` (which, for Mermaids, already includes river-hex
-  join candidates alongside plain ones -- see that module's docstring) and
-  picks whichever qualifying cluster touches the named river hex, pushing
-  a ``gain_town`` pending exactly like ``actions_build.py``'s
-  ``_maybe_queue_town`` does for a plain build/upgrade/bridge. Plain
-  clusters are always already recorded into ``founded_towns`` (and their
-  pendings already queued) by the preceding ``build``/``upgrade``/
-  ``bridge`` row in the same turn by the time ``connect`` runs, so
-  ``new_towns`` at that point can only surface a genuinely new
-  river-joined candidate -- cross-checked against the crawled corpus (game
+  ``connect R1``): re-detects the *single* town candidate the named river
+  hex seeds via ``towns.river_town_candidate`` (the one-river-hex BFS,
+  scoped to exactly that river), pushing a ``gain_town`` pending exactly
+  like ``actions_build.py``'s ``_maybe_queue_town`` does for a plain
+  build/upgrade/bridge -- cross-checked against the crawled corpus (game
   4pLeague_S10_D1L1_G1 row 208: ``dig 1. build A3. connect R1.
-  gain_town TW1``, all one ledger row/turn). **Known limitation**: this
-  reasoning assumes ``connect`` always follows a ``build``/``upgrade``/
-  ``bridge`` row earlier in the *same* turn, which is the only pattern
-  observed across the sampled corpus rows -- a hypothetical ``connect``
-  fired with no board change earlier that turn is unverified (there is
-  nothing in principle wrong with ``handle_connect`` in that case, since
-  it re-derives candidates fresh rather than trusting a stale detection
-  pass, but no corpus row was found to confirm it).
+  gain_town TW1``, all one ledger row/turn).
+
+  An earlier revision instead filtered ``towns.new_towns``'s *combined*
+  candidate list (every river hex on the board, unioned) down to whichever
+  entries happened to intersect the named river's neighbour hexes --
+  unsound whenever two of a faction's otherwise-separate clusters are each
+  reachable via a *different* river, since a candidate genuinely seeded
+  from river R2 can still share a hex with river R1's neighbour set (task-13
+  report follow-up, ``4pLeague_S10_D2L1_G3`` row 363: mermaids' ``connect
+  r9`` picked a 6-hex candidate actually seeded from a different river
+  instead of r9's own 3-hex one, permanently over-marking a hex -- C4 -- as
+  already founded that a later ``upgrade C4 to SH`` should still have been
+  free to found a *separate* plain town with). ``towns.py``'s
+  ``river_town_candidate`` docstring has the full citation.
 
 Engineers' stronghold pass-VP hook (``scoring.pm`` lines 166-178, quoted in
 ``factions_data.py``'s ``notes`` field): "3 VP for each bridge whose two
@@ -99,12 +99,12 @@ from dataclasses import replace
 
 from bgai.data.ledger_parser import ParsedCommand
 from bgai.engine.tm.apply import EngineError, push_pending, register_handler
-from bgai.engine.tm.board import RIVER, base_board
+from bgai.engine.tm.board import RIVER
 from bgai.engine.tm.factions.hooks import HOOKS, FactionHooks, hooks_for
 from bgai.engine.tm.factions_data import FACTIONS
 from bgai.engine.tm.state import FactionState, GameState, PendingDecision, Phase, with_faction
 from bgai.engine.tm.tiles import BONUS_TILES, FAVOR_TILES
-from bgai.engine.tm.towns import new_towns, record_founded_town
+from bgai.engine.tm.towns import record_founded_town, river_town_candidate
 
 _ADVANCE_COST_RES: dict[str, str] = {"W": "workers", "C": "coins", "P": "priests"}
 _ENGINEERS_GRAY = "gray"
@@ -293,7 +293,15 @@ def _cluster_key(cluster: frozenset[str]) -> str:
 
 
 def handle_connect(state: GameState, faction: str, cmd: ParsedCommand) -> GameState:
-    """``connect R<n>``: Mermaids-only river-hex town join (module docstring)."""
+    """``connect R<n>``: Mermaids-only river-hex town join (module docstring).
+
+    Uses ``towns.river_town_candidate`` -- the single-river BFS scoped to
+    exactly ``river`` -- rather than filtering ``towns.new_towns``'s
+    combined candidate list down to whatever happens to touch ``river``'s
+    neighbours (module docstring's "Known limitation" note, now fixed:
+    that loose intersection test could match a candidate genuinely seeded
+    from a *different* river hex).
+    """
     assert cmd.loc is not None
     river = cmd.loc
     if faction != "mermaids":
@@ -305,30 +313,19 @@ def handle_connect(state: GameState, faction: str, cmd: ParsedCommand) -> GameSt
     if state.hexes[river].color != RIVER:
         raise EngineError(f"{river} is not a river hex", state=state, faction=faction, cmd=cmd)
 
-    board_adjacent = _river_neighbors(river)
-    candidates = new_towns(state, faction)
-    matches = sorted(
-        (c for c in candidates if board_adjacent & c),
-        key=_cluster_key,
-    )
-    if not matches:
+    cluster = river_town_candidate(state, faction, river)
+    if cluster is None:
         raise EngineError(
             f"no qualifying town cluster touches river hex {river}",
             state=state,
             faction=faction,
             cmd=cmd,
         )
-    cluster = matches[0]
     new_state = record_founded_town(state, faction, cluster)
     pending = PendingDecision(
         faction=faction, kind="gain_town", amount=1, source=_cluster_key(cluster)
     )
     return push_pending(new_state, pending)
-
-
-def _river_neighbors(river: str) -> frozenset[str]:
-    board = base_board()
-    return board.adjacent.get(river, frozenset())
 
 
 register_handler("pass", handle_pass)
