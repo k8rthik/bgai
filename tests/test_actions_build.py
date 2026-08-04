@@ -828,6 +828,56 @@ def test_gain_town_tw5_drives_cult_advance_on_all_four_tracks() -> None:
     assert s2.cult_10["EARTH"] == "engineers"
 
 
+def test_gain_town_retries_a_cult_blocked_at_9_once_its_own_key_covers_it() -> None:
+    """Task-13 report follow-up, ``4pLeague_S10_D1L1_G6`` row 315: nomads'
+    ``gain_favor FAV5`` (2 FIRE steps, 8->10) earlier in the same ledger
+    row blocked at 9 for lack of a key (``fs.cult_blocked == {"FIRE"}``,
+    ``fs.keys == 0``); the very next command, ``gain_town TW7``, grants
+    exactly the 1 key needed and must retroactively bump FIRE to 10 --
+    ``resources.pm`` ``adjust_resource``'s ``KEY`` branch (355-362, cited
+    in ``cults.py`` ``advance``'s docstring), ported as
+    ``_retry_blocked_cults``."""
+    s = _state()
+    fs = replace(s.factions["nomads"], keys=0, cult_blocked=frozenset({"FIRE"}))
+    s = with_faction(s, "nomads", fs)
+    s = replace(
+        s,
+        cults={**s.cults, "nomads": {"FIRE": 9, "WATER": 0, "EARTH": 7, "AIR": 0}},
+        cult_10={**s.cult_10, "FIRE": None},
+        pending=(PendingDecision(faction="nomads", kind="gain_town", source="cluster"),),
+    )
+    before_power = s.factions["nomads"].power
+    s2 = handle_gain_town(s, "nomads", _cmd("gain_town", tile="TW7"))
+    assert s2.cults["nomads"]["FIRE"] == 10
+    assert s2.cult_10["FIRE"] == "nomads"
+    assert s2.factions["nomads"].cult_blocked == frozenset()
+    # TW7 grants 1 key; retrying FIRE spends it (net back to 0) and scores
+    # the +3 power for crossing into the 10-slot, on top of TW7's own gain.
+    assert s2.factions["nomads"].keys == 0
+    assert s2.factions["nomads"].power == before_power.gain(3)
+
+
+def test_gain_town_leaves_multiple_blocked_cults_alone_until_keys_cover_all_of_them() -> None:
+    """A single key only retries a batch of blocked cults once it covers
+    *every* one of them at once (Perl's own ``>=`` check gates the whole
+    batch, not cult-by-cult) -- with two blocked cults and only 1 key,
+    neither retries yet."""
+    s = _state()
+    fs = replace(s.factions["nomads"], keys=0, cult_blocked=frozenset({"FIRE", "WATER"}))
+    s = with_faction(s, "nomads", fs)
+    s = replace(
+        s,
+        cults={**s.cults, "nomads": {"FIRE": 9, "WATER": 9, "EARTH": 7, "AIR": 0}},
+        cult_10={**s.cult_10, "FIRE": None, "WATER": None},
+        pending=(PendingDecision(faction="nomads", kind="gain_town", source="cluster"),),
+    )
+    s2 = handle_gain_town(s, "nomads", _cmd("gain_town", tile="TW7"))  # grants 1 key
+    assert s2.cults["nomads"]["FIRE"] == 9
+    assert s2.cults["nomads"]["WATER"] == 9
+    assert s2.factions["nomads"].cult_blocked == frozenset({"FIRE", "WATER"})
+    assert s2.factions["nomads"].keys == 1  # banked, not spent -- not enough to cover both yet
+
+
 def test_gain_town_tw7_drives_shipping_advance_vp() -> None:
     """Reference-game row 210: nomads' TW7 grant (``gain={"KEY": 1,
     "VP": 4, "GAIN_SHIP": 1, "carpet_range": 1}``) must also bump

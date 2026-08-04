@@ -776,19 +776,48 @@ def handle_gain_favor(state: GameState, faction: str, cmd: ParsedCommand) -> Gam
     return new_state
 
 
+def _advance_cult_track(state: GameState, faction: str, cult: str, steps: int) -> GameState:
+    """Shared single-track cult-advance fold: ``cults.advance`` plus the
+    resulting power/key/``cult_10``/``cult_blocked`` bookkeeping, threaded
+    onto ``state``. Used by :func:`_apply_town_cult_gains` and
+    :func:`_retry_blocked_cults` below (a near-identical inline copy also
+    lives in ``handle_gain_favor``, left alone since it predates this
+    helper and is already covered by its own passing tests -- see that
+    handler's own docstring).
+    """
+    fs = state.factions[faction]
+    result = advance(
+        state.cults[faction][cult],
+        steps,
+        keys_available=fs.keys,
+        track_open=state.cult_10[cult] is None,
+    )
+    new_cults = {f: dict(v) for f, v in state.cults.items()}
+    new_cults[faction][cult] = result.new_value
+    new_cult_10 = dict(state.cult_10)
+    new_keys = fs.keys
+    new_cult_blocked = fs.cult_blocked
+    if result.key_spent:
+        new_keys -= 1
+        new_cult_10[cult] = faction
+    if result.blocked_at_9:
+        new_cult_blocked = fs.cult_blocked | {cult}
+    new_fs = replace(
+        fs, power=fs.power.gain(result.power_gained), keys=new_keys, cult_blocked=new_cult_blocked
+    )
+    return with_faction(replace(state, cults=new_cults, cult_10=new_cult_10), faction, new_fs)
+
+
 def _apply_town_cult_gains(state: GameState, faction: str, tile: str) -> GameState:
     """Drive ``cults.advance`` for ``tile``'s FIRE/WATER/EARTH/AIR gain
     keys (TW5/TW6) -- ``towns.py``'s own docstring leaves these
     deliberately unapplied by ``apply_town_tile`` ("do NOT import cult
     logic here; just expose the gain... the caller must read
     ``TOWN_TILES[tile].gain`` for these keys and drive ``cults.advance``
-    itself"). This handler is that caller. A small local port of
-    ``apply.py``'s private ``_advance_track``/``_apply_cult_advance`` fold
-    (not imported -- those are module-internal helpers, and this module
-    already keeps its own copies of comparable per-faction folds
-    elsewhere, e.g. ``_apply_spade_gain_bonus``) -- one track at a time,
-    so a threshold crossed on an earlier track in the same grant can't
-    affect a later one's key/blocked bookkeeping.
+    itself"). This handler is that caller -- one track at a time via
+    :func:`_advance_cult_track`, so a threshold crossed on an earlier
+    track in the same grant can't affect a later one's key/blocked
+    bookkeeping.
 
     Missing this was a real engine bug, not a documented deferral: the
     task brief for towns.py explicitly named this the caller's job, but
@@ -800,30 +829,42 @@ def _apply_town_cult_gains(state: GameState, faction: str, tile: str) -> GameSta
     gain = TOWN_TILES[tile].gain
     for cult in _TOWN_CULT_GAIN_KEYS:
         steps = gain.get(cult, 0)
-        if not steps:
-            continue
-        fs = state.factions[faction]
-        result = advance(
-            state.cults[faction][cult],
-            steps,
-            keys_available=fs.keys,
-            track_open=state.cult_10[cult] is None,
-        )
-        new_cults = {f: dict(v) for f, v in state.cults.items()}
-        new_cults[faction][cult] = result.new_value
-        new_cult_10 = dict(state.cult_10)
-        new_keys = fs.keys
-        new_cult_blocked = fs.cult_blocked
-        if result.key_spent:
-            new_keys -= 1
-            new_cult_10[cult] = faction
-        if result.blocked_at_9:
-            new_cult_blocked = fs.cult_blocked | {cult}
-        new_fs = replace(
-            fs, power=fs.power.gain(result.power_gained), keys=new_keys, cult_blocked=new_cult_blocked
-        )
-        state = with_faction(replace(state, cults=new_cults, cult_10=new_cult_10), faction, new_fs)
+        if steps:
+            state = _advance_cult_track(state, faction, cult, steps)
     return state
+
+
+def _retry_blocked_cults(state: GameState, faction: str) -> GameState:
+    """``resources.pm`` ``adjust_resource``'s ``KEY`` branch (355-362, cited
+    in ``cults.py`` ``advance``'s own docstring): every town tile grants at
+    least 1 KEY (``Game/Constants.pm`` ``%tiles``, TW1-TW8 all have
+    ``KEY => 1`` or ``2`` in ``.gain`` -- ``apply_town_tile`` already folds
+    that resource in). Whenever a faction's KEY balance increases and now
+    covers *every* cult track still parked at 9 for lack of a key
+    (``fs.cult_blocked``), each of those tracks automatically retries its
+    final +1 step -- Perl's own ``$faction->{KEY} >= scalar keys
+    %{$faction->{cult_blocked}}`` gates the whole batch at once, not
+    cult-by-cult, so nothing retries unless the new KEY balance can cover
+    all of them together. Called once per ``gain_town`` resolution, after
+    that tile's own KEY/cult grants (``apply_town_tile``/
+    :func:`_apply_town_cult_gains`) have already landed.
+
+    Missing this was a real engine bug: a faction whose cult step got
+    capped at 9 for lack of a key earlier in the same turn, then gains a
+    key from a same-row ``gain_town``, should retroactively reach 10 --
+    task-13 report follow-up, ``4pLeague_S10_D1L1_G6`` row 315: nomads'
+    FAV5 grant (2 FIRE steps, 8->10) blocked at 9 with 0 keys; the very
+    next command in the row, ``gain_town TW7``, grants exactly the 1 key
+    needed and should retroactively bump FIRE to 10.
+    """
+    fs = state.factions[faction]
+    blocked = fs.cult_blocked
+    if not blocked or fs.keys < len(blocked):
+        return state
+    for cult in sorted(blocked):
+        state = _advance_cult_track(state, faction, cult, 1)
+    fs = state.factions[faction]
+    return with_faction(state, faction, replace(fs, cult_blocked=frozenset()))
 
 
 def _apply_town_ship_gain(state: GameState, faction: str, tile: str) -> GameState:
@@ -887,6 +928,7 @@ def handle_gain_town(state: GameState, faction: str, cmd: ParsedCommand) -> Game
             raise EngineError(str(exc), state=state, faction=faction, cmd=cmd) from exc
         new_state = _apply_town_cult_gains(new_state, faction, cmd.tile)
         new_state = _apply_town_ship_gain(new_state, faction, cmd.tile)
+        new_state = _retry_blocked_cults(new_state, faction)
     return new_state
 
 
