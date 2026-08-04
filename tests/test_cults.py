@@ -37,6 +37,19 @@ def test_occupied_track_caps_at_9_even_with_key() -> None:
     assert (result.new_value, result.key_spent, result.blocked_at_9) == (9, False, False)
 
 
+def test_occupants_own_track_stays_at_10_not_regressed_to_9() -> None:
+    """A faction already sitting at 10 (necessarily the track's own
+    occupant, since anyone else would already be capped at 9) must not
+    regress to 9 on a further gain -- ``track_open=False`` alone isn't
+    enough to tell "someone else holds it" apart from "I hold it" (task-13
+    report, corpus game ``4pLeague_S10_D1L1_G3`` row 324: nomads already
+    own EARTH's 10-slot; a town tile's +1 EARTH step must leave them at
+    10)."""
+    result = advance(10, 1, keys_available=2, track_open=False)
+    assert (result.new_value, result.power_gained, result.key_spent) == (10, 0, False)
+    assert not result.blocked_at_9
+
+
 def test_big_jump_from_zero_to_ten() -> None:
     result = advance(0, 10, keys_available=1, track_open=True)
     assert (result.new_value, result.power_gained, result.key_spent) == (10, 8, True)

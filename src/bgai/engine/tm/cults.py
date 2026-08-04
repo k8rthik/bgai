@@ -31,13 +31,25 @@ def advance(
     keys_available: int,
     track_open: bool,
 ) -> CultAdvance:
-    """Advance from old_value by steps; track_open=False caps at 9 (10 occupied)."""
+    """Advance from old_value by steps; track_open=False caps at 9 (10 occupied).
+
+    Exception: if the *caller* already sits at 10 (``old_value == 10`` --
+    only possible if they are themselves the slot's occupant, since a
+    closed track otherwise caps everyone else at 9), a further gain must
+    not regress them down to 9. This matters for gains that keep firing
+    after a faction has already claimed the 10-slot -- e.g. a town tile's
+    flat "+1 to all four cult tracks" (TW5/TW6) landing on a track the
+    faction already tops (task-13 report, corpus game
+    ``4pLeague_S10_D1L1_G3`` row 324: nomads already own EARTH's 10-slot;
+    granting TW5's +1 EARTH step must leave them at 10, not drop them to
+    9).
+    """
     if not 0 <= old_value <= 10:
         raise ValueError(f"bad cult position {old_value}")
     if steps < 0:
         raise ValueError(f"steps must be >= 0, got {steps}")
 
-    cap = 10 if track_open else 9
+    cap = 10 if track_open or old_value >= 10 else 9
     new_value = min(old_value + steps, cap)
 
     power = 0
