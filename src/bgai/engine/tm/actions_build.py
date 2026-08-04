@@ -118,8 +118,15 @@ from bgai.engine.tm.board import RIVER, base_board
 from bgai.engine.tm.connectivity import clusters, reachable, teleport_crossing
 from bgai.engine.tm.cults import advance
 from bgai.engine.tm.factions.hooks import hooks_for
-from bgai.engine.tm.factions_data import BRIDGE_COUNT, FACTIONS, TOWN_SIZE
-from bgai.engine.tm.state import FactionState, GameState, PendingDecision, Phase, with_faction
+from bgai.engine.tm.factions_data import BRIDGE_COUNT, CULTS, FACTIONS, TOWN_SIZE
+from bgai.engine.tm.state import (
+    FactionState,
+    GameState,
+    PendingDecision,
+    Phase,
+    parse_cult_string,
+    with_faction,
+)
 from bgai.engine.tm.tiles import FAVOR_TILES, TOWN_TILES, scored_vp
 from bgai.engine.tm.towns import (
     apply_town_tile,
@@ -138,7 +145,6 @@ _UPGRADE_FROM: dict[str, str] = {"TP": "D", "TE": "TP", "SH": "TP", "SA": "TE"}
 # priest.
 _COST_RES: dict[str, str] = {"W": "workers", "C": "coins", "P": "priests"}
 _FAV5_TOWN_SIZE_DELTA = FAVOR_TILES["FAV5"].passive.get("TOWN_SIZE", 0)
-_TOWN_CULT_GAIN_KEYS = ("FIRE", "WATER", "EARTH", "AIR")
 
 
 # --------------------------------------------------------------------------
@@ -829,16 +835,73 @@ def _advance_cult_track(state: GameState, faction: str, cult: str, steps: int) -
     return with_faction(replace(state, cults=new_cults, cult_10=new_cult_10), faction, new_fs)
 
 
-def _apply_town_cult_gains(state: GameState, faction: str, tile: str) -> GameState:
+def _cult_gain_order(
+    state: GameState, faction: str, gain: dict[str, int], oracle_cult: str | None
+) -> tuple[str, ...]:
+    """Which order :func:`_apply_town_cult_gains` should apply ``gain``'s
+    per-track steps in. Order is invisible except in one genuine
+    ambiguity: a flat multi-track grant (TW5's "+1 to all four",
+    TW6's "+2 to all four") can put two or more tracks in *contention*
+    for a single scarce key at once -- each of them individually about to
+    cross from <=9 into the 10-slot, with fewer keys available than
+    contenders. Whichever contender this loop reaches first spends the
+    key and reaches 10; the rest are capped at 9 (``cults.advance``'s own
+    ``blocked_at_9``).
+
+    Real Perl (``resources.pm``'s ``gain()``, ``sort { $b eq 'KEY' }``)
+    only guarantees KEY-typed gains apply first (already true here --
+    ``apply_town_tile`` grants the tile's own KEY count before this
+    function ever runs); the *relative* order among FIRE/WATER/EARTH/AIR
+    themselves falls through to Perl's native per-process hash-iteration
+    order -- genuinely non-deterministic, not recoverable from a
+    stateless replay (task-14 report, "USER QUESTIONS" Q1). Task 14, user
+    adjudication 2026-08-04 (citing snellman's known-issues doc §6.1,
+    TW5's "arbitrary track" note -- either outcome is rules-valid):
+
+    - **REPLAY mode** (``oracle_cult`` given -- the deltas oracle's
+      recorded ``cult`` string for this exact row/faction): adopt the
+      ledger's own recorded outcome. Contenders whose oracle-recorded
+      final value is 10 are ordered first (so they claim the key(s));
+      the rest are pushed after (capped at 9, matching the ledger).
+    - **SIMULATION mode** (``oracle_cult`` is ``None`` -- no oracle to
+      consult, e.g. self-play/generation): always the fixed ``CULTS``
+      tuple order (FIRE > WATER > EARTH > AIR).
+
+    Non-ambiguous cases (fewer than 2 contenders, or enough keys for
+    every contender) always return the fixed ``CULTS`` order -- order
+    genuinely doesn't matter there, so there is nothing to disambiguate
+    and no reason to consult the oracle at all.
+    """
+    contenders = [
+        cult
+        for cult in CULTS
+        if gain.get(cult, 0) > 0
+        and state.cult_10[cult] is None
+        and state.cults[faction][cult] <= 9 < state.cults[faction][cult] + gain[cult]
+    ]
+    keys_available = state.factions[faction].keys
+    if len(contenders) < 2 or keys_available >= len(contenders) or oracle_cult is None:
+        return CULTS
+
+    oracle_positions = parse_cult_string(oracle_cult)
+    winners = [c for c in contenders if oracle_positions.get(c) == 10]
+    losers = [c for c in contenders if c not in winners]
+    others = [c for c in CULTS if c not in contenders]
+    return tuple(winners + losers + others)
+
+
+def _apply_town_cult_gains(
+    state: GameState, faction: str, tile: str, *, oracle_cult: str | None = None
+) -> GameState:
     """Drive ``cults.advance`` for ``tile``'s FIRE/WATER/EARTH/AIR gain
     keys (TW5/TW6) -- ``towns.py``'s own docstring leaves these
     deliberately unapplied by ``apply_town_tile`` ("do NOT import cult
     logic here; just expose the gain... the caller must read
     ``TOWN_TILES[tile].gain`` for these keys and drive ``cults.advance``
     itself"). This handler is that caller -- one track at a time via
-    :func:`_advance_cult_track`, so a threshold crossed on an earlier
-    track in the same grant can't affect a later one's key/blocked
-    bookkeeping.
+    :func:`_advance_cult_track`, in :func:`_cult_gain_order`'s order, so a
+    threshold crossed on an earlier track in the same grant can't affect
+    a later one's key/blocked bookkeeping.
 
     Missing this was a real engine bug, not a documented deferral: the
     task brief for towns.py explicitly named this the caller's job, but
@@ -848,7 +911,7 @@ def _apply_town_cult_gains(state: GameState, faction: str, tile: str) -> GameSta
     WATER=5, EARTH=8 grants -- but nothing drove it).
     """
     gain = TOWN_TILES[tile].gain
-    for cult in _TOWN_CULT_GAIN_KEYS:
+    for cult in _cult_gain_order(state, faction, gain, oracle_cult):
         steps = gain.get(cult, 0)
         if steps:
             state = _advance_cult_track(state, faction, cult, steps)
@@ -930,7 +993,9 @@ def _apply_town_teleport_gain(state: GameState, faction: str, tile: str) -> Game
     return with_faction(state, faction, replace(fs, teleport_level=fs.teleport_level + units))
 
 
-def handle_gain_town(state: GameState, faction: str, cmd: ParsedCommand) -> GameState:
+def handle_gain_town(
+    state: GameState, faction: str, cmd: ParsedCommand, *, oracle_cult: str | None = None
+) -> GameState:
     """Pop the matching ``gain_town`` pending(s) and apply ``cmd.tile`` to
     the cluster(s) they were queued for (``pending.source``, see
     ``_maybe_queue_town``/``_cluster_key``). Each cluster was already
@@ -953,6 +1018,11 @@ def handle_gain_town(state: GameState, faction: str, cmd: ParsedCommand) -> Game
     report, ``4pLeague_S10_D1L1_G4`` row 257 (raw ``+2TW1``): engine
     previously read only ``cmd.tile`` and ignored ``cmd.n1`` entirely,
     granting TW1 once instead of twice.
+
+    ``oracle_cult`` (keyword-only, default ``None``) is forwarded verbatim
+    to :func:`_apply_town_cult_gains` -- see :func:`_cult_gain_order`'s
+    docstring for what it resolves and when it is (and is not) consulted.
+    Only ``apply()`` (``apply.py``) ever passes it, and only for this verb.
     """
     assert cmd.tile is not None
     count = cmd.n1 if cmd.n1 is not None else 1
@@ -974,7 +1044,7 @@ def handle_gain_town(state: GameState, faction: str, cmd: ParsedCommand) -> Game
             new_state = apply_town_tile(new_state, faction, cmd.tile)
         except ValueError as exc:
             raise EngineError(str(exc), state=state, faction=faction, cmd=cmd) from exc
-        new_state = _apply_town_cult_gains(new_state, faction, cmd.tile)
+        new_state = _apply_town_cult_gains(new_state, faction, cmd.tile, oracle_cult=oracle_cult)
         new_state = _apply_town_ship_gain(new_state, faction, cmd.tile)
         new_state = _apply_town_teleport_gain(new_state, faction, cmd.tile)
         new_state = _retry_blocked_cults(new_state, faction)

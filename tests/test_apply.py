@@ -503,6 +503,41 @@ def test_apply_dispatches_unknown_verb_to_engine_error() -> None:
         apply(s, "engineers", cmd)
 
 
+def test_apply_forwards_oracle_cult_only_to_gain_town() -> None:
+    """``oracle_cult`` (task 14, user adjudication 2026-08-04, TW5's
+    cult-tiebreak ambiguity -- ``actions_build.py``'s
+    ``_cult_gain_order``/``apply()``'s own docstring have the full
+    citation trail) is a narrow, verb-specific escape hatch: only
+    ``gain_town``'s handler is ever called with it, every other verb's
+    handler is dispatched exactly as before (no ``oracle_cult`` kwarg at
+    all, so a handler that doesn't declare the parameter still works).
+    """
+    seen: dict[str, object] = {}
+
+    def gain_town_stub(state: GameState, faction: str, cmd: ParsedCommand, *, oracle_cult=None):
+        seen["gain_town"] = oracle_cult
+        return state
+
+    def burn_stub(state: GameState, faction: str, cmd: ParsedCommand) -> GameState:
+        seen["burn"] = "called"
+        return state
+
+    s = _state()
+    previous_gain_town = HANDLERS.get("gain_town")
+    previous_burn = HANDLERS.get("burn")
+    register_handler("gain_town", gain_town_stub)
+    register_handler("burn", burn_stub)
+    try:
+        apply(s, "engineers", _cmd("gain_town", tile="TW1"), oracle_cult="1/2/3/4")
+        apply(s, "engineers", _cmd("burn", n1=1), oracle_cult="1/2/3/4")
+    finally:
+        _restore_handler("gain_town", previous_gain_town)
+        _restore_handler("burn", previous_burn)
+
+    assert seen["gain_town"] == "1/2/3/4"
+    assert seen["burn"] == "called"  # burn_stub never even sees the kwarg
+
+
 def test_apply_rejects_out_of_turn_non_exempt_move() -> None:
     s = _state()
     assert active_faction(s) == "engineers"

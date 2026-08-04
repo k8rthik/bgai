@@ -303,3 +303,16 @@ def cult_string(state: GameState, faction: str) -> str:
     """Cult-track positions for `faction` as "F/W/E/A", e.g. "0/1/1/0"."""
     positions = state.cults[faction]
     return "/".join(str(positions[cult]) for cult in CULTS)
+
+
+def parse_cult_string(text: str) -> dict[str, int]:
+    """Inverse of :func:`cult_string`: "9/10/6/10" -> {"FIRE": 9, ...}
+    (``CULTS`` tuple order). Used by the TW5/TW6 multi-track cult-gain
+    ambiguity tiebreak (``actions_build._cult_gain_order``) to read the
+    deltas oracle's recorded outcome for one row/faction, task 14, user
+    adjudication 2026-08-04.
+    """
+    parts = text.split("/")
+    if len(parts) != len(CULTS):
+        raise ValueError(f"bad cult string {text!r}: expected {len(CULTS)} slots")
+    return {cult: int(value) for cult, value in zip(CULTS, parts, strict=True)}

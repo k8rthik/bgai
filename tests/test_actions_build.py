@@ -897,6 +897,83 @@ def test_gain_town_tw5_drives_cult_advance_on_all_four_tracks() -> None:
     assert s2.cult_10["EARTH"] == "engineers"
 
 
+def test_gain_town_tw5_tiebreak_simulation_mode_uses_fixed_cults_order() -> None:
+    """snellman known-issues doc §6.1 (TW5): a player at 9 on multiple
+    cult tracks "can't choose which cult track to advance to 10 on...
+    the game will advance him to 10 on an arbitrary track" -- either
+    outcome is rules-valid (user adjudication, 2026-08-04). FIRE and
+    WATER are tied at 9 here; TW5 grants +1 to all four tracks plus 1
+    KEY, so exactly 1 key is available for the 2 contenders -- the
+    genuine ambiguity ``_cult_gain_order`` (``actions_build.py``) is
+    built to detect. SIMULATION mode (no ``oracle_cult``, e.g.
+    self-play/generation) always resolves it via the fixed ``CULTS``
+    tuple order: FIRE wins (processed first), WATER stays capped at 9.
+    """
+    s = _state()
+    fs = replace(s.factions["engineers"], keys=0)
+    s = with_faction(s, "engineers", fs)
+    s = replace(
+        s,
+        cults={**s.cults, "engineers": {"FIRE": 9, "WATER": 9, "EARTH": 0, "AIR": 0}},
+        pending=(PendingDecision(faction="engineers", kind="gain_town", source="cluster"),),
+    )
+    s2 = handle_gain_town(s, "engineers", _cmd("gain_town", tile="TW5"))
+    assert s2.cults["engineers"] == {"FIRE": 10, "WATER": 9, "EARTH": 1, "AIR": 1}
+    assert s2.cult_10["FIRE"] == "engineers"
+    assert s2.cult_10["WATER"] is None
+    assert s2.factions["engineers"].cult_blocked == frozenset({"WATER"})
+    assert s2.factions["engineers"].keys == 0  # TW5's own +1, spent crossing FIRE's 10-slot
+
+
+def test_gain_town_tw5_tiebreak_replay_mode_adopts_the_ledger_outcome() -> None:
+    """Same ambiguity as the SIMULATION-mode sibling test above, but with
+    ``oracle_cult`` given (REPLAY mode, task 14, user adjudication
+    2026-08-04): the deltas oracle's own recorded outcome for this row
+    (WATER reaching 10, not FIRE) is adopted instead of the fixed order.
+    Corpus shape: ``4pLeague_S10_D2L2_G1`` row 395 (expected cult
+    ``9/10/6/10``, this engine's fixed-order default reached
+    ``10/9/6/10`` before this fix)."""
+    s = _state()
+    fs = replace(s.factions["engineers"], keys=0)
+    s = with_faction(s, "engineers", fs)
+    s = replace(
+        s,
+        cults={**s.cults, "engineers": {"FIRE": 9, "WATER": 9, "EARTH": 0, "AIR": 0}},
+        pending=(PendingDecision(faction="engineers", kind="gain_town", source="cluster"),),
+    )
+    s2 = handle_gain_town(
+        s, "engineers", _cmd("gain_town", tile="TW5"), oracle_cult="9/10/1/1"
+    )
+    assert s2.cults["engineers"] == {"FIRE": 9, "WATER": 10, "EARTH": 1, "AIR": 1}
+    assert s2.cult_10["WATER"] == "engineers"
+    assert s2.cult_10["FIRE"] is None
+    assert s2.factions["engineers"].cult_blocked == frozenset({"FIRE"})
+    assert s2.factions["engineers"].keys == 0  # TW5's own +1, spent crossing WATER's 10-slot
+
+
+def test_gain_town_tw5_no_ambiguity_ignores_oracle_cult() -> None:
+    """Enough keys for every contender (2 keys, 2 contenders here) is not
+    ambiguous at all -- ``oracle_cult`` (even a nonsense value that would
+    imply a *different* outcome) must be ignored, and both tracks reach
+    10 regardless of processing order.
+    """
+    s = _state()
+    fs = replace(s.factions["engineers"], keys=1)  # +TW5's own +1 = 2 keys for 2 contenders
+    s = with_faction(s, "engineers", fs)
+    s = replace(
+        s,
+        cults={**s.cults, "engineers": {"FIRE": 9, "WATER": 9, "EARTH": 0, "AIR": 0}},
+        pending=(PendingDecision(faction="engineers", kind="gain_town", source="cluster"),),
+    )
+    s2 = handle_gain_town(
+        s, "engineers", _cmd("gain_town", tile="TW5"), oracle_cult="0/0/0/0"
+    )
+    assert s2.cults["engineers"] == {"FIRE": 10, "WATER": 10, "EARTH": 1, "AIR": 1}
+    assert s2.cult_10["FIRE"] == "engineers"
+    assert s2.cult_10["WATER"] == "engineers"
+    assert s2.factions["engineers"].keys == 0
+
+
 def test_gain_town_retries_a_cult_blocked_at_9_once_its_own_key_covers_it() -> None:
     """Task-13 report follow-up, ``4pLeague_S10_D1L1_G6`` row 315: nomads'
     ``gain_favor FAV5`` (2 FIRE steps, 8->10) earlier in the same ledger

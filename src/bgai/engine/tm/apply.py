@@ -147,8 +147,27 @@ def _has_queued_pending_of_kind(state: GameState, faction: str, kind: str) -> bo
     return any(p.faction == faction and p.kind == kind for p in state.pending)
 
 
-def apply(state: GameState, faction: str, cmd: ParsedCommand) -> GameState:
-    """The engine's single entry point: dispatch `cmd` for `faction`."""
+def apply(
+    state: GameState, faction: str, cmd: ParsedCommand, *, oracle_cult: str | None = None
+) -> GameState:
+    """The engine's single entry point: dispatch `cmd` for `faction`.
+
+    `oracle_cult` is a narrow, opt-in escape hatch for exactly one genuine
+    engine ambiguity (task 14, user adjudication 2026-08-04, citing
+    snellman's known-issues doc §6.1/TW5): a town tile's flat "+1/+2 to all
+    four cult tracks" grant (TW5/TW6) can tie two tracks at the exact value
+    that would cross into the 10-slot with only one key available -- which
+    one wins is Perl's own per-process hash-iteration order
+    (`resources.pm`'s `gain()`), not derivable from the corpus. Only
+    `handle_gain_town` ever reads this value (`_cult_gain_order`,
+    `actions_build.py`), and only when that specific ambiguity is detected
+    -- every other verb, and every non-ambiguous `gain_town` call, ignores
+    it entirely. `replay.py` is the only caller that ever passes it
+    (the deltas oracle's recorded `cult` string for the row/faction being
+    replayed); `None` (the default, used by every other caller including
+    simulation/generation code) falls back to the fixed `CULTS` tuple order
+    (FIRE > WATER > EARTH > AIR).
+    """
     exempt = (
         cmd.verb in _ORDER_EXEMPT_VERBS
         # Phase.INCOME/Phase.CLEANUP have no "active" turn-order faction at
@@ -189,6 +208,11 @@ def apply(state: GameState, faction: str, cmd: ParsedCommand) -> GameState:
         raise EngineError(
             f"no handler registered for verb {cmd.verb!r}", state=state, faction=faction, cmd=cmd
         )
+    # oracle_cult only means anything to handle_gain_town's own ambiguity
+    # check (docstring above) -- every other handler's signature is left
+    # untouched rather than widened for a feature only one of them needs.
+    if cmd.verb == "gain_town":
+        return handler(state, faction, cmd, oracle_cult=oracle_cult)
     return handler(state, faction, cmd)
 
 

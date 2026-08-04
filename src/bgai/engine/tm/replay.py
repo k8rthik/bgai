@@ -294,7 +294,9 @@ def _apply_pending_drops(
     return state
 
 
-def _apply_row_commands(state: GameState, faction: str, cmds: tuple[ParsedCommand, ...]) -> GameState:
+def _apply_row_commands(
+    state: GameState, faction: str, cmds: tuple[ParsedCommand, ...], *, oracle_cult: str | None = None
+) -> GameState:
     """Apply every command of one ledger row via ``apply()``, calling
     ``advance_turn`` once per genuinely independent full action within the
     row (``round_flow.is_turn_boundary`` -- ordinarily exactly one, but a
@@ -319,19 +321,27 @@ def _apply_row_commands(state: GameState, faction: str, cmds: tuple[ParsedComman
     for any row containing a main-track verb -- the floor that covers a
     row where *every* command is a never-starts-action verb (e.g. a lone
     ``transform`` row).
+
+    ``oracle_cult`` is this row's deltas-oracle ``cult`` string for
+    ``faction`` (``replay_game``'s own delta lookup, looked up once per
+    row and threaded straight through) -- passed to every ``apply()`` call
+    in the row, but only ``gain_town``'s handler ever reads it (module
+    docstring "Deltas oracle"; ``apply.py``/``actions_build.py``'s
+    ``_cult_gain_order`` docstrings have the full citation trail). Task 14,
+    user adjudication 2026-08-04.
     """
     prev_verb: str | None = None
     open_action = False
     any_main_track = False
     for cmd in cmds:
         if cmd.verb not in _MAIN_TRACK_VERBS:
-            state = apply(state, faction, cmd)
+            state = apply(state, faction, cmd, oracle_cult=oracle_cult)
             continue
         any_main_track = True
         if open_action and is_turn_boundary(cmd, state, faction, prev_verb):
             state = advance_turn(state)
             open_action = False
-        state = apply(state, faction, cmd)
+        state = apply(state, faction, cmd, oracle_cult=oracle_cult)
         prev_verb = cmd.verb
         if open_action or not never_starts_action(cmd.verb):
             open_action = True
@@ -434,13 +444,20 @@ def replay_game(
 
     for row, faction, cmds in _iter_rows(game_moves):
         raw = "; ".join(cmd.raw for cmd in cmds)
+        delta = delta_lookup.get((row, faction))
+        # Looked up before the row applies (not just for the after-the-fact
+        # mismatch check below) so `_apply_row_commands` can forward this
+        # row's own recorded outcome to `gain_town`'s cult-tiebreak
+        # ambiguity check (`apply.py`/`actions_build.py`'s `_cult_gain_order`
+        # docstrings) -- REPLAY mode, task 14, user adjudication 2026-08-04.
+        oracle_cult = delta["cult"] if delta is not None else None
         try:
             state = _apply_pending_drops(state, row, faction, setup.dropped_at_row)
             was_income = state.phase == Phase.INCOME
             state = _ensure_actions_phase_started(state, cmds)
             if was_income and state.phase != Phase.INCOME:
                 other_income_done = set()
-            state = _apply_row_commands(state, faction, cmds)
+            state = _apply_row_commands(state, faction, cmds, oracle_cult=oracle_cult)
             state, other_income_done, cult_income_done = _advance_after_row(
                 state, faction, cmds, other_income_done, cult_income_done
             )
@@ -453,7 +470,6 @@ def replay_game(
             )
 
         rows_checked += 1
-        delta = delta_lookup.get((row, faction))
         if delta is not None:
             mismatches.extend(_row_mismatches(game_id, row, faction, state, delta, raw))
             if len(mismatches) >= stop_after:
