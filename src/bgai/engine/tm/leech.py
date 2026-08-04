@@ -201,7 +201,11 @@ def offers_for_build(state: GameState, builder: str, hex_key: str) -> tuple[Pend
         if not raw:
             continue
         capped = min(raw, state.factions[faction].power.gainable())
-        offers.append(PendingDecision(faction=faction, kind="leech", amount=capped, source=builder))
+        offers.append(
+            PendingDecision(
+                faction=faction, kind="leech", amount=capped, source=builder, options=(hex_key,)
+            )
+        )
     return tuple(offers)
 
 
@@ -226,7 +230,8 @@ def queue_leech(
         nonzero = sum(1 for o in offers if o.amount > 0)
         if nonzero:
             watch = PendingDecision(
-                faction=builder, kind=_WATCH_KIND, amount=nonzero, source=builder
+                faction=builder, kind=_WATCH_KIND, amount=nonzero, source=builder,
+                options=(hex_key,),
             )
             new_state = push_pending(new_state, watch)
     return new_state
@@ -249,27 +254,46 @@ def _find_leech_pending(state: GameState, faction: str, cmd: ParsedCommand) -> i
       but the bare ``leech 4`` row -- no ``from`` clause at all -- still
       names 4, the corpus's own "greedy" request number).
     - Multiple queued offers: ``cmd.target`` (the ``from X`` clause), when
-      present, disambiguates by source alone -- ``queue_leech`` never
-      pushes more than one offer per source per faction (reference-game
-      row 155: nomads' F3+G2 dwellings raise 2 raw power against
-      engineers' build, but nomads' ``gainable()`` had already dropped to
-      1 by offer-creation time, so the offer's cached ``amount`` is 1
-      while the row reads ``leech 2 from engineers``). With no ``target``
-      either (early-era logs), ``cmd.n1`` disambiguates by amount instead.
+      present, disambiguates by source -- ordinarily to exactly one
+      offer, since ``queue_leech`` never pushes more than one offer per
+      source per faction *from a single build* (reference-game row 155:
+      nomads' F3+G2 dwellings raise 2 raw power against engineers'
+      build, but nomads' ``gainable()`` had already dropped to 1 by
+      offer-creation time, so the offer's cached ``amount`` is 1 while
+      the row reads ``leech 2 from engineers``). With no ``target``
+      either (early-era logs), ``cmd.n1`` disambiguates by amount
+      instead.
+    - Multiple queued offers *from the same source* (task-14 fix: the
+      same faction can build/upgrade a second time -- a second
+      ``queue_leech`` call -- before every offer from its first build is
+      answered, so ``cmd.target`` alone can leave more than one
+      candidate): ``cmd.n1`` breaks the tie by amount, same as the no-
+      ``target`` case, falling back to the first ``target`` match only
+      if no offer's amount matches either (corpus
+      ``4pLeague_S20_D1L1_G7`` row 216-217: engineers has two
+      simultaneous ``leech ... from cultists`` offers, from two
+      different Cultists builds; ``cmd.n1`` is what actually tells them
+      apart).
     """
     matches = [
         i for i, p in enumerate(state.pending) if p.faction == faction and p.kind == "leech"
     ]
     if len(matches) == 1:
         return matches[0]
-    for i in matches:
-        p = state.pending[i]
-        if cmd.target is not None:
-            if p.source != cmd.target:
-                continue
-        elif cmd.n1 is not None and p.amount != cmd.n1:
-            continue
-        return i
+
+    candidates = matches
+    if cmd.target is not None:
+        target_matches = [i for i in matches if state.pending[i].source == cmd.target]
+        if target_matches:
+            candidates = target_matches
+
+    if len(candidates) > 1 and cmd.n1 is not None:
+        amount_matches = [i for i in candidates if state.pending[i].amount == cmd.n1]
+        if amount_matches:
+            candidates = amount_matches
+
+    if candidates:
+        return candidates[0]
     raise EngineError(
         f"no queued leech offer for {faction} matching {cmd.raw!r}",
         state=state,
@@ -292,15 +316,38 @@ def _resolve_cultist_watch(
     offers participate in ``leech_not_rejected``/``leech_rejected``) and
     for builds whose builder has no ``leech_effect`` (no watch was ever
     pushed).
+
+    Matched by *both* ``source`` (the builder) and the originating
+    build's ``hex_key`` (task-14 fix): the same Cultists faction can
+    build/upgrade more than once before every offer from an earlier
+    build has been answered, queuing two ``_WATCH_KIND`` pendings with
+    the identical ``source="cultists"`` at once. Matching by ``source``
+    alone (an earlier revision) always resolved the *first* (oldest,
+    still-queued) matching watch regardless of which build the
+    now-resolved offer actually came from -- silently updating the wrong
+    batch's counter and, once the older batch's own last offer arrived,
+    leaving the newer batch's "taken" effect (and its own eventual
+    ``cult_choice`` pending) never fired at all: corpus
+    ``4pLeague_S20_D1L1_G7`` row 217, cultists' second ``+CULT`` answer
+    has no pending to consume and hard-errors "acted out of turn" purely
+    because the strict gate no longer sees it as a queued cult_choice
+    answer. ``options`` now carries the originating ``hex_key`` as its
+    first entry on both the offer and the watch (``offers_for_build``/
+    ``queue_leech``), surviving the watch's own ``_FIRED_OPTION`` append
+    below.
     """
     if resolved.amount <= 0:
         return state
+
+    hex_key = resolved.options[0] if resolved.options else None
 
     idx = next(
         (
             i
             for i, p in enumerate(state.pending)
-            if p.kind == _WATCH_KIND and p.source == resolved.source
+            if p.kind == _WATCH_KIND
+            and p.source == resolved.source
+            and (hex_key is None or hex_key in p.options)
         ),
         None,
     )
@@ -311,6 +358,7 @@ def _resolve_cultist_watch(
     builder = watch.faction
     remaining = watch.amount - 1
     already_fired = _FIRED_OPTION in watch.options
+    watch_hex_key = next((o for o in watch.options if o != _FIRED_OPTION), None)
 
     new_state = state
     if accepted and not already_fired:
@@ -322,9 +370,10 @@ def _resolve_cultist_watch(
     # ever appends (push_pending) or replaces a *different* faction's
     # resources, never removes/reorders entries ahead of `idx`.
     if remaining > 0:
-        new_watch = replace(
-            watch, amount=remaining, options=(_FIRED_OPTION,) if already_fired else ()
-        )
+        new_options = (watch_hex_key,) if watch_hex_key else ()
+        if already_fired:
+            new_options = new_options + (_FIRED_OPTION,)
+        new_watch = replace(watch, amount=remaining, options=new_options)
         return replace(new_state, pending=pending[:idx] + (new_watch,) + pending[idx + 1 :])
 
     new_state = pop_pending(new_state, idx)

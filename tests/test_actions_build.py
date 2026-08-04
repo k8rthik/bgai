@@ -339,7 +339,7 @@ def test_build_enqueues_leech_offers_for_adjacent_opponent() -> None:
     s = _clear(s, "engineers", TARGET)
     s2 = handle_build(s, "engineers", _cmd("build", loc=TARGET))
     assert s2.pending == (
-        PendingDecision(faction="darklings", kind="leech", amount=2, source="engineers"),
+        PendingDecision(faction="darklings", kind="leech", amount=2, source="engineers", options=(TARGET,)),
     )
 
 

@@ -93,7 +93,7 @@ def test_offers_for_build_basic_amount_and_source() -> None:
     s = _seeded()
     offers = offers_for_build(s, "engineers", TARGET)
     assert offers == (
-        PendingDecision(faction="darklings", kind="leech", amount=2, source="engineers"),
+        PendingDecision(faction="darklings", kind="leech", amount=2, source="engineers", options=(TARGET,)),
     )
 
 
@@ -117,7 +117,7 @@ def test_offers_for_build_capped_by_gainable() -> None:
     )  # gainable=2
     offers = offers_for_build(s, "engineers", TARGET)
     assert offers == (
-        PendingDecision(faction="darklings", kind="leech", amount=2, source="engineers"),
+        PendingDecision(faction="darklings", kind="leech", amount=2, source="engineers", options=(TARGET,)),
     )
 
 
@@ -128,7 +128,7 @@ def test_offers_for_build_zero_gainable_still_enqueues_an_offer() -> None:
     s = with_faction(s, "darklings", replace(s.factions["darklings"], power=Power(0, 0, 12)))
     offers = offers_for_build(s, "engineers", TARGET)
     assert offers == (
-        PendingDecision(faction="darklings", kind="leech", amount=0, source="engineers"),
+        PendingDecision(faction="darklings", kind="leech", amount=0, source="engineers", options=(TARGET,)),
     )
 
 
@@ -326,6 +326,55 @@ def test_cultists_first_accept_fires_cult_choice_immediately_mid_batch() -> None
     cult_choices = [p for p in s3.pending if p.kind == "cult_choice"]
     assert cult_choices == [PendingDecision(faction="cultists", kind="cult_choice", amount=1)]
     assert not any(p.kind == "cultist_leech_watch" for p in s3.pending)
+
+
+def test_cultist_watch_disambiguates_by_hex_key_across_two_simultaneous_batches() -> None:
+    """Task-14 fix, corpus ``4pLeague_S20_D1L1_G7`` row 217: Cultists can
+    build/upgrade a second time before every offer from an earlier build
+    is answered, queuing two simultaneous ``cultist_leech_watch``
+    pendings with the identical ``source="cultists"``. Resolving an
+    offer from the *second* batch must update the second batch's own
+    watch (and, on first accept, push its own ``cult_choice``) -- not
+    silently decrement/consume the first, older batch's watch just
+    because it happens to come first in the pending list (an earlier
+    revision matched by ``source`` alone). The older batch's watch must
+    stay untouched.
+    """
+    s = _state()
+    factions = dict(s.factions)
+    factions["cultists"] = FactionState.initial(FACTIONS["cultists"])
+    s = replace(s, factions=factions, turn_order=("cultists", "darklings"))
+    # A1's only opponent-adjacent hex is A2 (a TP, raw power 2); A3 is
+    # *also* adjacent to A2 but additionally to A4 (an SH, raw power 3),
+    # so batch #1 (A1) and batch #2 (A3) end up with distinct offer
+    # amounts (2 vs 5) -- avoiding _find_leech_pending's own documented
+    # target/amount disambiguation ambiguity (a separate, pre-existing
+    # constraint, not this fix's concern) so ``cmd.n1`` alone reliably
+    # picks batch #2's offer below.
+    s = _place(s, "darklings", "A2", "TP", FACTIONS["darklings"].color)
+    s = _place(s, "darklings", "A4", "SH", FACTIONS["darklings"].color)
+    hexes = dict(s.hexes)
+    for hex_key in ("A1", "A3"):
+        hexes[hex_key] = replace(
+            hexes[hex_key], color=FACTIONS["cultists"].color, building=None, owner=None
+        )
+    s = replace(s, hexes=hexes)
+
+    s = queue_leech(s, "cultists", "A1")  # batch #1, offer amount 2
+    s = queue_leech(s, "cultists", "A3")  # batch #2, offer amount 5 -- same source="cultists"
+    watches_by_hex = {p.options[0]: p for p in s.pending if p.kind == "cultist_leech_watch"}
+    assert set(watches_by_hex) == {"A1", "A3"}
+    assert watches_by_hex["A1"].amount == 1
+    assert watches_by_hex["A3"].amount == 1
+
+    second_offer = next(p for p in s.pending if p.kind == "leech" and p.options == ("A3",))
+    assert second_offer.amount == 5
+    s2 = handle_leech(s, "darklings", _cmd("leech", n1=second_offer.amount, target="cultists"))
+
+    assert PendingDecision(faction="cultists", kind="cult_choice", amount=1) in s2.pending
+    remaining_watches = {p.options[0]: p for p in s2.pending if p.kind == "cultist_leech_watch"}
+    assert set(remaining_watches) == {"A1"}  # batch #2's watch (sole offer) fully resolved, popped
+    assert remaining_watches["A1"] == watches_by_hex["A1"]  # batch #1 completely untouched
 
 
 def test_apply_lets_cultists_answer_cult_choice_mid_batch_through_the_gate() -> None:
