@@ -113,3 +113,30 @@ def test_first_ten_games_replay_clean(frames: tuple[pl.DataFrame, pl.DataFrame])
         assert result.error is None, f"{game_id}: {result.error}"
         assert result.mismatches == (), f"{game_id}: {result.mismatches}"
         assert result.rows_checked > 0
+
+
+# --------------------------------------------------------------------------
+# Task 14: ACTC compound-turn bundling (round_flow.is_turn_boundary)
+# --------------------------------------------------------------------------
+
+
+def test_actc_bundled_row_replays_past_its_own_row_without_a_turn_order_error(
+    frames: tuple[pl.DataFrame, pl.DataFrame],
+) -> None:
+    """``4pLeague_S10_D2L1_G4`` row 309 (``convert; pass BON1``, chaos
+    magicians) is the first row after the game's chaosmagicians ACTC row
+    (302: ``action ACTC; action FAV6; gain_cult n1=1; pass BON3``) that a
+    different faction (engineers) acts in. Before this fix, the harness
+    called ``advance_turn`` once per row regardless of how many Perl-level
+    full actions it bundled -- 1 call for a 3-action ACTC row -- so
+    ``active_index`` never made it past chaosmagicians and this exact row
+    raised ``EngineError: faction acted out of turn (active is
+    'chaosmagicians')`` before any oracle row past 302 could even be
+    checked. Pinning full-game replay (not just the row) since the bug was
+    in how many rows the harness could reach at all, not a value mismatch.
+    """
+    moves_df, deltas_df = frames
+    result = replay_game("4pLeague_S10_D2L1_G4", moves_df, deltas_df)
+    assert result.error is None, result.error
+    assert result.mismatches == ()
+    assert result.rows_checked > 309

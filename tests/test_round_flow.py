@@ -22,10 +22,12 @@ from bgai.engine.tm.round_flow import (
     begin_actions,
     end_of_round,
     handle_income_row,
+    is_turn_boundary,
+    never_starts_action,
     start_setup,
 )
 from bgai.engine.tm.setup import load_setup
-from bgai.engine.tm.state import FactionState, GameState, Phase, active_faction, with_faction
+from bgai.engine.tm.state import FactionState, GameState, Phase, PendingDecision, active_faction, with_faction
 
 GAME_ID = "4pLeague_S10_D1L1_G1"
 
@@ -488,3 +490,58 @@ def test_advance_turn_is_a_noop_during_income_and_cleanup() -> None:
     assert advance_turn(s_income) == s_income
     s_cleanup = replace(_state(), phase=Phase.CLEANUP)
     assert advance_turn(s_cleanup) == s_cleanup
+
+
+# --------------------------------------------------------------------------
+# is_turn_boundary / never_starts_action: ACTC compound-turn bundling
+# (task-14 fix -- corpus row 308, ``action ACTC; action BON2; gain_cult
+# n1=1; pass BON3``, 3 Perl-level full actions bundled into one ledger row)
+# --------------------------------------------------------------------------
+
+
+def test_action_pass_advance_send_are_always_turn_boundaries() -> None:
+    s = _state()
+    for verb in ("action", "pass", "advance", "send"):
+        assert is_turn_boundary(_cmd(verb), s, "engineers", prev_verb="action") is True
+
+
+def test_transform_and_connect_never_start_a_fresh_action() -> None:
+    s = _state()
+    for verb in ("transform", "connect"):
+        assert is_turn_boundary(_cmd(verb), s, "engineers", prev_verb="action") is False
+        assert never_starts_action(verb) is True
+    assert never_starts_action("action") is False
+    assert never_starts_action("build") is False
+
+
+def test_build_after_dig_or_transform_is_a_continuation() -> None:
+    s = _rich(_state(), "engineers", spades_available=0)
+    for prev in ("dig", "transform"):
+        assert is_turn_boundary(_cmd("build", loc="A1"), s, "engineers", prev_verb=prev) is False
+
+
+def test_build_with_no_spade_or_marker_context_is_fresh() -> None:
+    # Corpus pattern ``action ACTC; build; build`` -- a bare second build,
+    # not preceded by dig/transform and with no leftover spade balance or
+    # marker, is a genuinely independent action.
+    s = _rich(_state(), "engineers", spades_available=0)
+    assert is_turn_boundary(_cmd("build", loc="A1"), s, "engineers", prev_verb="build") is True
+
+
+def test_build_with_unspent_spades_available_is_a_continuation() -> None:
+    # ACT5/ACT6/BON1 grant SPADE directly, no intervening ``transform``/
+    # ``dig`` command -- e.g. ``action BON1; build F2`` (corpus row 364).
+    s = _rich(_state(), "engineers", spades_available=1)
+    assert is_turn_boundary(_cmd("build", loc="A1"), s, "engineers", prev_verb="action") is False
+
+
+def test_build_with_pending_free_marker_is_a_continuation() -> None:
+    s = _state()
+    for kind in ("free_d", "free_tf"):
+        s2 = replace(s, pending=(PendingDecision(faction="engineers", kind=kind),))
+        assert is_turn_boundary(_cmd("build", loc="A1"), s2, "engineers", prev_verb="action") is False
+
+
+def test_upgrade_with_pending_free_tp_marker_is_a_continuation() -> None:
+    s = replace(_state(), pending=(PendingDecision(faction="engineers", kind="free_tp"),))
+    assert is_turn_boundary(_cmd("upgrade", loc="A1", building="TP"), s, "engineers", prev_verb="action") is False

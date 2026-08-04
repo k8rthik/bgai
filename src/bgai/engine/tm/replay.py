@@ -7,17 +7,26 @@ specifies the exact call sequence a row-grouping caller owes the engine;
 this module *is* that caller.
 
 **Row grouping.** ``moves.parquet`` has no per-row "this is the
-turn-owning verb" flag, but the contract only needs one boolean per ledger
-row: does this row belong to the currently-active main-track faction
-(``_MAIN_TRACK_VERBS`` -- exactly round_flow's own list: build/upgrade/
-action/advance/pass/send/dig/transform/bridge/connect), or is it a
-sub-decision answer (leech/decline/gain_favor/gain_town/gain_cult) or a
-bookkeeping row (setup/income/score_*)? "Does any command in this row use a
-main-track verb" is sufficient: multi-verb rows always bundle their
-main-track verb with same-turn sub-decisions ("dig 1. build A3. connect
-R1. gain_town TW1", one Mermaids turn, corpus row 208 -- round_flow's own
-docstring cites this), and every real player turn contains exactly one
-main-track verb (pass included). This one test decides ``advance_turn``
+turn-owning verb" flag, but the contract only needs one boolean per
+command: does it use a main-track verb (``_MAIN_TRACK_VERBS`` -- exactly
+round_flow's own list: build/upgrade/action/advance/pass/send/dig/
+transform/bridge/connect), or is it a sub-decision answer (leech/decline/
+gain_favor/gain_town/gain_cult) or a bookkeeping row (setup/income/
+score_*)? Almost every ledger row is exactly one full action (one
+``advance_turn`` call, e.g. "dig 1. build A3. connect R1. gain_town TW1",
+one Mermaids turn, corpus row 208 -- round_flow's own docstring cites
+this), but Chaos Magicians' ACTC can grant 2 *extra* full actions that get
+submitted as part of the *same* row as the ACTC action itself -- e.g. row
+308, "action ACTC. action BON2. +1CULT. pass BON3" is 3 Perl-level full
+actions bundled into one row. ``_apply_row_commands`` calls
+``round_flow.is_turn_boundary`` per command (that module's own docstring
+has the full citation trail) to decide, per main-track command, whether it
+completes a fresh full action (warranting its own ``advance_turn`` call)
+or is a continuation of the row's already-in-progress action (a transform/
+build spending spades or a marker an earlier command in the same row just
+granted) -- with a floor of at least one call for any row containing a
+main-track verb, matching the previous (pre-ACTC-fix) behavior for the
+common single-action-per-row case. This decides ``advance_turn``
 eligibility across all three phases that use it (``SETUP_DWELLINGS``/
 ``SETUP_BONUS``/``ACTIONS`` -- ``advance_turn`` is a documented no-op for
 ``INCOME``/``CLEANUP``/``FINISHED``).
@@ -60,7 +69,14 @@ import polars as pl
 
 from bgai.data.ledger_parser import Kind, ParsedCommand
 from bgai.engine.tm.apply import apply
-from bgai.engine.tm.round_flow import advance_turn, begin_actions, end_of_round, start_setup
+from bgai.engine.tm.round_flow import (
+    advance_turn,
+    begin_actions,
+    end_of_round,
+    is_turn_boundary,
+    never_starts_action,
+    start_setup,
+)
 from bgai.engine.tm.setup import load_setup
 from bgai.engine.tm.state import GameState, Phase, cult_string
 
@@ -187,6 +203,52 @@ def _row_mismatches(
 # --------------------------------------------------------------------------
 
 
+def _apply_row_commands(state: GameState, faction: str, cmds: tuple[ParsedCommand, ...]) -> GameState:
+    """Apply every command of one ledger row via ``apply()``, calling
+    ``advance_turn`` once per genuinely independent full action within the
+    row (``round_flow.is_turn_boundary`` -- ordinarily exactly one, but a
+    Chaos Magicians ACTC-funded row can bundle several, module docstring
+    "Row grouping").
+
+    A full action's own continuations (a build claiming the spades a
+    preceding transform/dig/ACT5/ACT6/BON1 just granted) must finish
+    applying *before* ``advance_turn`` closes it out -- closing the moment
+    ``action ACT6`` itself lands would hand control to the next faction
+    before this faction's own ``transform``/``build`` sub-commands in the
+    *same* row get to run at all. So the boundary call fires lazily: right
+    *before* applying the next command ``is_turn_boundary`` classifies as
+    fresh (never before), and once more at the end of the row to close
+    whatever full action is still open. A row-*leading* ``transform``/
+    ``connect`` (``never_starts_action``) never opens a segment by itself
+    either -- it waits to be folded into the row's real fresh command,
+    whichever side of it that lands on (corpus: ``connect R10. gain_town
+    TW8. pass`` -- ``pass``, not the leading ``connect``, is the actual
+    action; closing right after ``connect`` would hand control away before
+    ``pass`` could even apply). Either way, at least one call is guaranteed
+    for any row containing a main-track verb -- the floor that covers a
+    row where *every* command is a never-starts-action verb (e.g. a lone
+    ``transform`` row).
+    """
+    prev_verb: str | None = None
+    open_action = False
+    any_main_track = False
+    for cmd in cmds:
+        if cmd.verb not in _MAIN_TRACK_VERBS:
+            state = apply(state, faction, cmd)
+            continue
+        any_main_track = True
+        if open_action and is_turn_boundary(cmd, state, faction, prev_verb):
+            state = advance_turn(state)
+            open_action = False
+        state = apply(state, faction, cmd)
+        prev_verb = cmd.verb
+        if open_action or not never_starts_action(cmd.verb):
+            open_action = True
+    if any_main_track:
+        state = advance_turn(state)
+    return state
+
+
 def _advance_after_row(
     state: GameState,
     faction: str,
@@ -194,9 +256,6 @@ def _advance_after_row(
     other_income_done: set[str],
     cult_income_done: set[str],
 ) -> tuple[GameState, set[str], set[str]]:
-    if any(cmd.verb in _MAIN_TRACK_VERBS for cmd in cmds):
-        state = advance_turn(state)
-
     for cmd in cmds:
         if cmd.verb in _OTHER_INCOME_VERBS:
             other_income_done.add(faction)
@@ -244,8 +303,7 @@ def replay_game(
     for row, faction, cmds in _iter_rows(game_moves):
         raw = "; ".join(cmd.raw for cmd in cmds)
         try:
-            for cmd in cmds:
-                state = apply(state, faction, cmd)
+            state = _apply_row_commands(state, faction, cmds)
             state, other_income_done, cult_income_done = _advance_after_row(
                 state, faction, cmds, other_income_done, cult_income_done
             )

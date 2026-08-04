@@ -547,10 +547,11 @@ def _advance_actions(state: GameState) -> GameState:
 
 def advance_turn(state: GameState) -> GameState:
     """Central, phase-aware turn-advancement primitive (module docstring).
-    Must be called by the row-grouping caller exactly once per completed
-    ledger row belonging to the currently-active main-track faction --
-    never for income/cleanup/bare-``setup`` rows, never for another
-    faction's leech/decline/gain_cult answer row. A no-op during
+    Must be called by the row-grouping caller once per completed *full
+    action* belonging to the currently-active main-track faction -- see
+    ``is_turn_boundary`` below for when a ledger row bundles more than one
+    of those. Never call for income/cleanup/bare-``setup`` rows, never for
+    another faction's leech/decline/gain_cult answer row. A no-op during
     ``Phase.INCOME``/``Phase.CLEANUP`` (module docstring).
     """
     if state.phase == Phase.SETUP_DWELLINGS:
@@ -560,3 +561,145 @@ def advance_turn(state: GameState) -> GameState:
     if state.phase == Phase.ACTIONS:
         return _advance_actions(state)
     return state
+
+
+# --------------------------------------------------------------------------
+# Row-to-turn-boundary disambiguation (ACTC compound-turn bundling)
+# --------------------------------------------------------------------------
+
+_ALWAYS_FRESH_ACTION_VERBS = frozenset({"action", "pass", "advance", "send"})
+# ``connect`` never costs its own action -- it is always an automatic
+# consequence of whatever full action just formed or completed the
+# qualifying river-adjacent cluster (a build/upgrade directly, corpus row
+# 208; or a milestone favor-tile grant from an unrelated action rescanning
+# per FAV5's "Hack" immediate-rescan rule, task-13 fix #13 -- corpus row
+# 380, ``send FIRE. connect R20. gain_town TW8``, where ``send``ing a
+# priest crosses a cult milestone that grants FAV5). So, like ``transform``,
+# it never itself starts a fresh action, regardless of what precedes it or
+# how many ``connect`` commands land in a row (corpus pattern
+# ``connect r1. connect r20.``, two simultaneous qualifying clusters).
+_NEVER_FRESH_ACTION_VERBS = frozenset({"transform", "connect"})
+# "build" checks both "free_d" (ACTW's genuine free building) and "free_tf"
+# (ACTN's free-transform marker -- ``actions_build.py``'s ``handle_build``
+# consumes it internally for its own implicit transform-if-needed dispatch,
+# task-13 fix #9, with no separate ``transform`` verb ever appearing in the
+# ledger for that case: corpus pattern ``action ACTN; build ...``).
+_MARKER_KINDS_FOR_VERB: dict[str, tuple[str, ...]] = {
+    "build": ("free_d", "free_tf"),
+    "upgrade": ("free_tp",),
+    "bridge": ("bridge",),
+}
+# A ``build``/``upgrade`` immediately after a ``connect`` (corpus:
+# ``connect R20. gain_town TW1. ... upgrade B3 to TP``, one Mermaids turn
+# -- the ledger doesn't always order the pair build/upgrade-then-connect)
+# is still a continuation of the same compound turn ``connect`` itself was
+# part of, even though ``connect`` never opens/closes a boundary of its
+# own (it's in ``_NEVER_FRESH_ACTION_VERBS`` above, not tracked here).
+# ``build``/``upgrade`` do *not* get each other added here: a bare second
+# ``build`` after ACTC (corpus pattern ``action ACTC; build; build``) must
+# stay fresh.
+_CONTINUATION_PREV_VERBS: dict[str, frozenset[str]] = {
+    "build": frozenset({"transform", "dig", "connect"}),
+    "upgrade": frozenset({"transform", "dig", "connect"}),
+    "dig": frozenset(),
+    "bridge": frozenset({"transform", "dig"}),
+}
+
+
+def never_starts_action(verb: str) -> bool:
+    """Whether *verb* can never, by itself, open a fresh full action -- it
+    always waits to be folded into whichever full action precedes or (if
+    none is open yet) follows it in the same row. ``replay.py``'s
+    ``_apply_row_commands`` uses this to avoid eagerly treating a row-
+    leading ``transform``/``connect`` as the start of a chargeable segment
+    it would then (wrongly) close before the row's real fresh command (e.g.
+    a deferred ``pass``) ever lands -- see ``is_turn_boundary``'s docstring
+    for the corpus evidence (``connect R10. gain_town TW8. pass``, one
+    Mermaids turn where ``pass``, not ``connect``, is the actual action).
+    """
+    return verb in _NEVER_FRESH_ACTION_VERBS
+
+
+def is_turn_boundary(
+    cmd: ParsedCommand, state_before: GameState, faction: str, prev_verb: str | None = None
+) -> bool:
+    """Whether *this* main-track command, about to be applied on top of
+    ``state_before``, **starts** a genuinely independent full action (as
+    opposed to continuing the compound full action already in progress).
+    The row-grouping caller (Task 12 contract) owes an ``advance_turn``
+    call once a run of such continuations ends -- i.e. right *before*
+    applying the next command classified as fresh, or at the end of the
+    row (``replay.py``'s ``_apply_row_commands`` -- this function only
+    classifies, it never decides *when* to call ``advance_turn``, since
+    that requires closing out a full action only once its own
+    continuations have also landed).
+
+    Ordinarily a whole ledger row is exactly one full action (module
+    docstring's "every real player turn contains exactly one main-track
+    verb" finding, step 5) -- but Chaos Magicians' ACTC (``gain =>
+    {GAIN_ACTION => 2}``, ``resources.pm`` ~289, wired onto
+    ``FactionState.extra_actions`` by ``actions_power.py``) can grant 2
+    *extra* full actions that get submitted -- and therefore ledgered -- as
+    part of the *same* row as the ACTC action itself whenever no other
+    faction's move interleaves. Corpus example: row 308,
+    ``action ACTC; action BON2; gain_cult n1=1; pass BON3`` is 3 Perl-level
+    full actions (ACTC itself, BON2, the final pass) bundled into one
+    ledger row -- needing 3 ``advance_turn`` calls, not 1, each fired only
+    once its own action's commands are done. Before this predicate
+    existed, the replay harness called ``advance_turn`` once per row
+    regardless, which under-advanced ``active_index``/``extra_actions`` on
+    every such row and produced the corpus's single most common hard error
+    ("faction acted out of turn (active is 'chaosmagicians')") -- 12+ of
+    the first 100 corpus games.
+
+    Perl's own discriminator is ``require_subaction($faction, $type,
+    ...)`` (``acting.pm`` ~250): a command spends the faction's
+    ``allowed_actions`` counter (this engine's ``extra_actions``/the base
+    1-per-turn budget) unless it is answering a queued
+    ``allowed_sub_actions`` grant instead -- one-shot permission bought by
+    an *earlier* command in the same compound turn (a spade grant from
+    ``dig``/ACT5/ACT6/BON1, or a marker from ACT1/ACTE/ACTW/ACTS/ACTN).
+    This engine doesn't model ``allowed_sub_actions`` as its own structure,
+    but the concrete things it grants -- ``FactionState.spades_available``,
+    a ``PendingDecision`` of kind ``free_d``/``free_tp``/``bridge``, and
+    (for a spade balance a ``transform``/``dig`` has *just* zeroed out by
+    spending it, rather than one still sitting unspent) simply having
+    ``transform``/``dig`` be the immediately preceding main-track verb --
+    are exactly the state this predicate inspects:
+
+    - ``transform`` never starts a fresh action (real TM: never a complete
+      turn by itself, always in service of a build funded by the dig/
+      action that granted its spades).
+    - ``action``/``pass``/``advance``/``send`` always start a fresh action
+      -- no marker or spade balance ever substitutes for one of these
+      (checked against every sampled ACTC-bundling pattern in the corpus,
+      e.g. ``action; send; send`` and ``action; action; gain_cult; pass``,
+      each needing one call per verb).
+    - ``build``/``upgrade``/``dig``/``connect``/``bridge`` continue the
+      action in progress (not fresh) when ``prev_verb`` (the immediately
+      preceding main-track verb applied in this row, ignoring non-main-
+      track commands like ``gain_cult``/``burn`` in between) is
+      ``transform`` or ``dig`` -- the "just spent the spade that funded
+      this build" case a bare ``state_before.spades_available`` check
+      alone can't see, since the spending transform/dig already zeroed the
+      balance -- **or** when ``state_before`` still shows an unspent
+      ``spades_available`` balance (an ACT5/ACT6/BON1 direct grant not yet
+      (fully) consumed) or a matching one-shot marker pending for this
+      faction. Otherwise they start a fresh action (corpus pattern
+      ``action ACTC; build; build``: two independent builds, no dig/
+      spade-granting action between them).
+    """
+    verb = cmd.verb
+    if verb in _NEVER_FRESH_ACTION_VERBS:
+        return False
+    if verb in _ALWAYS_FRESH_ACTION_VERBS:
+        return True
+    if prev_verb in _CONTINUATION_PREV_VERBS.get(verb, frozenset()):
+        return False
+    fs = state_before.factions.get(faction)
+    if fs is not None and fs.spades_available > 0:
+        return False
+    kinds = _MARKER_KINDS_FOR_VERB.get(verb, ())
+    if any(p.faction == faction and p.kind in kinds for p in state_before.pending):
+        return False
+    return True

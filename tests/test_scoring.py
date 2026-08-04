@@ -490,7 +490,8 @@ def test_replayed_final_vp_matches_games_meta_final_vp() -> None:
     each faction's resulting ``FactionState.vp`` equals its
     ``games_meta.final_vp`` entry. Un-skipped now that Task 13's replay
     harness (``replay.py``) exists; reuses its private row-driving
-    helpers directly (``_iter_rows``/``_advance_after_row``) since
+    helpers directly (``_iter_rows``/``_apply_row_commands``/
+    ``_advance_after_row``) since
     ``replay_game``'s frozen ``ReplayResult`` API deliberately exposes no
     final ``GameState`` -- only pass/fail plus mismatches -- for this
     module's own oracle checks to reach into.
@@ -499,7 +500,7 @@ def test_replayed_final_vp_matches_games_meta_final_vp() -> None:
 
     import polars as pl
 
-    from bgai.engine.tm.replay import _advance_after_row, _iter_rows
+    from bgai.engine.tm.replay import _advance_after_row, _apply_row_commands, _iter_rows
     from bgai.engine.tm.round_flow import start_setup
     from bgai.engine.tm.state import GameState
 
@@ -512,8 +513,7 @@ def test_replayed_final_vp_matches_games_meta_final_vp() -> None:
     other_done: set[str] = set()
     cult_done: set[str] = set()
     for row, faction, cmds in _iter_rows(game_moves):
-        for cmd in cmds:
-            state = apply(state, faction, cmd)
+        state = _apply_row_commands(state, faction, cmds)
         state, other_done, cult_done = _advance_after_row(state, faction, cmds, other_done, cult_done)
 
     expected = json.loads(games_meta.filter(pl.col("game_id") == game_id)["final_vp"][0])
