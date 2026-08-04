@@ -37,7 +37,10 @@ Ported from the reference implementation (jsnell/terra-mystica, MIT),
   count/cost (241); ``detect_towns_from`` (252, ``_maybe_queue_town``).
   Score-tile BUILD VP (244-245, ``tiles.scored_vp``) is applied for D,
   guarded by ``state.round >= 1`` (Task 13 fix, matching the same
-  ``if ($game{round})`` guard).
+  ``if ($game{round})`` guard) -- alongside it, favor-tile BUILD VP
+  (``maybe_score_favor_tile``, called just before it at 244 -- see
+  ``_favor_tile_vp``/``handle_gain_favor``'s own docstring for the
+  passive-not-snapshot correction this needed).
 - ``command_upgrade`` (258-311): wrong-color is always a hard error
   (266-267, no ``FREE_D``-style bypass for upgrades). ``note_leech`` fires
   *before* cost (280) for the D->TP neighbour-cost rule (282-293): a live
@@ -209,6 +212,17 @@ def _apply_spade_gain_bonus(
         else:
             raise ValueError(f"unhandled extra_dig_gain key {res!r} for {faction}")
     return fs
+
+
+def _favor_tile_vp(fs: FactionState, type_: str) -> int:
+    """Port of ``scoring.pm``'s ``maybe_score_favor_tile`` (lines 32-47):
+    sum, over every favor tile ``fs`` currently holds, that tile's
+    ``FavorTile.vp[type_]`` -- 0 for every favor but FAV10 (keys ``TP``)
+    and FAV11 (keys ``D``), whose ``.vp`` dict is otherwise empty (see
+    ``handle_gain_favor``'s docstring for why this is a passive per-build
+    bonus, not a one-time grant-time snapshot).
+    """
+    return sum(FAVOR_TILES[tile].vp.get(type_, 0) for tile in fs.favors)
 
 
 def _current_score_tile_vp(state: GameState, type_: str, mode: str) -> int:
@@ -471,7 +485,7 @@ def handle_build(state: GameState, faction: str, cmd: ParsedCommand) -> GameStat
 
     fs = replace(fs, buildings={**fs.buildings, "D": fs.buildings["D"] | {hex_key}})
     if not setup:
-        fs = replace(fs, vp=fs.vp + _current_score_tile_vp(state, "D", "build"))
+        fs = replace(fs, vp=fs.vp + _favor_tile_vp(fs, "D") + _current_score_tile_vp(state, "D", "build"))
     new_hexes = dict(state.hexes)
     new_hexes[hex_key] = replace(hex_state, building="D", owner=faction)
     new_state = replace(with_faction(state, faction, fs), hexes=new_hexes)
@@ -544,7 +558,10 @@ def handle_upgrade(state: GameState, faction: str, cmd: ParsedCommand) -> GameSt
     fs_buildings[old_type] = fs_buildings[old_type] - {hex_key}
     fs_buildings[new_type] = fs_buildings[new_type] | {hex_key}
     fs = replace(fs, buildings=fs_buildings)
-    fs = replace(fs, vp=fs.vp + _current_score_tile_vp(state, new_type, "build"))
+    fs = replace(
+        fs,
+        vp=fs.vp + _favor_tile_vp(fs, new_type) + _current_score_tile_vp(state, new_type, "build"),
+    )
 
     new_hexes = dict(state.hexes)
     new_hexes[hex_key] = replace(hex_state, building=new_type, owner=faction)
@@ -599,6 +616,20 @@ def handle_bridge(state: GameState, faction: str, cmd: ParsedCommand) -> GameSta
 
 
 def handle_gain_favor(state: GameState, faction: str, cmd: ParsedCommand) -> GameState:
+    """``+FAVx``: taking a favor tile never scores VP by itself, even for
+    FAV10/FAV11 (``FavorTile.vp``). ``FavorTile.vp`` is a *passive* bonus
+    scored by ``_favor_tile_vp`` at every later matching build/upgrade
+    while the tile is held (``scoring.pm``'s ``maybe_score_favor_tile``,
+    called from ``command_build``/``command_upgrade`` right before
+    ``maybe_score_current_score_tile`` -- see ``tiles.scored_vp``'s own
+    docstring for that sibling mechanic), *not* a one-time snapshot taken
+    at grant time. An earlier revision of this handler scored
+    ``len(fs.buildings[btype]) * per_unit`` here instead -- disproved by
+    replay (task-13 report, reference-game row 59): mermaids gain FAV11
+    (``vp={"D": 2}``) with 1 dwelling already on the board and VP is
+    unchanged (delta 0); building a fresh dwelling ten rows later (row 69)
+    is what grants the +2.
+    """
     assert cmd.tile is not None
     tile = cmd.tile
     idx = _find_pending(state, faction, "gain_favor", cmd)
@@ -612,10 +643,7 @@ def handle_gain_favor(state: GameState, faction: str, cmd: ParsedCommand) -> Gam
         raise EngineError(f"{faction} already holds {tile}", state=state, faction=faction, cmd=cmd)
 
     favor = FAVOR_TILES[tile]
-    vp_gain = sum(
-        len(fs.buildings.get(btype, frozenset())) * per_unit for btype, per_unit in favor.vp.items()
-    )
-    fs = replace(fs, favors=fs.favors + (tile,), vp=fs.vp + vp_gain)
+    fs = replace(fs, favors=fs.favors + (tile,))
 
     result = advance(
         state.cults[faction][favor.cult],

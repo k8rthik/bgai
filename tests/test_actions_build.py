@@ -531,14 +531,50 @@ def test_gain_favor_empty_pool_rejected() -> None:
         handle_gain_favor(s, "engineers", _cmd("gain_favor", tile="FAV1"))
 
 
-def test_gain_favor_fav10_grants_vp_scaled_by_tp_count() -> None:
+def test_gain_favor_never_scores_vp_immediately_even_for_fav10_fav11() -> None:
+    """Reference-game row 59: mermaids gain FAV11 (``vp={"D": 2}``) with 1
+    dwelling already on the board and VP is unchanged (deltas.parquet
+    delta 0) -- ``FavorTile.vp`` is a passive per-build bonus (module
+    docstring's ``maybe_score_favor_tile`` citation), never a one-time
+    snapshot taken at grant time, so this holds even with existing
+    matching buildings already on the board."""
     s = _state()
     s = _place(s, "engineers", ANCHOR, "TP")
     s = _place(s, "engineers", TARGET, "TP")
     s = replace(s, pending=(PendingDecision(faction="engineers", kind="gain_favor", amount=1),))
     before_vp = s.factions["engineers"].vp
     s2 = handle_gain_favor(s, "engineers", _cmd("gain_favor", tile="FAV10"))
-    assert s2.factions["engineers"].vp == before_vp + 3 * 2  # FAV10: 3 VP per TP, 2 TPs
+    assert s2.factions["engineers"].vp == before_vp
+
+
+def test_build_dwelling_scores_held_fav11_vp_passively() -> None:
+    """FAV11 (``vp={"D": 2}``) held at build time scores 2 VP for a fresh
+    dwelling, same round-1 fixture as ``test_build_dwelling_scores_
+    current_round_tiles_build_vp_when_keyed`` (whose ``TP >> 3`` tile does
+    not key ``D``, so this isolates the favor-only contribution)."""
+    s = _state()
+    s = _place(s, "engineers", ANCHOR, "D")
+    s = _clear(s, "engineers", TARGET)
+    fs = replace(s.factions["engineers"], favors=("FAV11",))
+    s = with_faction(s, "engineers", fs)
+    before_vp = s.factions["engineers"].vp
+    s2 = handle_build(s, "engineers", _cmd("build", loc=TARGET))
+    assert s2.factions["engineers"].vp == before_vp + 2
+
+
+def test_upgrade_scores_held_fav10_vp_passively_alongside_score_tile() -> None:
+    """FAV10 (``vp={"TP": 3}``) held at upgrade time scores 3 VP on top of
+    round 1's own ``TP >> 3`` score-tile bonus (``test_upgrade_to_tp_
+    scores_current_round_tiles_build_vp``) -- both fire from the same
+    upgrade, additively (module docstring: ``maybe_score_favor_tile``
+    then ``maybe_score_current_score_tile``, independent sources)."""
+    s = _state()
+    s = _place(s, "engineers", TARGET, "D")
+    fs = replace(s.factions["engineers"], favors=("FAV10",))
+    s = with_faction(s, "engineers", fs)
+    before_vp = s.factions["engineers"].vp
+    s2 = handle_upgrade(s, "engineers", _cmd("upgrade", loc=TARGET, building="TP"))
+    assert s2.factions["engineers"].vp == before_vp + 3 + 3  # FAV10 + score tile
 
 
 # --------------------------------------------------------------------------
