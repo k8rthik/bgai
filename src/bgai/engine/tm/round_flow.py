@@ -403,6 +403,23 @@ def _grant_cult_income(state: GameState, faction: str) -> GameState:
     return with_faction(state, faction, fs)
 
 
+def grant_missing_cult_income(state: GameState, faction: str) -> GameState:
+    """Public wrapper around :func:`_grant_cult_income`, for a caller
+    outside this module (``replay.py``'s ``_grant_missing_cult_income_
+    retroactively``) that needs to apply a faction's cult-income grant
+    without a ``cult_income_for_faction`` ledger row to drive it through
+    ``handle_income_row``'s normal dispatch -- a handful of corpus games
+    never emit one for a specific faction/round at all (this module's
+    own Step-1 finding docstring already established this as a genuine,
+    accepted ledger gap, not a parsing bug), and the grant still needs to
+    land once the batch's ``end_of_round`` fires regardless. Identical to
+    calling ``handle_income_row`` with a synthetic ``cult_income_for_
+    faction`` command; exists as its own name so callers don't need to
+    construct a throwaway ``ParsedCommand`` just to invoke it.
+    """
+    return _grant_cult_income(state, faction)
+
+
 def handle_income_row(state: GameState, faction: str, cmd: ParsedCommand) -> GameState:
     """``other_income_for_faction``/``cult_income_for_faction``/
     ``all_income_for_faction`` (module docstring, Step 1)."""

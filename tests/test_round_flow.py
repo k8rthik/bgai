@@ -21,6 +21,7 @@ from bgai.engine.tm.round_flow import (
     advance_turn,
     begin_actions,
     end_of_round,
+    grant_missing_cult_income,
     handle_income_row,
     is_turn_boundary,
     never_starts_action,
@@ -137,6 +138,24 @@ def test_cult_income_below_req_grants_nothing() -> None:
     before = s.factions["nomads"].spades_available
     s2 = handle_income_row(s, "nomads", _cmd("cult_income_for_faction"))
     assert s2.factions["nomads"].spades_available == before
+
+
+def test_grant_missing_cult_income_matches_handle_income_row() -> None:
+    """``grant_missing_cult_income`` (``replay.py``'s public entry point
+    for a faction whose ``cult_income_for_faction`` ledger row is
+    genuinely absent, task-14 fix) must compute *exactly* the same grant
+    as a real ``cult_income_for_faction`` row would via
+    ``handle_income_row`` -- it is the same underlying
+    ``_grant_cult_income``, just callable without constructing a
+    throwaway ``ParsedCommand``.
+    """
+    s = replace(_state(), round=4)
+    cults = dict(s.cults)
+    cults["nomads"] = {**cults["nomads"], "EARTH": 7}
+    s = replace(s, cults=cults)
+    via_row = handle_income_row(s, "nomads", _cmd("cult_income_for_faction"))
+    via_wrapper = grant_missing_cult_income(s, "nomads")
+    assert via_wrapper == via_row
 
 
 def test_cult_income_round_1_spade_destination_is_spades_available() -> None:
