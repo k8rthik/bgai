@@ -81,6 +81,7 @@ from bgai.engine.tm.round_flow import (
     advance_turn,
     begin_actions,
     end_of_round,
+    grant_missing_cult_income,
     is_turn_boundary,
     never_starts_action,
     start_setup,
@@ -218,9 +219,7 @@ def _row_mismatches(
 # --------------------------------------------------------------------------
 
 
-def _apply_pending_drops(
-    state: GameState, row: int, upcoming_faction: str, dropped_at_row: Mapping[str, int]
-) -> GameState:
+def _apply_pending_drops(state: GameState, row: int, dropped_at_row: Mapping[str, int]) -> GameState:
     """Apply every faction's drop event whose exact ledger row
     (``GameSetup.dropped_at_row``, sourced straight from the raw ledger's
     own ``"<faction> dropped from the game"`` comment) the replay has now
@@ -248,20 +247,24 @@ def _apply_pending_drops(
     sees it as already ``dropped`` too, rather than depending on dict
     iteration order.
 
-    ``upcoming_faction`` (the row about to be applied) gates the
-    turn-order fixup specifically: the drop *comment* is not always the
-    chronologically-last thing a faction does -- corpus
+    The turn-order fixup now fires **unconditionally** whenever the
+    just-dropped faction was ``active_faction`` -- no longer gated to
+    "only when the upcoming row belongs to someone else" (task-14 fix,
+    superseding an earlier revision of this function). That gate was
+    solving the wrong problem: ``commands.pm``'s drop handler sets
+    ``allowed_actions = 0`` and calls ``dismiss_action`` as part of the
+    single atomic drop event, so a dropped faction can never act again,
+    full stop -- there is no "rightful next turn" for even an
+    already-in-flight same-faction row to receive. Corpus
     ``4pLeague_S22_D3L1_G1`` row 32 ("mermaids dropped from the game")
-    is immediately followed by row 33, mermaids' own ``build F4`` (their
-    real last action, which then legitimately fails for an unrelated
-    reason -- wrong home color). Skipping ``active_faction`` forward the
-    instant the drop is detected would steal that faction's own rightful
-    next turn out from under it. Only fix the turn order when the
-    upcoming row belongs to someone *else* -- a same-faction row is left
-    to apply normally (and to close out its own turn via the row's usual
-    ``advance_turn`` call downstream), matching how a dropped faction
-    that still had one unanswered action in flight actually got to
-    finish it in real Perl before the drop took full effect.
+    is immediately followed by row 33, mermaids' own ``build F4``: the
+    row's own ``deltas.parquet`` entry is byte-identical to mermaids'
+    *pre-drop* row 28 -- zero state change, proving real Perl treated it
+    as a no-op, not a legitimately-attempted-then-failed action. This
+    function no longer takes an ``upcoming_faction`` parameter at all
+    (the caller, ``replay_game``, now skips applying a dropped faction's
+    own row's commands entirely -- see its own docstring -- so there is
+    nothing left for a same-faction exception to protect).
     """
     newly_dropped = [
         faction
@@ -282,14 +285,8 @@ def _apply_pending_drops(
     # ``SETUP_BONUS``, before round 1 even starts, e.g.
     # ``4pLeague_S45_D3L4_G1`` row 30). ``advance_turn`` is already a
     # documented no-op outside these three phases, so calling it
-    # unconditionally here is safe. Gated to a *different* upcoming
-    # faction (docstring above) so a same-faction row still gets its own
-    # rightful turn.
-    if (
-        newly_dropped
-        and active_faction(state) in newly_dropped
-        and active_faction(state) != upcoming_faction
-    ):
+    # unconditionally here is safe.
+    if newly_dropped and active_faction(state) in newly_dropped:
         state = advance_turn(state)
     return state
 
@@ -350,6 +347,39 @@ def _apply_row_commands(
     return state
 
 
+def _dedupe_income_commands(cmds: tuple[ParsedCommand, ...]) -> tuple[ParsedCommand, ...]:
+    """Drop a ``cult_income_for_faction`` command that shares its ledger
+    row with a ``gain_cult`` command.
+
+    A raw-ledger anomaly, always on Cultists (29 occurrences corpus-wide,
+    every one this exact shape): task-14 fix, corpus
+    ``4pLeague_S32_D3L3_G7`` rows 187/190 -- row 187 reads ``gain_cult
+    cult=EARTH n1=1; cult_income_for_faction`` (Cultists' reactive
+    leech-bonus resolution, ``leech.py``'s ``[opponent accepted power]``
+    mechanic, bundled with a ``cult_income_for_faction`` in the *same*
+    row) and grants **0** C in the real ledger despite Cultists' EARTH
+    position already being 9 by then; row 190, a lone standalone
+    ``cult_income_for_faction`` a few rows later with no ``gain_cult``
+    alongside it, is where the real +9 C lands. Every one of the 22
+    *other* corpus occurrences of this same bundling shape (this replay
+    harness already passes those clean) also has a bundled row that
+    grants 0 -- consistent with the same real Perl behavior (this bundled
+    entry is not a real income event; likely a crawler/parser artifact of
+    the ledger-writer using a similar entry format for both events),
+    just not previously visible as a bug because those particular games'
+    cult positions happened to make 0 the "expected" value anyway even
+    without this fix. The always-following standalone
+    ``cult_income_for_faction`` row (this engine's own sequencing
+    already computes an identical result whichever of the two rows
+    actually grants, since the position doesn't change between them) is
+    always left untouched -- this only ever removes the bundled one.
+    """
+    has_gain_cult = any(cmd.verb == "gain_cult" for cmd in cmds)
+    if not has_gain_cult:
+        return cmds
+    return tuple(cmd for cmd in cmds if cmd.verb != "cult_income_for_faction")
+
+
 def _ensure_actions_phase_started(state: GameState, cmds: tuple[ParsedCommand, ...]) -> GameState:
     """Symmetric counterpart to the CLEANUP-phase check in
     ``_advance_after_row``: a round's main-track ACTIONS-phase rows only
@@ -377,6 +407,34 @@ def _ensure_actions_phase_started(state: GameState, cmds: tuple[ParsedCommand, .
     return state
 
 
+def _grant_missing_cult_income(state: GameState, all_factions: set[str], cult_income_done: set[str]) -> GameState:
+    """Retroactively grant ``cult_income_for_faction`` (``round_flow.
+    grant_missing_cult_income``) to any *live* faction not yet in
+    ``cult_income_done`` -- called right before either place in
+    :func:`_advance_after_row` that fires ``end_of_round``, so a
+    genuinely-missing ledger row (this function's docstring/module
+    docstring both already establish this is a real, accepted gap, e.g.
+    ``4pLeague_S11_D3L1_G5``'s darklings) doesn't also cost that faction
+    the income itself, just the ledger row that would have shown it.
+    Dropped factions are excluded (a dropped faction is never owed
+    further income at all, matching every other post-drop exclusion in
+    this module).
+
+    Corpus: ``4pLeague_S32_D3L3_G7`` round 3's cult-income batch has
+    Cultists' own real row correctly identified now (`_dedupe_income_
+    commands` above), but Witches' row is separately, genuinely absent
+    from the ledger for this same batch -- without this catch-up,
+    Witches would simply never receive round 3's EARTH-based C income at
+    all, a persistent 1 C shortfall for the rest of the game.
+    """
+    missing = sorted(all_factions - cult_income_done)
+    for faction in missing:
+        if state.factions[faction].dropped:
+            continue
+        state = grant_missing_cult_income(state, faction)
+    return state
+
+
 def _advance_after_row(
     state: GameState,
     faction: str,
@@ -384,6 +442,7 @@ def _advance_after_row(
     other_income_done: set[str],
     cult_income_done: set[str],
 ) -> tuple[GameState, set[str], set[str]]:
+    all_factions = set(state.setup.factions)
     for cmd in cmds:
         if cmd.verb in _PURE_OTHER_INCOME_VERBS and state.phase == Phase.CLEANUP:
             # A round's other_income_for_faction rows only ever start once
@@ -395,7 +454,11 @@ def _advance_after_row(
             # darklings never gets a round 1->2 cult_income_for_faction row
             # at all, so the "wait for every faction" gate below would
             # otherwise never fire and strand the harness in Phase.CLEANUP
-            # for the rest of the game).
+            # for the rest of the game). The grant itself, not just the
+            # phase transition, is still retroactively applied for any
+            # such faction (`_grant_missing_cult_income` above) before
+            # `end_of_round` runs.
+            state = _grant_missing_cult_income(state, all_factions, cult_income_done)
             state = end_of_round(state)
             cult_income_done = set()
             other_income_done = set()
@@ -404,7 +467,6 @@ def _advance_after_row(
         if cmd.verb in _CULT_INCOME_VERBS:
             cult_income_done.add(faction)
 
-    all_factions = set(state.setup.factions)
     if state.phase == Phase.CLEANUP and cult_income_done >= all_factions:
         state = end_of_round(state)
         cult_income_done = set()
@@ -426,6 +488,20 @@ def replay_game(
 ) -> ReplayResult:
     """Replay one game's ledger through ``apply()``, cross-checking every
     row against the ``deltas.parquet`` oracle (module docstring).
+
+    A row whose own faction is *already* ``dropped`` (checked right
+    after ``_apply_pending_drops`` runs for this row, so this also
+    catches the row immediately following that same faction's own drop)
+    skips command application entirely -- ``commands.pm``'s drop handler
+    zeroes ``allowed_actions``/calls ``dismiss_action`` as part of the
+    single atomic drop event, so a dropped faction can never act again in
+    real Perl, even for an already-in-flight client submission (task-14
+    fix, ``_apply_pending_drops``'s own docstring has the full corpus
+    citation and delta-oracle proof: such a row's recorded delta is
+    byte-identical to that faction's pre-drop state -- a genuine no-op,
+    not a legitimately-attempted-then-failed action). Only bookkeeping
+    (row count, oracle comparison) still runs for it; the comparison
+    trivially passes since the state is genuinely unchanged.
     """
     try:
         setup = load_setup(game_id)
@@ -452,15 +528,17 @@ def replay_game(
         # docstrings) -- REPLAY mode, task 14, user adjudication 2026-08-04.
         oracle_cult = delta["cult"] if delta is not None else None
         try:
-            state = _apply_pending_drops(state, row, faction, setup.dropped_at_row)
-            was_income = state.phase == Phase.INCOME
-            state = _ensure_actions_phase_started(state, cmds)
-            if was_income and state.phase != Phase.INCOME:
-                other_income_done = set()
-            state = _apply_row_commands(state, faction, cmds, oracle_cult=oracle_cult)
-            state, other_income_done, cult_income_done = _advance_after_row(
-                state, faction, cmds, other_income_done, cult_income_done
-            )
+            state = _apply_pending_drops(state, row, setup.dropped_at_row)
+            if not state.factions[faction].dropped:
+                was_income = state.phase == Phase.INCOME
+                state = _ensure_actions_phase_started(state, cmds)
+                if was_income and state.phase != Phase.INCOME:
+                    other_income_done = set()
+                apply_cmds = _dedupe_income_commands(cmds)
+                state = _apply_row_commands(state, faction, apply_cmds, oracle_cult=oracle_cult)
+                state, other_income_done, cult_income_done = _advance_after_row(
+                    state, faction, cmds, other_income_done, cult_income_done
+                )
         except Exception as exc:  # noqa: BLE001 -- loud, contextualized failure
             return ReplayResult(
                 game_id=game_id,

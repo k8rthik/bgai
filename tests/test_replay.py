@@ -22,9 +22,21 @@ from dataclasses import replace
 import polars as pl
 import pytest
 
-from bgai.engine.tm.replay import Mismatch, _apply_pending_drops, _row_mismatches, replay_game
+from bgai.data.ledger_parser import Kind, ParsedCommand
+from bgai.engine.tm.replay import (
+    Mismatch,
+    _advance_after_row,
+    _apply_pending_drops,
+    _dedupe_income_commands,
+    _row_mismatches,
+    replay_game,
+)
 from bgai.engine.tm.setup import load_setup
 from bgai.engine.tm.state import GameState, Phase, cult_string, with_faction
+
+
+def _cmd(verb: str, **fields: object) -> ParsedCommand:
+    return ParsedCommand(verb=verb, kind=Kind.BOOKKEEPING, raw=verb, **fields)  # type: ignore[arg-type]
 
 GAME_ID = "4pLeague_S10_D1L1_G1"
 
@@ -146,6 +158,89 @@ def test_missing_cult_income_row_does_not_strand_the_harness_in_cleanup(
     assert result.rows_checked > 300
 
 
+# --------------------------------------------------------------------------
+# Task 14: Cultists' bundled gain_cult + cult_income_for_faction row is a
+# raw-ledger duplicate; a batch missing a different faction's own row must
+# still grant that faction its income before end_of_round fires.
+# --------------------------------------------------------------------------
+
+
+def test_dedupe_income_commands_drops_cult_income_bundled_with_gain_cult() -> None:
+    """Corpus ``4pLeague_S32_D3L3_G7`` row 187 shape (``_dedupe_income_
+    commands``'s own docstring, full citation trail): a ``cult_income_
+    for_faction`` command sharing its row with a ``gain_cult`` is a
+    raw-ledger duplicate (always Cultists, 29 corpus occurrences, this
+    exact bundling) and must be dropped -- every other command in the row
+    is untouched.
+    """
+    cmds = (_cmd("gain_cult", cult="EARTH", n1=1), _cmd("cult_income_for_faction"))
+    result = _dedupe_income_commands(cmds)
+    assert result == (_cmd("gain_cult", cult="EARTH", n1=1),)
+
+
+def test_dedupe_income_commands_leaves_a_standalone_cult_income_row_alone() -> None:
+    cmds = (_cmd("cult_income_for_faction"),)
+    assert _dedupe_income_commands(cmds) == cmds
+
+
+def test_dedupe_income_commands_leaves_other_income_alone_even_with_gain_cult() -> None:
+    """The bundling anomaly is specific to ``cult_income_for_faction`` --
+    ``other_income_for_faction`` is never affected, even sharing a row
+    with ``gain_cult`` (not an observed corpus shape, but the rule must
+    not overreach to it regardless)."""
+    cmds = (_cmd("gain_cult", cult="EARTH", n1=1), _cmd("other_income_for_faction"))
+    assert _dedupe_income_commands(cmds) == cmds
+
+
+def _round_flow_state() -> GameState:
+    s = GameState.initial(load_setup(GAME_ID))
+    # score_tiles[1] (round 2's own tile): EARTH, req 1, income {"C": 1}.
+    return replace(s, round=2, phase=Phase.CLEANUP)
+
+
+def test_advance_after_row_grants_missing_cult_income_before_early_end_of_round() -> None:
+    """Corpus ``4pLeague_S32_D3L3_G7`` shape: Witches' own
+    ``cult_income_for_faction`` row is genuinely absent from its round's
+    batch. The *other* three factions' rows arrive, then a different
+    faction's ``other_income_for_faction`` row (proof the cult-income
+    phase ended, module docstring) forces ``end_of_round`` early --
+    Witches must still receive that round's cult income
+    (round 2's tile here: EARTH, req 1, income ``{"C": 1}``) at that
+    point, not lose it outright for lack of a ledger row.
+    """
+    s = _round_flow_state()
+    factions = dict(s.factions)
+    factions["darklings"] = replace(factions["darklings"], coins=0)
+    s = replace(s, factions=factions, cults={**s.cults, "darklings": {**s.cults["darklings"], "EARTH": 4}})
+
+    other_income_done: set[str] = set()
+    cult_income_done: set[str] = {"engineers", "nomads", "mermaids"}  # darklings' row never arrives
+    s2, other_income_done, cult_income_done = _advance_after_row(
+        s, "engineers", (_cmd("other_income_for_faction"),), other_income_done, cult_income_done
+    )
+    assert s2.factions["darklings"].coins == 4  # floor(4/1) * 1 C, granted despite no ledger row
+    assert s2.phase == Phase.INCOME  # end_of_round did fire
+    assert cult_income_done == set()
+    assert other_income_done == {"engineers"}
+
+
+def test_advance_after_row_skips_missing_cult_income_for_a_dropped_faction() -> None:
+    """A dropped faction is never owed further income at all (every other
+    post-drop exclusion in this module agrees) -- the catch-up must not
+    grant it one just because its row is (unsurprisingly) also absent.
+    """
+    s = _round_flow_state()
+    factions = dict(s.factions)
+    factions["darklings"] = replace(factions["darklings"], coins=0, dropped=True)
+    s = replace(s, factions=factions, cults={**s.cults, "darklings": {**s.cults["darklings"], "EARTH": 4}})
+
+    cult_income_done: set[str] = {"engineers", "nomads", "mermaids"}
+    s2, _, _ = _advance_after_row(
+        s, "engineers", (_cmd("other_income_for_faction"),), set(), cult_income_done
+    )
+    assert s2.factions["darklings"].coins == 0  # not granted -- dropped
+
+
 def test_seat_order_rotation_without_variable_turn_order(
     frames: tuple[pl.DataFrame, pl.DataFrame],
 ) -> None:
@@ -176,7 +271,7 @@ def test_apply_pending_drops_leaves_a_not_yet_dropped_faction_alone() -> None:
     state = GameState.initial(load_setup(GAME_ID))
     fs = replace(state.factions["darklings"], bonus="BON1")
     state = with_faction(state, "darklings", fs)
-    state2 = _apply_pending_drops(state, row=50, upcoming_faction="engineers", dropped_at_row={"darklings": 60})
+    state2 = _apply_pending_drops(state, row=50, dropped_at_row={"darklings": 60})
     assert state2.factions["darklings"].bonus == "BON1"
     assert not state2.factions["darklings"].dropped
 
@@ -197,42 +292,32 @@ def test_apply_pending_drops_releases_bonus_and_marks_dropped_once_past_the_drop
     state = GameState.initial(load_setup(GAME_ID))
     fs = replace(state.factions["darklings"], bonus="BON1")
     state = with_faction(state, "darklings", fs)
-    state2 = _apply_pending_drops(state, row=61, upcoming_faction="engineers", dropped_at_row={"darklings": 60})
+    state2 = _apply_pending_drops(state, row=61, dropped_at_row={"darklings": 60})
     assert state2.factions["darklings"].bonus is None
     assert state2.factions["darklings"].dropped
 
 
-def test_apply_pending_drops_does_not_steal_the_dropped_factions_own_next_row() -> None:
+def test_apply_pending_drops_advances_away_even_when_the_dropped_factions_own_row_is_next() -> None:
     """The drop *comment* is not always the chronologically-last thing a
     faction does -- corpus ``4pLeague_S22_D3L1_G1`` row 32 ("mermaids
     dropped from the game") is immediately followed by row 33, mermaids'
-    own ``build F4`` (their real last action, which then legitimately
-    fails for an unrelated reason -- wrong home color). If the very next
-    row still belongs to the just-dropped faction, ``_apply_pending_drops``
-    must not steal that turn by advancing ``active_index`` away from it
-    first (``upcoming_faction`` docstring, full citation trail).
+    own ``build F4``. Task-14 fix (superseding an earlier revision that
+    special-cased this): that row's own ``deltas.parquet`` entry proved
+    byte-identical to mermaids' pre-drop state -- a genuine no-op in real
+    Perl, not a legitimately-attempted action -- so there is no "rightful
+    next turn" left to protect. ``_apply_pending_drops`` now advances
+    ``active_index`` away from a just-dropped faction unconditionally,
+    even when the very next row still names that same (now-dropped)
+    faction (``replay_game`` is what actually skips applying that row's
+    commands, per its own docstring -- not this function).
     """
     state = GameState.initial(load_setup(GAME_ID))
     state = replace(
         state, phase=Phase.SETUP_DWELLINGS, turn_order=("darklings", "engineers"), active_index=0
     )
-    state2 = _apply_pending_drops(
-        state, row=61, upcoming_faction="darklings", dropped_at_row={"darklings": 60}
-    )
+    state2 = _apply_pending_drops(state, row=61, dropped_at_row={"darklings": 60})
     assert state2.factions["darklings"].dropped
-    assert state2.active_index == 0  # not advanced away -- darklings still gets this row
-
-
-def test_apply_pending_drops_advances_away_once_a_different_faction_is_next() -> None:
-    state = GameState.initial(load_setup(GAME_ID))
-    state = replace(
-        state, phase=Phase.SETUP_DWELLINGS, turn_order=("darklings", "engineers"), active_index=0
-    )
-    state2 = _apply_pending_drops(
-        state, row=61, upcoming_faction="engineers", dropped_at_row={"darklings": 60}
-    )
-    assert state2.factions["darklings"].dropped
-    assert state2.active_index == 1  # advanced past darklings to engineers
+    assert state2.active_index == 1  # advanced past darklings to engineers regardless
 
 
 def test_dropped_faction_is_excluded_from_turn_order(
