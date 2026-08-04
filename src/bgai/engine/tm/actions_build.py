@@ -129,7 +129,14 @@ from bgai.engine.tm.towns import (
 )
 
 _UPGRADE_FROM: dict[str, str] = {"TP": "D", "TE": "TP", "SH": "TP", "SA": "TE"}
-_COST_RES: dict[str, str] = {"W": "workers", "C": "coins"}
+# "P" (priests) is Fakirs' carpet-flight teleport cost (factions_data.py's
+# TeleportTrack for "fakirs": cost=({"P": 1}, {"P": 1}), kind="carpet") --
+# every other cost this module pays is W/C, so "P" was missing here until
+# handle_build started routing Dwarves/Fakirs teleport-crossing fees
+# through this same helper (task-14 fix): a Fakirs build reaching a
+# carpet-only hex raised a bare KeyError('P') instead of ever charging the
+# priest.
+_COST_RES: dict[str, str] = {"W": "workers", "C": "coins", "P": "priests"}
 _FAV5_TOWN_SIZE_DELTA = FAVOR_TILES["FAV5"].passive.get("TOWN_SIZE", 0)
 _TOWN_CULT_GAIN_KEYS = ("FIRE", "WATER", "EARTH", "AIR")
 

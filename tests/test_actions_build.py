@@ -267,6 +267,30 @@ def test_build_pays_teleport_fee_again_in_a_later_turn_for_the_same_hex() -> Non
     assert s2.hexes[b].building == "D"
 
 
+def test_build_across_carpet_pays_priest_teleport_cost() -> None:
+    """Task-14 fix: Fakirs' carpet-flight teleport cost is priests, not
+    workers (``factions_data.py``'s ``TeleportTrack`` for "fakirs":
+    ``cost=({"P": 1}, {"P": 1})``, ``kind="carpet"``) -- ``handle_build``'s
+    ``_COST_RES`` table only had ``W``/``C`` until this fix (added for
+    Dwarves' tunnel, task-13), so a Fakirs build reaching a carpet-only
+    hex raised a bare ``KeyError('P')`` instead of ever charging the
+    priest. Corpus: ``4pLeague_S13_D2L2_G2`` row 198 and 50+ other games,
+    every one of them a Fakirs build."""
+    a, b = _skip_chain()
+    fakirs = replace(FactionState.initial(FACTIONS["fakirs"]), priests=2)
+    s = with_faction(_state(), "fakirs", fakirs)
+    s = _place(s, "fakirs", a, "D")
+    s = _clear(s, "fakirs", b)
+    before = s.factions["fakirs"]
+    s2 = handle_build(s, "fakirs", _cmd("build", loc=b))
+    after = s2.factions["fakirs"]
+    d_cost = FACTIONS["fakirs"].buildings["D"].cost
+    assert after.priests == before.priests - 1  # carpet's own P cost (teleport_level 0)
+    assert after.workers == before.workers - d_cost["W"]
+    assert after.coins == before.coins - d_cost["C"]
+    assert s2.hexes[b].building == "D"
+
+
 def test_build_occupied_hex_rejected() -> None:
     s = _state()
     s = _place(s, "engineers", ANCHOR, "D")
