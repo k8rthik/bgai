@@ -217,6 +217,55 @@ def _row_mismatches(
 # --------------------------------------------------------------------------
 
 
+def _dropped_last_row(moves_df: pl.DataFrame, game_id: str, dropped_factions: frozenset[str]) -> dict[str, int]:
+    """The last ledger ``row`` each dropped faction ever appears in, for
+    ``_release_finished_drops`` below -- precomputed once per game (not
+    inferrable from a single row in isolation)."""
+    if not dropped_factions:
+        return {}
+    game_moves = moves_df.filter(
+        (pl.col("game_id") == game_id) & (pl.col("faction").is_in(list(dropped_factions)))
+    )
+    return {
+        faction: int(sub["row"].max())
+        for faction, sub in game_moves.group_by("faction", maintain_order=True)
+    }
+
+
+def _release_finished_drops(state: GameState, row: int, dropped_last_row: dict[str, int]) -> GameState:
+    """Release a dropped faction's held bonus tile (and mark it passed for
+    the round-robin) as soon as the ledger has moved *past* the last row
+    it ever appears in -- proactively, regardless of whose turn it
+    currently is, rather than waiting for ``_skip_dropped_factions``'s
+    reactive turn-order-mismatch trigger below.
+
+    Timing matters here in a way it doesn't for ``_skip_dropped_factions``:
+    ``round_flow._bumped_bonus_coins`` only accretes a coin onto a bonus
+    tile *not currently held by anyone* each round-end, so a tile the
+    real drop event already released stays wrongly "held" (accruing
+    nothing) for every round between the real drop and whenever this
+    harness's own detection finally catches up -- undershooting the pool
+    by exactly that many coins for whoever eventually takes it. Corpus:
+    several games where a *different* (non-dropped) faction later
+    hard-errors "cannot afford N C" taking an upgrade whose bonus-tile-
+    funded coins came up short for this reason. Precomputing the dropped
+    faction's actual last ledger appearance (``_dropped_last_row``) and
+    releasing right after the ledger crosses it -- instead of only once
+    some other faction's turn-order mismatch reveals the drop -- closes
+    most of that gap; it is still not necessarily the *exact* real-Perl
+    drop row (no ledger verb pinpoints that), just the earliest row this
+    harness can prove the drop by.
+    """
+    for faction, last_row in dropped_last_row.items():
+        if row <= last_row:
+            continue
+        fs = state.factions.get(faction)
+        if fs is None or (fs.passed and fs.bonus is None):
+            continue
+        state = with_faction(state, faction, replace(fs, passed=True, bonus=None))
+    return state
+
+
 def _skip_dropped_factions(state: GameState, faction: str) -> GameState:
     """A dropped faction (``GameSetup.dropped_factions`` docstring) leaves
     no further ledger trace of its own once it drops -- no explicit
@@ -402,6 +451,7 @@ def replay_game(
 
     game_moves = moves_df.filter(pl.col("game_id") == game_id).sort(["row", "seq"])
     delta_lookup = _delta_lookup(deltas_df, game_id)
+    dropped_last_row = _dropped_last_row(moves_df, game_id, setup.dropped_factions)
 
     mismatches: list[Mismatch] = []
     rows_checked = 0
@@ -411,6 +461,7 @@ def replay_game(
     for row, faction, cmds in _iter_rows(game_moves):
         raw = "; ".join(cmd.raw for cmd in cmds)
         try:
+            state = _release_finished_drops(state, row, dropped_last_row)
             was_income = state.phase == Phase.INCOME
             state = _ensure_actions_phase_started(state, cmds)
             if was_income and state.phase != Phase.INCOME:

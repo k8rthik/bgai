@@ -17,12 +17,14 @@ games defensively for whichever corpus slice a future change to
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import polars as pl
 import pytest
 
-from bgai.engine.tm.replay import Mismatch, _row_mismatches, replay_game
+from bgai.engine.tm.replay import Mismatch, _release_finished_drops, _row_mismatches, replay_game
 from bgai.engine.tm.setup import load_setup
-from bgai.engine.tm.state import GameState, cult_string
+from bgai.engine.tm.state import GameState, cult_string, with_faction
 
 GAME_ID = "4pLeague_S10_D1L1_G1"
 
@@ -164,6 +166,35 @@ def test_seat_order_rotation_without_variable_turn_order(
     assert result.error is None, result.error
     assert result.mismatches == ()
     assert result.rows_checked > 300
+
+
+def test_release_finished_drops_leaves_a_still_playing_faction_alone() -> None:
+    """A dropped faction hasn't necessarily dropped *yet* by any given
+    row -- ``_release_finished_drops`` only releases it once the ledger
+    has moved strictly past its last-ever appearance, never before."""
+    state = GameState.initial(load_setup(GAME_ID))
+    fs = replace(state.factions["darklings"], bonus="BON1")
+    state = with_faction(state, "darklings", fs)
+    state2 = _release_finished_drops(state, row=50, dropped_last_row={"darklings": 60})
+    assert state2.factions["darklings"].bonus == "BON1"
+    assert not state2.factions["darklings"].passed
+
+
+def test_release_finished_drops_releases_bonus_and_marks_passed_once_past_last_row() -> None:
+    """Task-14 fix: proactively releases a dropped faction's held bonus
+    tile (and marks it passed) as soon as the ledger crosses its last-
+    ever appearance -- earlier than ``_skip_dropped_factions``'s reactive
+    trigger, which only fires once *another* faction's turn-order
+    mismatch reveals the drop. Matters for ``round_flow._bumped_bonus_
+    coins`` timing (that function's own citation trail): a tile still
+    marked "held" too long accrues no coins for the rounds in between.
+    """
+    state = GameState.initial(load_setup(GAME_ID))
+    fs = replace(state.factions["darklings"], bonus="BON1")
+    state = with_faction(state, "darklings", fs)
+    state2 = _release_finished_drops(state, row=61, dropped_last_row={"darklings": 60})
+    assert state2.factions["darklings"].bonus is None
+    assert state2.factions["darklings"].passed
 
 
 def test_dropped_faction_is_skipped_in_the_round_robin(
