@@ -85,6 +85,16 @@ _ORDER_EXEMPT_VERBS = frozenset(
         # faction's `decline`/capped `leech` row, so it can land on a ledger
         # row where Cultists themselves are not `active_faction`.
         "cultist_leech_bonus",
+        # `-N<cult>` paying off an outstanding `LOSE_CULT` obligation
+        # (task-14 fix, `loose-lose-cult` option -- commands.pm ~70-72:
+        # without the option, `require_action`/`start_full_move` forces
+        # payment as a precondition of the faction's *own* next move
+        # (acting.pm ~230-231, "Must pay N cult steps before next move");
+        # with it, that requirement is relaxed and the debt can be settled
+        # whenever, including a row sandwiched inside some *other*
+        # faction's turn -- corpus `4pLeague_S8_D3L3_G2` row 371, cultists'
+        # `lose_cult` lands while mermaids is `active_faction`).
+        "lose_cult",
     }
 )
 _LEECH_ANSWER_VERBS = frozenset({"leech", "decline"})
@@ -95,6 +105,17 @@ _LEECH_ANSWER_VERBS = frozenset({"leech", "decline"})
 # queue, so this needs the same anywhere-in-queue exemption as leech/decline,
 # not just an active_faction()-is-literally-me check.
 _CULT_CHOICE_ANSWER_VERBS = frozenset({"gain_cult"})
+# `gain_town`/`gain_favor` answering their own outstanding pending, when it
+# lands *outside* the triggering build's own turn -- task-14 fix,
+# `loose-lose-cult` corpus row 371 (`4pLeague_S8_D3L3_G2`): cultists'
+# `lose_cult 1; gain_town TW8; gain_cult 1` all lands in one ledger row
+# while mermaids is `active_faction`, since `lose_cult` (just exempted
+# above) can settle whenever under this option, and everything bundled
+# alongside it in the same row rides along. Every prior corpus game these
+# verbs were exercised against answered its pending within the same turn
+# as the triggering build (active_faction already matched), which is why
+# this exemption was never needed before.
+_QUEUED_PENDING_ANSWER_VERBS = frozenset({"gain_town", "gain_favor"})
 
 
 def _has_queued_pending_of_kind(state: GameState, faction: str, kind: str) -> bool:
@@ -132,6 +153,10 @@ def apply(state: GameState, faction: str, cmd: ParsedCommand) -> GameState:
         or (
             cmd.verb in _CULT_CHOICE_ANSWER_VERBS
             and _has_queued_pending_of_kind(state, faction, "cult_choice")
+        )
+        or (
+            cmd.verb in _QUEUED_PENDING_ANSWER_VERBS
+            and _has_queued_pending_of_kind(state, faction, cmd.verb)
         )
     )
     if not exempt and faction != active_faction(state):
@@ -406,7 +431,30 @@ def handle_gain_cult(state: GameState, faction: str, cmd: ParsedCommand) -> Game
 
 
 def handle_lose_cult(state: GameState, faction: str, cmd: ParsedCommand) -> GameState:
-    """Plain retreat: no power refund for thresholds already earned."""
+    """Plain retreat: no power refund for the 3/5/7 thresholds already
+    earned (those only ever fire on an *upward* crossing,
+    ``resources.pm``'s ``maybe_gain_power_from_cult`` -- a loss can never
+    cross one of those going the wrong way).
+
+    Dropping off the 10-slot is the one exception: ``maybe_gain_power_
+    from_cult``'s own last branch, ``if ($old_value == 10 && $new_value <
+    10) { adjust_resource $faction, 'KEY', 1; for (other factions) {
+    $_->{"MAX_$cult"} = 10; } }`` -- losing back below 10 refunds the key
+    spent to reach it and reopens the slot for everyone (``cult_10``
+    reset to ``None``), so a later gain back up to 10 (this same turn or
+    a future one) can freely re-attempt it rather than being permanently
+    capped at 9 by a stale "still held" marker. Missing this was a real
+    engine bug, not a documented deferral -- an earlier revision's own
+    docstring here claimed "no power refund" outright, which is only
+    true for the 3/5/7 thresholds. Corpus (``loose-cult-loss`` option,
+    task-14 fix): ``4pLeague_S5_D3L2_G3`` row 351, mermaids already hold
+    WATER's 10-slot, ``lose_cult 1`` (9) then ``gain_cult 1`` (back to
+    10, same row) -- without the refund+reopen, the regain is wrongly
+    capped at 9 (stale ``cult_10``), permanently short 3 power and one
+    key versus the real ledger, eventually surfacing as a hard "cannot
+    spend" power error many rows later once that missing key/power
+    compounds.
+    """
     assert cmd.cult is not None
     cult = cmd.cult
     steps = cmd.n1 if cmd.n1 is not None else 1
@@ -415,7 +463,16 @@ def handle_lose_cult(state: GameState, faction: str, cmd: ParsedCommand) -> Game
 
     new_cults = {f: dict(v) for f, v in state.cults.items()}
     new_cults[faction][cult] = new_value
-    return replace(state, cults=new_cults)
+    new_state = replace(state, cults=new_cults)
+
+    if old_value == 10 and new_value < 10:
+        fs = new_state.factions[faction]
+        new_state = with_faction(new_state, faction, replace(fs, keys=fs.keys + 1))
+        new_cult_10 = dict(new_state.cult_10)
+        new_cult_10[cult] = None
+        new_state = replace(new_state, cult_10=new_cult_10)
+
+    return new_state
 
 
 def handle_send(state: GameState, faction: str, cmd: ParsedCommand) -> GameState:

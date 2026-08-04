@@ -347,6 +347,61 @@ def test_lose_cult_does_not_go_below_zero() -> None:
     assert s2.cults["darklings"]["WATER"] == 0
 
 
+def test_lose_cult_from_10_refunds_a_key_and_reopens_the_slot() -> None:
+    """Task-14 fix, ``resources.pm`` ``maybe_gain_power_from_cult``'s last
+    branch (``if old_value==10 and new_value<10``): dropping off a cult
+    track's 10-slot refunds the key spent to reach it and reopens the
+    slot (``cult_10`` reset to ``None``) so a later regain isn't
+    permanently capped at 9 by a stale "still held" marker. Corpus
+    (``loose-cult-loss`` option): ``4pLeague_S5_D3L2_G3`` row 351,
+    mermaids already hold WATER's 10-slot, ``lose_cult 1`` then
+    ``gain_cult 1`` back to 10 in the same row."""
+    s = _as_active(_state(), "darklings")
+    cults = {**s.cults, "darklings": {**s.cults["darklings"], "WATER": 10}}
+    s = replace(s, cults=cults, cult_10={**s.cult_10, "WATER": "darklings"})
+    before_keys = s.factions["darklings"].keys
+    cmd = _cmd("lose_cult", kind=Kind.BOOKKEEPING, cult="WATER", n1=1)
+    s2 = apply(s, "darklings", cmd)
+    assert s2.cults["darklings"]["WATER"] == 9
+    assert s2.cult_10["WATER"] is None
+    assert s2.factions["darklings"].keys == before_keys + 1
+
+
+def test_lose_cult_below_10_does_not_refund_a_key() -> None:
+    s = _as_active(_state(), "darklings")  # darklings WATER starts at 1
+    before_keys = s.factions["darklings"].keys
+    cmd = _cmd("lose_cult", kind=Kind.BOOKKEEPING, cult="WATER", n1=1)
+    s2 = apply(s, "darklings", cmd)
+    assert s2.factions["darklings"].keys == before_keys
+
+
+def test_lose_cult_is_exempt_from_the_turn_order_gate() -> None:
+    """Task-14 fix, ``loose-lose-cult`` option (``commands.pm`` ~70-72):
+    without it, ``LOSE_CULT`` must be paid before the faction's own next
+    move; with it, the debt can be settled whenever, including a row
+    sandwiched inside a *different* faction's turn -- corpus
+    ``4pLeague_S8_D3L3_G2`` row 371, cultists' ``lose_cult`` lands while
+    mermaids is ``active_faction``."""
+    s = _as_active(_state(), "mermaids")
+    assert active_faction(s) != "darklings"
+    cmd = _cmd("lose_cult", kind=Kind.BOOKKEEPING, cult="WATER", n1=1)
+    s2 = apply(s, "darklings", cmd)  # would raise "acted out of turn" pre-fix
+    assert s2.cults["darklings"]["WATER"] == 0
+
+
+def test_gain_town_and_gain_favor_are_exempt_when_a_pending_is_queued() -> None:
+    """The rest of a ``loose-lose-cult`` row settling an out-of-turn debt
+    can bundle a ``gain_town``/``gain_favor`` answering its own already-
+    queued pending -- corpus ``4pLeague_S8_D3L3_G2`` row 371:
+    ``lose_cult 1; gain_town TW8; gain_cult 1``, all while mermaids is
+    ``active_faction``."""
+    s = _as_active(_state(), "mermaids")
+    s = push_pending(s, PendingDecision(faction="darklings", kind="gain_town", source="cluster"))
+    cmd = _cmd("gain_town", kind=Kind.BOOKKEEPING, tile="TW3")
+    s2 = apply(s, "darklings", cmd)  # would raise "acted out of turn" pre-fix
+    assert not any(p.kind == "gain_town" for p in s2.pending)
+
+
 # --------------------------------------------------------------------------
 # lose_resource / lose_spade / lose_marker / convert_marker
 # --------------------------------------------------------------------------
