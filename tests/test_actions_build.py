@@ -51,6 +51,17 @@ def _triangle() -> tuple[str, str, str]:
 ANCHOR, TARGET, NEIGHBOR = _triangle()
 
 
+def _far_hex() -> str:
+    """A land hex not adjacent to ``ANCHOR`` -- used to prove a marker's
+    direct-adjacency requirement actually rejects a non-adjacent hex
+    (``test_actions_power.py``'s identically-named helper)."""
+    land = set(BOARD.land_hexes())
+    for h in sorted(land):
+        if h != ANCHOR and h not in BOARD.adjacent.get(ANCHOR, frozenset()):
+            return h
+    raise AssertionError("no suitable far hex found")
+
+
 def _place(
     state: GameState, faction: str, hex_key: str, building: str, color: str | None = None
 ) -> GameState:
@@ -125,6 +136,40 @@ def test_build_wrong_color_with_enough_spades_auto_transforms() -> None:
     assert s2.hexes[TARGET].color == FACTIONS["engineers"].color
     assert s2.hexes[TARGET].building == "D"
     assert after.spades_available == 1  # 2 banked - 1 spent
+
+
+def test_build_with_free_tf_marker_is_free_and_needs_direct_adjacency() -> None:
+    """Nomads' ACTN (Sandstorm) queues a ``free_tf`` marker; a ``build``'s
+    own implicit transform (module docstring) consumes it too, not just a
+    bare ``transform`` row (``actions_power.py``'s own ACTN tests cover
+    that sibling path) -- task-13 report, reference-game row 174: "action
+    ACTN. build F2"."""
+    s = _state()
+    s = _place(s, "nomads", ANCHOR, "D")
+    off_color = "red" if FACTIONS["nomads"].color != "red" else "blue"
+    hexes = dict(s.hexes)
+    hexes[TARGET] = replace(hexes[TARGET], color=off_color, building=None, owner=None)
+    s = replace(s, hexes=hexes)
+    s = replace(s, pending=(PendingDecision(faction="nomads", kind="free_tf", amount=1),))
+    before = s.factions["nomads"]
+    s2 = handle_build(s, "nomads", _cmd("build", loc=TARGET))
+    assert s2.hexes[TARGET].color == FACTIONS["nomads"].color
+    assert s2.hexes[TARGET].building == "D"
+    assert s2.factions["nomads"].spades_available == before.spades_available  # free, untouched
+    assert not any(p.kind == "free_tf" for p in s2.pending)
+
+
+def test_build_with_free_tf_marker_rejects_non_adjacent_hex() -> None:
+    s = _state()
+    s = _place(s, "nomads", ANCHOR, "D")
+    far = _far_hex()
+    off_color = "red" if FACTIONS["nomads"].color != "red" else "blue"
+    hexes = dict(s.hexes)
+    hexes[far] = replace(hexes[far], color=off_color, building=None, owner=None)
+    s = replace(s, hexes=hexes)
+    s = replace(s, pending=(PendingDecision(faction="nomads", kind="free_tf", amount=1),))
+    with pytest.raises(EngineError):
+        handle_build(s, "nomads", _cmd("build", loc=far))
 
 
 def test_build_occupied_hex_rejected() -> None:

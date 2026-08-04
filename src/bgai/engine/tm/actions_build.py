@@ -214,6 +214,24 @@ def _apply_spade_gain_bonus(
     return fs
 
 
+def _directly_adjacent_to_own_building(state: GameState, faction: str, hex_key: str) -> bool:
+    """``actions_terraform.py``'s identically-named helper, duplicated
+    locally (same no-cross-coupling rationale that module documents for
+    its own near-duplicate helpers): ``hex_key`` must be directly adjacent
+    to one of ``faction``'s own building hexes via **plain board
+    adjacency only, bridges excluded** (``map.pm`` 641-651 -- see that
+    module's docstring for the full citation). Needed here because a live
+    ``free_tf`` marker (Nomads' ACTN Sandstorm) can make an ordinary
+    ``build``'s own implicit transform free too, not just a bare
+    ``transform`` row (task-13 report, reference-game row 174: "action
+    ACTN. build F2").
+    """
+    fs = state.factions[faction]
+    own = frozenset().union(*fs.buildings.values()) if fs.buildings else frozenset()
+    board = base_board()
+    return any(hex_key in board.adjacent.get(b, frozenset()) for b in own)
+
+
 def _favor_tile_vp(fs: FactionState, type_: str) -> int:
     """Port of ``scoring.pm``'s ``maybe_score_favor_tile`` (lines 32-47):
     sum, over every favor tile ``fs`` currently holds, that tile's
@@ -458,6 +476,7 @@ def handle_build(state: GameState, faction: str, cmd: ParsedCommand) -> GameStat
             cmd=cmd,
         )
 
+    free_tf_index: int | None = None
     if tf_needed:
         # command_build's own implicit "transform $where to $color" dispatch
         # (commands.pm 213-219, module docstring) -- an ordinary (non-FREE_D)
@@ -467,16 +486,36 @@ def handle_build(state: GameState, faction: str, cmd: ParsedCommand) -> GameStat
         # reference-game row 58, "burn 6. action ACT6. transform G2. build
         # F5" -- F5 is brown, 1 spade from red->yellow's distance away, and
         # the only explicit `transform` in the row targets G2, a different
-        # hex prepped for a later turn; task-13 report).
-        cost = hooks_for(faction).spade_transform_cost(state, faction, hex_state.color, color)
-        if cost > fs.spades_available:
-            raise EngineError(
-                f"{hex_key} needs {cost} spades to transform to {faction}'s home color "
-                f"{color} ({faction} has {fs.spades_available})",
-                state=state,
-                faction=faction,
-                cmd=cmd,
-            )
+        # hex prepped for a later turn; task-13 report). Since Perl's
+        # internal dispatch goes through the *same* `command_transform`,
+        # a live `free_tf` marker (Nomads' ACTN Sandstorm) makes that
+        # implicit transform free too, gated by direct hex adjacency
+        # instead of spades_available/reachability (reference-game row
+        # 174: "action ACTN. build F2" -- see actions_terraform.py's
+        # `handle_transform` for the sibling bare-`transform` path this
+        # mirrors, and `_directly_adjacent_to_own_building`'s docstring
+        # for why it's duplicated here rather than imported).
+        free_tf_index = _find_pending_optional(state, faction, "free_tf")
+        if free_tf_index is not None:
+            if not _directly_adjacent_to_own_building(state, faction, hex_key):
+                raise EngineError(
+                    f"{hex_key} is not directly adjacent to a {faction} building "
+                    "(ACTN requires direct hex adjacency)",
+                    state=state,
+                    faction=faction,
+                    cmd=cmd,
+                )
+            cost = 0
+        else:
+            cost = hooks_for(faction).spade_transform_cost(state, faction, hex_state.color, color)
+            if cost > fs.spades_available:
+                raise EngineError(
+                    f"{hex_key} needs {cost} spades to transform to {faction}'s home color "
+                    f"{color} ({faction} has {fs.spades_available})",
+                    state=state,
+                    faction=faction,
+                    cmd=cmd,
+                )
         fs = replace(fs, spades_available=fs.spades_available - cost)
         hex_state = replace(hex_state, color=color)
 
@@ -492,6 +531,8 @@ def handle_build(state: GameState, faction: str, cmd: ParsedCommand) -> GameStat
 
     if free_d_index is not None:
         new_state = pop_pending(new_state, free_d_index)
+    if free_tf_index is not None:
+        new_state = pop_pending(new_state, free_tf_index)
 
     if not setup:
         new_state = leech.queue_leech(new_state, faction, hex_key)
