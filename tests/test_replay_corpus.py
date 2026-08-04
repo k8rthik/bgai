@@ -133,7 +133,7 @@ def _replay_to_final_state(game_id: str, moves_df: pl.DataFrame) -> GameState:
     other_income_done: set[str] = set()
     cult_income_done: set[str] = set()
     for row, faction, cmds in _iter_rows(game_moves):
-        state = _apply_pending_drops(state, row, setup.dropped_at_row)
+        state = _apply_pending_drops(state, row, faction, setup.dropped_at_row)
         was_income = state.phase == Phase.INCOME
         state = _ensure_actions_phase_started(state, cmds)
         if was_income and state.phase != Phase.INCOME:

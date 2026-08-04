@@ -218,7 +218,9 @@ def _row_mismatches(
 # --------------------------------------------------------------------------
 
 
-def _apply_pending_drops(state: GameState, row: int, dropped_at_row: Mapping[str, int]) -> GameState:
+def _apply_pending_drops(
+    state: GameState, row: int, upcoming_faction: str, dropped_at_row: Mapping[str, int]
+) -> GameState:
     """Apply every faction's drop event whose exact ledger row
     (``GameSetup.dropped_at_row``, sourced straight from the raw ledger's
     own ``"<faction> dropped from the game"`` comment) the replay has now
@@ -245,6 +247,21 @@ def _apply_pending_drops(state: GameState, row: int, dropped_at_row: Mapping[str
     row is also ``< row`` (both dropped within the same processed-row gap)
     sees it as already ``dropped`` too, rather than depending on dict
     iteration order.
+
+    ``upcoming_faction`` (the row about to be applied) gates the
+    turn-order fixup specifically: the drop *comment* is not always the
+    chronologically-last thing a faction does -- corpus
+    ``4pLeague_S22_D3L1_G1`` row 32 ("mermaids dropped from the game")
+    is immediately followed by row 33, mermaids' own ``build F4`` (their
+    real last action, which then legitimately fails for an unrelated
+    reason -- wrong home color). Skipping ``active_faction`` forward the
+    instant the drop is detected would steal that faction's own rightful
+    next turn out from under it. Only fix the turn order when the
+    upcoming row belongs to someone *else* -- a same-faction row is left
+    to apply normally (and to close out its own turn via the row's usual
+    ``advance_turn`` call downstream), matching how a dropped faction
+    that still had one unanswered action in flight actually got to
+    finish it in real Perl before the drop took full effect.
     """
     newly_dropped = [
         faction
@@ -265,8 +282,14 @@ def _apply_pending_drops(state: GameState, row: int, dropped_at_row: Mapping[str
     # ``SETUP_BONUS``, before round 1 even starts, e.g.
     # ``4pLeague_S45_D3L4_G1`` row 30). ``advance_turn`` is already a
     # documented no-op outside these three phases, so calling it
-    # unconditionally here is safe.
-    if newly_dropped and active_faction(state) in newly_dropped:
+    # unconditionally here is safe. Gated to a *different* upcoming
+    # faction (docstring above) so a same-faction row still gets its own
+    # rightful turn.
+    if (
+        newly_dropped
+        and active_faction(state) in newly_dropped
+        and active_faction(state) != upcoming_faction
+    ):
         state = advance_turn(state)
     return state
 
@@ -412,7 +435,7 @@ def replay_game(
     for row, faction, cmds in _iter_rows(game_moves):
         raw = "; ".join(cmd.raw for cmd in cmds)
         try:
-            state = _apply_pending_drops(state, row, setup.dropped_at_row)
+            state = _apply_pending_drops(state, row, faction, setup.dropped_at_row)
             was_income = state.phase == Phase.INCOME
             state = _ensure_actions_phase_started(state, cmds)
             if was_income and state.phase != Phase.INCOME:

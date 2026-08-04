@@ -24,7 +24,7 @@ import pytest
 
 from bgai.engine.tm.replay import Mismatch, _apply_pending_drops, _row_mismatches, replay_game
 from bgai.engine.tm.setup import load_setup
-from bgai.engine.tm.state import GameState, cult_string, with_faction
+from bgai.engine.tm.state import GameState, Phase, cult_string, with_faction
 
 GAME_ID = "4pLeague_S10_D1L1_G1"
 
@@ -176,7 +176,7 @@ def test_apply_pending_drops_leaves_a_not_yet_dropped_faction_alone() -> None:
     state = GameState.initial(load_setup(GAME_ID))
     fs = replace(state.factions["darklings"], bonus="BON1")
     state = with_faction(state, "darklings", fs)
-    state2 = _apply_pending_drops(state, row=50, dropped_at_row={"darklings": 60})
+    state2 = _apply_pending_drops(state, row=50, upcoming_faction="engineers", dropped_at_row={"darklings": 60})
     assert state2.factions["darklings"].bonus == "BON1"
     assert not state2.factions["darklings"].dropped
 
@@ -197,9 +197,42 @@ def test_apply_pending_drops_releases_bonus_and_marks_dropped_once_past_the_drop
     state = GameState.initial(load_setup(GAME_ID))
     fs = replace(state.factions["darklings"], bonus="BON1")
     state = with_faction(state, "darklings", fs)
-    state2 = _apply_pending_drops(state, row=61, dropped_at_row={"darklings": 60})
+    state2 = _apply_pending_drops(state, row=61, upcoming_faction="engineers", dropped_at_row={"darklings": 60})
     assert state2.factions["darklings"].bonus is None
     assert state2.factions["darklings"].dropped
+
+
+def test_apply_pending_drops_does_not_steal_the_dropped_factions_own_next_row() -> None:
+    """The drop *comment* is not always the chronologically-last thing a
+    faction does -- corpus ``4pLeague_S22_D3L1_G1`` row 32 ("mermaids
+    dropped from the game") is immediately followed by row 33, mermaids'
+    own ``build F4`` (their real last action, which then legitimately
+    fails for an unrelated reason -- wrong home color). If the very next
+    row still belongs to the just-dropped faction, ``_apply_pending_drops``
+    must not steal that turn by advancing ``active_index`` away from it
+    first (``upcoming_faction`` docstring, full citation trail).
+    """
+    state = GameState.initial(load_setup(GAME_ID))
+    state = replace(
+        state, phase=Phase.SETUP_DWELLINGS, turn_order=("darklings", "engineers"), active_index=0
+    )
+    state2 = _apply_pending_drops(
+        state, row=61, upcoming_faction="darklings", dropped_at_row={"darklings": 60}
+    )
+    assert state2.factions["darklings"].dropped
+    assert state2.active_index == 0  # not advanced away -- darklings still gets this row
+
+
+def test_apply_pending_drops_advances_away_once_a_different_faction_is_next() -> None:
+    state = GameState.initial(load_setup(GAME_ID))
+    state = replace(
+        state, phase=Phase.SETUP_DWELLINGS, turn_order=("darklings", "engineers"), active_index=0
+    )
+    state2 = _apply_pending_drops(
+        state, row=61, upcoming_faction="engineers", dropped_at_row={"darklings": 60}
+    )
+    assert state2.factions["darklings"].dropped
+    assert state2.active_index == 1  # advanced past darklings to engineers
 
 
 def test_dropped_faction_is_excluded_from_turn_order(
