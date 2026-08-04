@@ -305,6 +305,35 @@ def test_ensure_cult_income_landed_grants_a_genuinely_missing_row() -> None:
     assert cult_income_done == {"darklings"}
 
 
+def test_advance_after_row_end_of_round_excludes_dropped_factions_from_completeness() -> None:
+    """Corpus ``4pLeague_S3_D1L1_G1`` shape: once a faction has dropped, it
+    never gets another income row of any kind (every other post-drop
+    exclusion in this module agrees), so the raw
+    ``set(state.setup.factions)`` completeness check must exclude it too --
+    otherwise ``cult_income_done``/``other_income_done`` can never reach
+    "every faction accounted for" again, and ``end_of_round`` never fires
+    for the rest of the game (``power_actions_taken`` never resets,
+    surfacing several rows later as a spurious "power action space ACTx is
+    blocked this round"). Especially load-bearing under
+    ``merge-income-phases`` (this game's own option), where the
+    `_PURE_OTHER_INCOME_VERBS` reactive-proof fallback never fires either
+    (every income row is `all_income_for_faction`, never a bare
+    `other_income_for_faction`) -- this raw completeness check is the
+    *only* remaining path that can ever trigger `end_of_round`.
+    """
+    s = _round_flow_state()  # 4 factions: engineers, nomads, mermaids, darklings
+    factions = dict(s.factions)
+    factions["mermaids"] = replace(factions["mermaids"], dropped=True)
+    s = replace(s, factions=factions)
+
+    cult_income_done = {"engineers", "nomads", "darklings"}  # mermaids dropped, never contributes
+    s2, _, cult_income_done2 = _advance_after_row(
+        s, "darklings", (_cmd("cult_income_for_faction"),), set(), cult_income_done
+    )
+    assert s2.phase == Phase.INCOME  # end_of_round fired despite mermaids never joining
+    assert cult_income_done2 == set()
+
+
 def test_seat_order_rotation_without_variable_turn_order(
     frames: tuple[pl.DataFrame, pl.DataFrame],
 ) -> None:
@@ -679,5 +708,23 @@ def test_darklings_sh_w_to_p_convert_clamps_to_priest_pool(
     """
     moves_df, deltas_df = frames
     result = replay_game("4pLeague_S70_D3L3_G4", moves_df, deltas_df)
+    assert result.error is None, result.error
+    assert result.mismatches == ()
+
+
+def test_end_of_round_completeness_excludes_a_dropped_faction(
+    frames: tuple[pl.DataFrame, pl.DataFrame],
+) -> None:
+    """``4pLeague_S3_D1L1_G1``: dwarves drops mid-round-5; this
+    ``merge-income-phases`` game has no bare ``other_income_for_faction``
+    row to fall back on, so an unfiltered ``all_factions`` (still counting
+    dropped dwarves) permanently stranded ``state.round`` at 5 -- row 290's
+    legitimate new-round ACT2 use then hard-errors "power action space
+    ACT2 is blocked this round" against round 5's own stale
+    ``power_actions_taken`` (last used at row 247, also round 5 in this
+    engine's stuck view, actually round 6 in real Perl's).
+    """
+    moves_df, deltas_df = frames
+    result = replay_game("4pLeague_S3_D1L1_G1", moves_df, deltas_df)
     assert result.error is None, result.error
     assert result.mismatches == ()

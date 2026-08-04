@@ -522,7 +522,21 @@ def _advance_after_row(
     other_income_done: set[str],
     cult_income_done: set[str],
 ) -> tuple[GameState, set[str], set[str]]:
-    all_factions = set(state.setup.factions)
+    # A dropped faction never gets another income row (every other
+    # post-drop exclusion in this module agrees), so it must not count
+    # toward "every faction accounted for" -- task-14 fix, corpus
+    # `4pLeague_S3_D1L1_G1`: dwarves drops mid-round-5, and this game's
+    # `merge-income-phases` option means every income row is
+    # `all_income_for_faction` (never a bare `other_income_for_faction`),
+    # so the `_PURE_OTHER_INCOME_VERBS` reactive-proof fallback below never
+    # fires either -- the raw completeness check below was the *only*
+    # path that could ever trigger this round's `end_of_round`, and an
+    # unfiltered `all_factions` (still counting dropped dwarves) made it
+    # permanently unsatisfiable, stranding `state.round` one round behind
+    # real Perl for the rest of the game (`power_actions_taken` never
+    # reset, surfacing several rows later as a spurious "power action
+    # space ACT2 is blocked this round").
+    all_factions = {f for f in state.setup.factions if not state.factions[f].dropped}
     for cmd in cmds:
         if cmd.verb in _PURE_OTHER_INCOME_VERBS and state.phase == Phase.CLEANUP:
             # A round's other_income_for_faction rows only ever start once
