@@ -328,19 +328,27 @@ def test_begin_actions_clears_teleported_hex_for_every_faction() -> None:
     assert s2.factions["mermaids"].teleported_hex is None
 
 
-# --------------------------------------------------------------------------
-# end_of_round
-# --------------------------------------------------------------------------
-
-
-def test_end_of_round_increments_bonus_coins_only_on_untaken_tiles() -> None:
-    s = replace(_state(), phase=Phase.CLEANUP)
+def test_begin_actions_increments_bonus_coins_only_on_untaken_tiles() -> None:
+    """Task-14 Q2 fix: the bonus-coin bump (``_bumped_bonus_coins``,
+    ``commands.pm`` ``command_start`` lines 899-904) moved here from
+    ``end_of_round`` -- ``acting.pm``'s ``in_income_terrain_unlock``
+    (~546-554) fires ``command_start()`` only once the round's own income
+    is fully resolved, right before ``Phase.ACTIONS`` begins, not at the
+    previous round's cleanup. See ``begin_actions``'s own docstring for
+    the full citation and the 3 corpus games (dropped-faction bonus-tile
+    releases) this call-site move fixes."""
+    s = replace(_state(), phase=Phase.INCOME)
     s = _rich(s, "engineers", bonus="BON1")
-    s2 = end_of_round(s)
+    s2 = begin_actions(s)
     assert s2.bonus_coins["BON1"] == 0  # held -> no accumulation
     for tile in s.setup.bonus_tiles:
         if tile != "BON1":
             assert s2.bonus_coins[tile] == 1
+
+
+# --------------------------------------------------------------------------
+# end_of_round
+# --------------------------------------------------------------------------
 
 
 def test_end_of_round_resets_per_round_balances_but_not_spades() -> None:
@@ -515,10 +523,14 @@ def test_setup_bonus_reverse_order_then_round_1_income() -> None:
 def test_setup_bonus_transition_bumps_coins_on_every_untaken_tile() -> None:
     """Reference-game row 83: nomads takes BON7 (untouched by any of the
     4 SETUP_BONUS picks -- BON1/BON5/BON3/BON4 above) for exactly 1 C,
-    still within round 1's own ACTIONS phase (round 1's own cleanup
-    hasn't run yet). Only explained by ``command_start``'s bonus-coin
-    bump firing on *every* round transition, including 0 -> 1
-    (``_bumped_bonus_coins``'s own docstring; task-13 report)."""
+    still within round 1's own ACTIONS phase. Only explained by
+    ``command_start``'s bonus-coin bump firing on *every* round
+    transition, including 0 -> 1 (``_bumped_bonus_coins``'s own
+    docstring; task-13 report) -- task-14 Q2 fix: the bump itself now
+    fires at ``begin_actions`` (``Phase.INCOME`` -> ``Phase.ACTIONS``),
+    not at this SETUP_BONUS -> INCOME transition (``acting.pm``'s
+    ``command_start()`` fires only once round 1's own income is fully
+    resolved, right before round 1's ``Phase.ACTIONS`` begins)."""
     s = GameState.initial(load_setup(GAME_ID))
     s = start_setup(s)
     for faction, hex_key in _REFERENCE_SETUP_ROWS:
@@ -530,6 +542,8 @@ def test_setup_bonus_transition_bumps_coins_on_every_untaken_tile() -> None:
         s = apply(s, faction, _cmd("pass", tile=tile))
         s = advance_turn(s)
     assert s.phase == Phase.INCOME and s.round == 1
+    s = begin_actions(s)
+    assert s.phase == Phase.ACTIONS
     taken = {"BON1", "BON5", "BON3", "BON4"}
     for tile in s.setup.bonus_tiles:
         assert s.bonus_coins[tile] == (0 if tile in taken else 1)
