@@ -665,3 +665,19 @@ def test_stranded_transform_does_not_double_grant_a_row_still_pending(
     result2 = replay_game("4pLeague_S68_D2L1_G1", moves_df, deltas_df)
     assert result2.error is None, result2.error
     assert result2.mismatches == ()
+
+
+def test_darklings_sh_w_to_p_convert_clamps_to_priest_pool(
+    frames: tuple[pl.DataFrame, pl.DataFrame],
+) -> None:
+    """``4pLeague_S70_D3L3_G4`` row 281: darklings' SH-granted "convert 3W
+    to 3P" over-credits by 1 P once darklings' own ``priest_pool`` is
+    already below 8/8 (a priest already sent to a cult track) -- a bare
+    ``_with_resource_delta`` P gain with no ``priest_pool`` ceiling (unit
+    test in ``test_apply.py`` pins the handler-level fix directly). A
+    persistent +1 P shortfall for the rest of the game once introduced.
+    """
+    moves_df, deltas_df = frames
+    result = replay_game("4pLeague_S70_D3L3_G4", moves_df, deltas_df)
+    assert result.error is None, result.error
+    assert result.mismatches == ()
