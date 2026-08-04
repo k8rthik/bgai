@@ -512,9 +512,11 @@ def test_replayed_final_vp_matches_games_meta_final_vp() -> None:
     state = start_setup(GameState.initial(load_setup(game_id)))
     other_done: set[str] = set()
     cult_done: set[str] = set()
-    for row, faction, cmds in _iter_rows(game_moves):
+    for _row, faction, cmds in _iter_rows(game_moves):
         state = _apply_row_commands(state, faction, cmds)
-        state, other_done, cult_done = _advance_after_row(state, faction, cmds, other_done, cult_done)
+        state, other_done, cult_done = _advance_after_row(
+            state, faction, cmds, other_done, cult_done
+        )
 
     expected = json.loads(games_meta.filter(pl.col("game_id") == game_id)["final_vp"][0])
     for faction, vp in expected.items():

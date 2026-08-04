@@ -27,7 +27,14 @@ from bgai.engine.tm.round_flow import (
     start_setup,
 )
 from bgai.engine.tm.setup import load_setup
-from bgai.engine.tm.state import FactionState, GameState, Phase, PendingDecision, active_faction, with_faction
+from bgai.engine.tm.state import (
+    FactionState,
+    GameState,
+    PendingDecision,
+    Phase,
+    active_faction,
+    with_faction,
+)
 
 GAME_ID = "4pLeague_S10_D1L1_G1"
 
@@ -645,9 +652,11 @@ def test_build_with_pending_free_marker_is_a_continuation() -> None:
     s = _state()
     for kind in ("free_d", "free_tf"):
         s2 = replace(s, pending=(PendingDecision(faction="engineers", kind=kind),))
-        assert is_turn_boundary(_cmd("build", loc="A1"), s2, "engineers", prev_verb="action") is False
+        boundary = is_turn_boundary(_cmd("build", loc="A1"), s2, "engineers", prev_verb="action")
+        assert boundary is False
 
 
 def test_upgrade_with_pending_free_tp_marker_is_a_continuation() -> None:
     s = replace(_state(), pending=(PendingDecision(faction="engineers", kind="free_tp"),))
-    assert is_turn_boundary(_cmd("upgrade", loc="A1", building="TP"), s, "engineers", prev_verb="action") is False
+    cmd = _cmd("upgrade", loc="A1", building="TP")
+    assert is_turn_boundary(cmd, s, "engineers", prev_verb="action") is False

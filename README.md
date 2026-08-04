@@ -28,3 +28,28 @@ Data sources: game logs from terra.snellman.net (fetched politely: ≤1 req/s,
 identifying User-Agent, resumable cache); tournament structure from tmtour.org's
 open API. Thanks to Juho Snellman and the tmtour maintainers for keeping these
 running.
+
+## Replay harness
+
+`src/bgai/engine/tm/replay.py` drives a crawled game's ledger
+(`data/datasets/moves.parquet`) through `apply()` and cross-checks every row
+against the `deltas.parquet` oracle. Normal `pytest` runs cover a fast
+10-game smoke check (`tests/test_replay.py`) plus a curated 25-game
+regression set with full faction/exotic-option coverage
+(`tests/test_replay_corpus.py`, `.superpowers/sdd/2026-08-03-tm-engine-core/task-14-corpus-prep.md`
+documents the selection).
+
+To replay the **full corpus** (3563 games, ~70s pure Python, no
+`--jobs`/parallelization needed) as a manual check outside normal CI:
+
+```bash
+uv run python -m bgai.engine.tm.replay --limit 4000 --report /tmp/replay_full.json
+```
+
+Prints per-faction row pass rates and a (verb, field) mismatch-frequency
+summary; `--report` additionally writes the full per-game mismatch/error
+detail as JSON. `--game-id <id>` replays a single game. 10 games in the
+corpus have a `nofaction*` placeholder seat (`load_setup` raises `ValueError`
+for them — an expected, documented exclusion, not an engine bug) and are
+skipped automatically (reported with `error` set to the `ValueError` text,
+`rows_checked=0`).

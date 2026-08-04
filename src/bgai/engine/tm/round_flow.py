@@ -519,37 +519,24 @@ def end_of_round(state: GameState) -> GameState:
     # whichever faction passed *first* this round (acting.pm's
     # factions_in_turn_order, 203-210: rotates raw_factions_in_order so
     # whichever faction holds {start_player} -- set on any first-to-pass,
-    # command_pass ~780-785, *unconditionally*, not gated by variable-
-    # turn-order -- goes first). What differs by option is which array
-    # gets rotated:
-    #
-    # - Under variable-turn-order, every single pass calls new_faction_order
-    #   (commands.pm ~788-792), moving that passer to the *end* of
-    #   raw_factions_in_order (keeping everyone else's relative order).
-    #   Applied cumulatively across a round's 4 passes, this converges
-    #   exactly to *chronological pass order* -- confirmed by hand-
-    #   simulating 4 passes against an arbitrary seat order, and by the
-    #   existing ``test_end_of_round_uses_passed_order_under_variable_
-    #   turn_order`` pin -- so ``state.passed_order`` directly is correct
-    #   here.
-    # - Without it, raw_factions_in_order is *never* touched by passing at
-    #   all and stays the original seat order for the whole game; only
-    #   *which* seat starts is chronological (whoever happened to pass
-    #   first), the other 3 keep their original seat *positions* in the
-    #   rotation, not their pass *timestamps* -- these can differ whenever
-    #   a faction passes early (skipping ahead in wall-clock time without
-    #   changing its seat position). Corpus proof: ``4pLeague_S1_D1L1_G1``
-    #   (no variable-turn-order), round 2->3: engineers passes early
-    #   (turn 3 of 6) while cultists/witches/darklings all keep playing
-    #   until turns 5-6; round 2's pass order is (engineers, cultists,
-    #   darklings, witches), but round 3 actually starts (engineers,
-    #   cultists, witches, darklings) -- seat order (darklings, engineers,
-    #   cultists, witches) rotated to start at engineers, *not* passed_order
-    #   itself. An earlier revision of this function used raw seat order
-    #   unrotated for the non-variable-turn-order case (never checked
-    #   against a real such corpus game) -- also wrong, just differently.
-    # Either way ``state.passed_order`` is never empty here (every faction
-    # must pass before ``end_of_round`` runs), so ``[0]`` is safe.
+    # command_pass ~780-785, unconditionally -- goes first). variable-
+    # turn-order only gates whether every pass *also* reorders
+    # raw_factions_in_order itself (moving the passer to the array's end,
+    # commands.pm ~788-792); applied across a round's 4 passes this
+    # converges to plain chronological passed_order. Without the option,
+    # raw_factions_in_order is never touched by passing, so only *which*
+    # seat starts is chronological -- the other 3 keep their original
+    # seat *positions*, not their pass *timestamps*, which can differ
+    # whenever a faction passes early relative to its seat position.
+    # Corpus proof (an earlier revision used unrotated seat order here,
+    # never checked against a real non-variable-turn-order game -- also
+    # wrong, differently): ``4pLeague_S1_D1L1_G1``, round 2's pass order
+    # is (engineers, cultists, darklings, witches), but round 3 actually
+    # starts (engineers, cultists, witches, darklings) -- seat order
+    # (darklings, engineers, cultists, witches) rotated to the first
+    # passer, not passed_order itself. ``state.passed_order`` is never
+    # empty here (every faction must pass before ``end_of_round`` runs),
+    # so ``[0]`` is safe.
     if state.setup.options.variable_turn_order:
         new_turn_order = state.passed_order
     else:
@@ -801,6 +788,4 @@ def is_turn_boundary(
     if fs is not None and fs.spades_available > 0:
         return False
     kinds = _MARKER_KINDS_FOR_VERB.get(verb, ())
-    if any(p.faction == faction and p.kind in kinds for p in state_before.pending):
-        return False
-    return True
+    return not any(p.faction == faction and p.kind in kinds for p in state_before.pending)
