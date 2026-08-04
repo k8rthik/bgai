@@ -15,6 +15,7 @@ import pytest
 
 from bgai.data.ledger_parser import Kind, ParsedCommand
 from bgai.engine.tm.apply import EngineError, apply
+from bgai.engine.tm.factions_data import FACTIONS
 from bgai.engine.tm.power import Power
 from bgai.engine.tm.round_flow import (
     advance_turn,
@@ -24,7 +25,7 @@ from bgai.engine.tm.round_flow import (
     start_setup,
 )
 from bgai.engine.tm.setup import load_setup
-from bgai.engine.tm.state import GameState, Phase, active_faction, with_faction
+from bgai.engine.tm.state import FactionState, GameState, Phase, active_faction, with_faction
 
 GAME_ID = "4pLeague_S10_D1L1_G1"
 
@@ -138,6 +139,27 @@ def test_cult_income_round_1_spade_destination_is_spades_available() -> None:
     s = replace(s, cults=cults)
     s2 = handle_income_row(s, "engineers", _cmd("cult_income_for_faction"))
     assert s2.factions["engineers"].spades_available == 1
+
+
+def test_cult_income_spade_scores_halflings_unconditional_spade_vp_bonus() -> None:
+    """Analogous to ``4pLeague_S10_D1L1_G2`` row 142 (halflings' round-2
+    cult income, AIR position 4 req 4, tile income ``{"SPADE": 1}``,
+    grants 1 spade): using this fixture's own round-1 tile (WATER, req 4,
+    income ``{"SPADE": 1}`` -- the brief's own scenario), a SPADE cult
+    income grant must also score halflings' unconditional +1 VP/spade
+    special (``factions_data.py`` ``special_gain["SPADE"] = {"VP": 1}``)
+    -- ``resources.pm``'s generic per-unit gain loop fires for *any*
+    positive SPADE delta, cult income included, not just ``dig``'s
+    (``_apply_spade_income_bonus``'s own docstring; task-13 report)."""
+    s = _state()
+    factions = dict(s.factions)
+    factions["halflings"] = FactionState.initial(FACTIONS["halflings"])
+    cults = {**s.cults, "halflings": {**FACTIONS["halflings"].cults, "WATER": 4}}
+    s = replace(s, factions=factions, cults=cults)
+    before_vp = s.factions["halflings"].vp
+    s2 = handle_income_row(s, "halflings", _cmd("cult_income_for_faction"))
+    assert s2.factions["halflings"].spades_available == 1
+    assert s2.factions["halflings"].vp == before_vp + 1
 
 
 def test_all_income_for_faction_grants_both_components() -> None:

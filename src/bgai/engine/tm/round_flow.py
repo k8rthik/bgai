@@ -279,6 +279,7 @@ from dataclasses import replace
 
 from bgai.data.ledger_parser import ParsedCommand
 from bgai.engine.tm.apply import EngineError, register_handler
+from bgai.engine.tm.factions.hooks import hooks_for
 from bgai.engine.tm.factions_data import CULTS, FACTIONS
 from bgai.engine.tm.income import faction_income
 from bgai.engine.tm.setup import GameSetup
@@ -291,7 +292,40 @@ from bgai.engine.tm.state import FactionState, GameState, Phase, with_faction
 _INCOME_RESOURCE_ATTR: dict[str, str] = {"C": "coins", "W": "workers"}
 
 
-def _apply_income_resource(fs: FactionState, resource: str, amount: int) -> FactionState:
+def _apply_spade_income_bonus(state: GameState, faction: str, fs: FactionState, spades: int) -> FactionState:
+    """``actions_build.py``'s/``actions_terraform.py``'s/
+    ``actions_power.py``'s identically-named-in-spirit helper
+    (``_apply_spade_gain_bonus``/``_apply_extra_dig_gain``), a fifth
+    private copy for the same no-cross-coupling rationale those modules
+    already document: ``hooks_for(faction).extra_dig_gain`` (Halflings'
+    unconditional +1 VP/spade, Alchemists' SH-gated +2 PW/spade) fires
+    for *any* positive SPADE delta, cult-income included, not just
+    ``dig``'s (``resources.pm`` 313-392's generic per-unit gain loop --
+    those other modules' own docstrings cite this). Missing it here was a
+    real engine bug: reference-corpus game ``4pLeague_S10_D1L1_G2`` row
+    142, halflings' round-2 cult income grants 1 spade (AIR position 4,
+    req 4) and should score the unconditional +1 VP alongside it -- task-13
+    report.
+    """
+    if spades <= 0:
+        return fs
+    extra = hooks_for(faction).extra_dig_gain(state, faction)
+    for res, per_unit in extra.items():
+        total = per_unit * spades
+        if not total:
+            continue
+        if res == "VP":
+            fs = replace(fs, vp=fs.vp + total)
+        elif res == "PW":
+            fs = replace(fs, power=fs.power.gain(total))
+        else:
+            raise ValueError(f"unhandled extra_dig_gain key {res!r} for {faction}")
+    return fs
+
+
+def _apply_income_resource(
+    state: GameState, faction: str, fs: FactionState, resource: str, amount: int
+) -> FactionState:
     if not amount:
         return fs
     if resource == "PW":
@@ -299,7 +333,8 @@ def _apply_income_resource(fs: FactionState, resource: str, amount: int) -> Fact
     if resource == "P":
         return replace(fs, priests=min(fs.priests + amount, fs.priest_pool))
     if resource == "SPADE":
-        return replace(fs, spades_available=fs.spades_available + amount)
+        fs = replace(fs, spades_available=fs.spades_available + amount)
+        return _apply_spade_income_bonus(state, faction, fs, amount)
     attr = _INCOME_RESOURCE_ATTR.get(resource)
     if attr is None:
         raise ValueError(f"unhandled income resource {resource!r}")
@@ -316,7 +351,7 @@ def _grant_other_income(state: GameState, faction: str) -> GameState:
         for resource, amount in bucket.items():
             totals[resource] = totals.get(resource, 0) + amount
     for resource, amount in totals.items():
-        fs = _apply_income_resource(fs, resource, amount)
+        fs = _apply_income_resource(state, faction, fs, resource, amount)
     return with_faction(state, faction, fs)
 
 
@@ -338,7 +373,7 @@ def _grant_cult_income(state: GameState, faction: str) -> GameState:
         return state
     fs = state.factions[faction]
     for resource, per_unit in tile.cult_income:
-        fs = _apply_income_resource(fs, resource, per_unit * units)
+        fs = _apply_income_resource(state, faction, fs, resource, per_unit * units)
     return with_faction(state, faction, fs)
 
 
