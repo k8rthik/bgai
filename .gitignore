@@ -1,5 +1,5 @@
 # Data caches and datasets (large, regenerable from sources) — repo-root only
-/data/
+/data
 
 # Python
 __pycache__/

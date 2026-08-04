@@ -648,3 +648,13 @@ def test_reference_game_replays_clean(frames) -> None:
 - Task order is strict: 1→2→3→4→(5,6 parallelizable)→7→8→9→10→11→12→13→14→15.
 - Tasks 8-12 will not be perfectly right on first green — Task 13/14's oracle loop is where truth lands. Keep unit tests as pins, not as proofs.
 - When a reference-Perl reading contradicts this plan's summary of a rule, **the Perl wins** — update the plan file in the same commit as the fix.
+
+## Post-implementation corrections
+
+The following items in this plan file were superseded by implementation and replay validation:
+
+- **Task 3, line 222 — `active_faction` definition**: The plan specifies `active_faction(state) -> str` as "head of pending if any, else `turn_order[active_index]`". The actual implementation is `turn_order[active_index]` (pending does not affect active-faction slot). See `state.py`'s `active_faction` docstring.
+
+- **Task 3, line 219 — `PendingDecision.kind` values**: The plan lists "halflings_spades", "bonus_choice", "spade_use" as produced kinds. These were plan-stage design artifacts; the actual live set is documented in `state.py`'s `PendingDecision` docstring (produced kinds: "leech", "gain_favor", "gain_town", "cult_choice", "convert_w_to_p", "bridge", "free_d", "free_tp", "free_tf", "cultist_leech_watch").
+
+- **Task 15, line 95 onwards (Design decision 4)**: The plan's docstring originally stated the order-exempt baseline is suppressed when an outstanding blocking pending exists. The actual implementation is additive: `legal_moves_for` returns both the baseline (convert/wait) and pending answers, combined. See `legal.py`'s module docstring and `legal_moves_for` implementation.
