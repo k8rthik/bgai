@@ -255,12 +255,20 @@ def test_accept_bare_leech_matches_the_sole_offer_regardless_of_requested_amount
     to amount 1 (module docstring), but the bare ``leech 4`` row (no
     ``from`` clause at all, early-era style) still names the corpus's own
     greedy request, 4. With exactly one queued offer for the faction,
-    that's the answer regardless of what ``cmd.n1`` says."""
-    s = _seeded()  # offer amount 2 (opponent TP, power 2)
+    that's the answer regardless of what ``cmd.n1`` says -- and (task-14
+    fix) the offer's own cached ``amount`` (2) is *not* a cap on the
+    resulting gain either: real Perl computes ``$actual_pw`` from the
+    live power bowls before it ever looks at the matched record
+    (``handle_leech``'s own docstring). Darklings starts 5/7/0;
+    ``gain(4)`` moves all 4 requested steps (well within ``gainable()``
+    = 5*2+7 = 17), landing 1/11/0, not capped down to the stale offer-2.
+    """
+    s = _seeded()  # offer amount 2 (opponent TP, power 2) -- disambiguation only
     s = queue_leech(s, "engineers", TARGET)
     s2 = handle_leech(s, "darklings", _cmd("leech", n1=4))
     assert s2.pending == ()
-    assert s2.factions["darklings"].power.as_str() == "3/9/0"  # capped to the offer's own 2
+    assert s2.factions["darklings"].power.as_str() == "1/11/0"
+    assert s2.factions["darklings"].vp == 20 - 3  # pay actual-1 = 3 VP
 
 
 def test_accept_leech_with_target_matches_regardless_of_requested_amount() -> None:
@@ -270,14 +278,18 @@ def test_accept_leech_with_target_matches_regardless_of_requested_amount() -> No
     a promise (module docstring's ``_find_leech_pending`` citation).  With
     an explicit ``from X`` clause, the offer's ``source`` alone
     disambiguates; ``cmd.n1`` no longer has to equal the offer's cached
-    ``amount`` for the row to be found at all -- ``handle_leech`` still
-    caps the *actual* gain down to whatever's affordable.
+    ``amount`` for the row to be found at all -- ``handle_leech`` caps
+    the *actual* gain only by VP/``gainable()`` (task-14 fix: not by the
+    offer's own stale cached ``amount`` either, same as the bare-leech
+    sibling test above). Darklings starts 5/7/0; ``gain(5)`` lands
+    0/12/0.
     """
-    s = _seeded()  # offer amount 2 (opponent TP, power 2)
+    s = _seeded()  # offer amount 2 (opponent TP, power 2) -- disambiguation only
     s = queue_leech(s, "engineers", TARGET)
     s2 = handle_leech(s, "darklings", _cmd("leech", n1=5, target="engineers"))
     assert s2.pending == ()
-    assert s2.factions["darklings"].power.as_str() == "3/9/0"  # capped to the offer's own 2
+    assert s2.factions["darklings"].power.as_str() == "0/12/0"
+    assert s2.factions["darklings"].vp == 20 - 4  # pay actual-1 = 4 VP
 
 
 def test_decline_leech_is_free() -> None:
@@ -316,6 +328,39 @@ def test_leech_vp_floor_caps_gain() -> None:
     # actual capped to vp+1 = 2; pay 1 VP, leaving 0.
     assert s2.factions["darklings"].vp == 0
     assert s2.factions["darklings"].power.gainable() == 5 * 2 + 7 - 2  # gained 2 worth of steps
+
+
+def test_leech_matches_offer_by_live_actual_when_no_offer_amount_equals_the_request() -> None:
+    """Task-14 fix, corpus ``4pLeague_S19_D3L2_G6`` row 347: two queued
+    offers from the *same* source (nomads built/upgraded twice before
+    engineers answered either), cached amounts 0 and 1 -- both stale
+    snapshots from offer-creation time, neither equal to this row's own
+    request (``n1=2``). Real Perl (and ``handle_leech``) computes the
+    live, VP/``gainable()``-capped ``actual`` *before* matching a record,
+    and matches a record whose ``amount`` equals *either* the raw request
+    or that computed ``actual`` -- here ``actual`` (1, since ``gainable()``
+    has dropped to 1 by this point) matches the second offer, not the
+    first. An earlier revision matched by ``cmd.n1`` alone, found no
+    match, and silently fell through to the first (wrong, amount-0)
+    offer -- a zero-effect accept instead of the real +1 gain.
+    """
+    s = _state()
+    fs = replace(s.factions["darklings"], power=Power(bowl1=0, bowl2=1, bowl3=5))
+    s = with_faction(s, "darklings", fs)
+    s = replace(
+        s,
+        pending=(
+            PendingDecision(faction="darklings", kind="leech", amount=0, source="nomads", options=("A1",)),
+            PendingDecision(faction="darklings", kind="leech", amount=1, source="nomads", options=("A2",)),
+        ),
+    )
+    s2 = handle_leech(s, "darklings", _cmd("leech", n1=2, target="nomads"))
+    assert s2.factions["darklings"].power.as_str() == "0/0/6"  # gain(1): bowl2's 1 token -> bowl3
+    assert s2.factions["darklings"].vp == 20  # actual == 1 -> pay actual-1 == 0 VP
+    # The amount-1 offer (A2) was consumed; the amount-0 offer (A1) is still queued.
+    assert s2.pending == (
+        PendingDecision(faction="darklings", kind="leech", amount=0, source="nomads", options=("A1",)),
+    )
 
 
 # --------------------------------------------------------------------------

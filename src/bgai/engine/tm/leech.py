@@ -293,16 +293,22 @@ def queue_leech(
     return new_state
 
 
-def _find_leech_pending(state: GameState, faction: str, cmd: ParsedCommand) -> int:
+def _find_leech_pending(
+    state: GameState,
+    faction: str,
+    cmd: ParsedCommand,
+    matches: list[int] | None = None,
+    actual: int | None = None,
+) -> int:
     """Locate the queued ``leech`` offer a ``leech``/``decline`` row
     answers. ``cmd.n1`` (the requested amount) is a *request*, not a
     promise -- ``handle_leech`` itself caps the actual gain down
-    (``gainable()``/VP-floor/the offer's own amount, module docstring) if
-    it exceeds what the faction can actually still take, which is exactly
-    what an offer's ``amount`` (capped at *offer-creation* time) can
-    diverge from by the time it's answered. So ``cmd.n1``/``cmd.target``
-    only need to *disambiguate* which offer a row means, never match it
-    exactly:
+    (``gainable()``/VP-floor, module docstring) if it exceeds what the
+    faction can actually still take, which is exactly what an offer's
+    ``amount`` (capped at *offer-creation* time, against a possibly-since-
+    changed power state) can diverge from by the time it's answered. So
+    ``cmd.n1``/``cmd.target`` only need to *disambiguate* which offer a
+    row means, never match it exactly:
 
     - Exactly one queued offer for ``faction``: that's the answer,
       regardless of what ``cmd.n1``/``cmd.target`` say (task-13 report,
@@ -317,36 +323,53 @@ def _find_leech_pending(state: GameState, faction: str, cmd: ParsedCommand) -> i
       build, but nomads' ``gainable()`` had already dropped to 1 by
       offer-creation time, so the offer's cached ``amount`` is 1 while
       the row reads ``leech 2 from engineers``). With no ``target``
-      either (early-era logs), ``cmd.n1`` disambiguates by amount
-      instead.
+      either (early-era logs), amount disambiguates instead.
     - Multiple queued offers *from the same source* (task-14 fix: the
       same faction can build/upgrade a second time -- a second
       ``queue_leech`` call -- before every offer from its first build is
       answered, so ``cmd.target`` alone can leave more than one
-      candidate): ``cmd.n1`` breaks the tie by amount, same as the no-
-      ``target`` case, falling back to the first ``target`` match only
-      if no offer's amount matches either (corpus
-      ``4pLeague_S20_D1L1_G7`` row 216-217: engineers has two
-      simultaneous ``leech ... from cultists`` offers, from two
-      different Cultists builds; ``cmd.n1`` is what actually tells them
-      apart).
+      candidate): amount breaks the tie, same as the no-``target`` case,
+      falling back to the first ``target`` match only if no offer's
+      amount matches either (corpus ``4pLeague_S20_D1L1_G7`` row 216-217:
+      engineers has two simultaneous ``leech ... from cultists`` offers,
+      from two different Cultists builds; the amount is what actually
+      tells them apart).
+
+    ``commands.pm``'s ``command_leech`` (419-477) matches a ledger row's
+    queued record by comparing the record's stored ``amount`` against
+    *either* ``$pw`` (``cmd.n1``, the raw request) *or* ``$actual_pw``
+    (``handle_leech``'s already-computed, VP/gainable-capped ``actual``,
+    passed in here by the caller) -- **not** ``cmd.n1`` alone. Both keys
+    matter: task-14 fix, corpus ``4pLeague_S19_D3L2_G6`` row 347,
+    engineers has two queued offers from nomads (one build's offer capped
+    to 0 at creation time, a second build's offer capped to 1) and a row
+    reading ``leech target=nomads n1=2`` -- neither offer's cached
+    ``amount`` (0 or 1) equals the raw request (2), but the *actual*
+    grantable amount recomputed live (``gainable()`` is back down to 1 by
+    the time this row answers) equals the second offer's cached ``1``,
+    which is how real Perl (and this fix) picks it. Matching by ``cmd.n1``
+    alone (an earlier revision) never found a match here and silently fell
+    through to the *first* (wrong, amount-0) candidate.
     """
-    matches = [
-        i for i, p in enumerate(state.pending) if p.faction == faction and p.kind == "leech"
-    ]
+    if matches is None:
+        matches = [
+            i for i, p in enumerate(state.pending) if p.faction == faction and p.kind == "leech"
+        ]
     if len(matches) == 1:
         return matches[0]
 
     candidates = matches
     if cmd.target is not None:
-        target_matches = [i for i in matches if state.pending[i].source == cmd.target]
+        target_matches = [i for i in candidates if state.pending[i].source == cmd.target]
         if target_matches:
             candidates = target_matches
 
-    if len(candidates) > 1 and cmd.n1 is not None:
-        amount_matches = [i for i in candidates if state.pending[i].amount == cmd.n1]
-        if amount_matches:
-            candidates = amount_matches
+    if len(candidates) > 1:
+        match_amounts = {n for n in (cmd.n1, actual) if n is not None}
+        if match_amounts:
+            amount_matches = [i for i in candidates if state.pending[i].amount in match_amounts]
+            if amount_matches:
+                candidates = amount_matches
 
     if candidates:
         return candidates[0]
@@ -441,25 +464,42 @@ def _resolve_cultist_watch(
 def handle_leech(state: GameState, faction: str, cmd: ParsedCommand) -> GameState:
     """``leech N[ from X]``: accept up to ``N`` power, pay ``N-1`` VP.
 
-    ``N`` is capped three ways, matching ``command_leech``/``gain_power``
-    (module docstring): by the offer's own ``amount`` (can't claim more
-    than was on offer), by the faction's remaining VP
-    (``min(requested, fs.vp + 1)``), and by the faction's **current**
-    ``Power.gainable()`` -- recomputed fresh here rather than trusting
-    ``pending.amount``'s offer-time snapshot, since Perl's ``gain_power``
-    always reads live ``P1``/``P2`` bowls at accept time: if this faction
-    accepted an earlier offer from the same batch (or otherwise spent
-    power) since this offer was queued, its gainable capacity may now be
-    lower than what was cached on the pending. A zero-effect accept
-    (``actual == 0``) costs no VP.
-    """
-    idx = _find_leech_pending(state, faction, cmd)
-    pending = state.pending[idx]
-    fs = state.factions[faction]
+    ``N`` is capped two ways, matching ``command_leech``/``gain_power``
+    (module docstring, ``commands.pm`` lines 419-513): by the faction's
+    remaining VP (``min(requested, fs.vp + 1)``), then by the faction's
+    **current** ``Power.gainable()`` -- recomputed fresh here rather than
+    trusting ``pending.amount``'s offer-time snapshot, since Perl's
+    ``gain_power`` always reads live ``P1``/``P2`` bowls at accept time:
+    if this faction accepted an earlier offer from the same batch (or
+    otherwise spent power) since this offer was queued, its gainable
+    capacity may now be lower than what was cached on the pending. A
+    zero-effect accept (``actual == 0``) costs no VP.
 
-    requested = cmd.n1 if cmd.n1 is not None else pending.amount
-    actual = min(requested, pending.amount, fs.power.gainable(), fs.vp + 1)
+    The offer's own cached ``amount`` is **not** a third cap (an earlier
+    revision's bug, task-14 fix): Perl computes ``$actual_pw`` from the
+    live power bowls *before* it ever looks at which queued record the
+    row answers -- the record's ``amount`` only helps ``_find_leech_pending``
+    pick the right one (passed in as ``actual`` below, that function's own
+    docstring has the full citation trail and corpus example). Capping the
+    resulting gain to the chosen record's stale ``amount`` silently
+    under-granted power whenever that record's amount was cached lower
+    than what the faction can actually take *now*.
+    """
+    fs = state.factions[faction]
+    matches = [i for i, p in enumerate(state.pending) if p.faction == faction and p.kind == "leech"]
+    if cmd.n1 is not None:
+        requested = cmd.n1
+    elif matches:
+        requested = state.pending[matches[0]].amount
+    else:
+        requested = 0
+
+    actual = min(requested, fs.vp + 1)
+    actual = min(actual, fs.power.gainable())
     actual = max(actual, 0)
+
+    idx = _find_leech_pending(state, faction, cmd, matches, actual)
+    pending = state.pending[idx]
 
     new_fs = fs
     if actual > 0:
