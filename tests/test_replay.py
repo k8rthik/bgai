@@ -27,7 +27,9 @@ from bgai.engine.tm.replay import (
     Mismatch,
     _advance_after_row,
     _apply_pending_drops,
+    _cult_income_pending_later,
     _dedupe_income_commands,
+    _ensure_cult_income_landed,
     _row_mismatches,
     replay_game,
 )
@@ -239,6 +241,68 @@ def test_advance_after_row_skips_missing_cult_income_for_a_dropped_faction() -> 
         s, "engineers", (_cmd("other_income_for_faction"),), set(), cult_income_done
     )
     assert s2.factions["darklings"].coins == 0  # not granted -- dropped
+
+
+def test_cult_income_pending_later_finds_a_real_not_yet_seen_row() -> None:
+    """Corpus ``4pLeague_S49_D3L1_G7`` shape: darklings' own row 329
+    ``cult_income_for_faction`` is real, just later in the batch than row
+    323's own transform -- the look-ahead must find it and report "not
+    missing" rather than assuming absence from silence alone.
+    """
+    income_rows = [
+        (326, "mermaids", "cult_income_for_faction"),
+        (327, "engineers", "cult_income_for_faction"),
+        (328, "cultists", "cult_income_for_faction"),
+        (329, "darklings", "cult_income_for_faction"),
+        (331, "mermaids", "other_income_for_faction"),
+    ]
+    assert _cult_income_pending_later(income_rows, 323, "darklings") is True
+
+
+def test_cult_income_pending_later_is_false_once_the_batch_ends() -> None:
+    """A faction's own row never lands before the batch's own
+    ``other_income_for_faction`` boundary -- genuinely missing, matching
+    ``4pLeague_S7_D3L3_G4``'s darklings.
+    """
+    income_rows = [
+        (143, "engineers", "cult_income_for_faction"),
+        (144, "witches", "cult_income_for_faction"),
+        (145, "cultists", "cult_income_for_faction"),
+        (151, "mermaids", "other_income_for_faction"),
+    ]
+    assert _cult_income_pending_later(income_rows, 142, "darklings") is False
+
+
+def test_ensure_cult_income_landed_does_not_double_grant_a_row_pending_later() -> None:
+    """``_ensure_cult_income_landed`` itself must consult the look-ahead,
+    not just react to "not yet in ``cult_income_done``" -- guards against
+    reintroducing the ``4pLeague_S49_D3L1_G7`` double-grant regression.
+    """
+    s = _round_flow_state()
+    factions = dict(s.factions)
+    factions["darklings"] = replace(factions["darklings"], coins=0)
+    s = replace(s, factions=factions, cults={**s.cults, "darklings": {**s.cults["darklings"], "EARTH": 4}})
+    income_rows = [(329, "darklings", "cult_income_for_faction")]
+
+    s2, cult_income_done = _ensure_cult_income_landed(
+        s, "darklings", (_cmd("transform"),), set(), 323, income_rows
+    )
+    assert s2.factions["darklings"].coins == 0  # not granted -- a real row is still coming
+    assert cult_income_done == set()
+
+
+def test_ensure_cult_income_landed_grants_a_genuinely_missing_row() -> None:
+    s = _round_flow_state()
+    factions = dict(s.factions)
+    factions["darklings"] = replace(factions["darklings"], coins=0)
+    s = replace(s, factions=factions, cults={**s.cults, "darklings": {**s.cults["darklings"], "EARTH": 4}})
+    income_rows = [(151, "mermaids", "other_income_for_faction")]  # batch ends, darklings never in it
+
+    s2, cult_income_done = _ensure_cult_income_landed(
+        s, "darklings", (_cmd("transform"),), set(), 147, income_rows
+    )
+    assert s2.factions["darklings"].coins == 4
+    assert cult_income_done == {"darklings"}
 
 
 def test_seat_order_rotation_without_variable_turn_order(
@@ -556,3 +620,48 @@ def test_connect_two_hex_form_resolves_when_multiple_rivers_qualify(
     result = replay_game(game_id, moves_df, deltas_df)
     assert result.error is None, result.error
     assert result.mismatches == ()
+
+
+# --------------------------------------------------------------------------
+# Task 14 phase 4: a stranded mid-batch spade transform can be forced by a
+# faction's own genuinely-missing cult_income_for_faction row.
+# --------------------------------------------------------------------------
+
+
+def test_stranded_transform_lands_a_genuinely_missing_cult_income_row(
+    frames: tuple[pl.DataFrame, pl.DataFrame],
+) -> None:
+    """``4pLeague_S7_D3L3_G4`` row 147: darklings' own round 2 -> 3
+    ``cult_income_for_faction`` row never appears in the ledger at all
+    (confirmed absent, not reordered), yet row 147 is darklings' own
+    ``transform H7`` forced by that missing grant's SPADE, stranding this
+    engine on "darklings has 0 spades available" before
+    ``_ensure_cult_income_landed`` existed.
+    """
+    moves_df, deltas_df = frames
+    result = replay_game("4pLeague_S7_D3L3_G4", moves_df, deltas_df)
+    assert result.error is None, result.error
+    assert result.mismatches == ()
+
+
+def test_stranded_transform_does_not_double_grant_a_row_still_pending(
+    frames: tuple[pl.DataFrame, pl.DataFrame],
+) -> None:
+    """``4pLeague_S49_D3L1_G7`` row 323: darklings' own ``transform H8``
+    lands *before* their very real row 329 ``cult_income_for_faction`` --
+    an earlier, unguarded revision of ``_ensure_cult_income_landed``
+    assumed any not-yet-``cult_income_done`` faction was missing outright
+    and double-granted this row's income once proactively and again when
+    the real row 329 landed (5 extra workers, corpus-observed). Pinned
+    together with the sibling ``4pLeague_S68_D2L1_G1`` (row 244, halflings
+    -- same shape, 4 extra coins) as the two regressions the look-ahead
+    guard (``_cult_income_pending_later``) fixes.
+    """
+    moves_df, deltas_df = frames
+    result = replay_game("4pLeague_S49_D3L1_G7", moves_df, deltas_df)
+    assert result.error is None, result.error
+    assert result.mismatches == ()
+
+    result2 = replay_game("4pLeague_S68_D2L1_G1", moves_df, deltas_df)
+    assert result2.error is None, result2.error
+    assert result2.mismatches == ()
