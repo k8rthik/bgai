@@ -6,21 +6,38 @@ Ported from the reference implementation (jsnell/terra-mystica, MIT),
 - ``command_build`` (148-256): unknown/occupied hex (156-159); a live
   ``FREE_D`` marker (161-164) makes the build free and skips the
   reachability check (Task 10, ``actions_power.py``'s Witches'-Ride
-  finding: ``build_color_ok``, ``map.pm`` 657-664, is **never** bypassed --
-  the target must still already be the faction's home color; what
-  ``FREE_D``/``TELEPORT_NO_TF`` remove is cost and the ``check_reachable``
-  call, 207-227, only ever reached from the non-``TELEPORT_NO_TF`` branch).
-  Ported here as a queued ``PendingDecision(kind="free_d")`` (pushed by
-  ``actions_power.py``'s ACTW handler), consumed by ``handle_build`` below.
-  Wrong-color is otherwise still a hard error (``tf_needed``, 171);
+  finding: ``build_color_ok``, ``map.pm`` 657-664, is **never** bypassed
+  under ``FREE_D`` -- the target must still already be the faction's home
+  color there; what ``FREE_D``/``TELEPORT_NO_TF`` remove is cost and the
+  ``check_reachable`` call, 207-227, only ever reached from the
+  non-``TELEPORT_NO_TF`` branch). Ported here as a queued
+  ``PendingDecision(kind="free_d")`` (pushed by ``actions_power.py``'s
+  ACTW handler), consumed by ``handle_build`` below.
+  For an *ordinary* (non-``FREE_D``) build, though, ``tf_needed`` (171)
+  does **not** hard-error on a wrong-colored hex -- it internally dispatches
+  ``command $faction_name, "transform $where to $color"`` (213-219) first,
+  paying ``spades_available`` to recolor the target to home color in the
+  same turn, *before* placing the dwelling, with no separate ``transform``
+  ledger row of its own (task-13 report, reference-game row 58: "burn 6.
+  action ACT6. transform G2. build F5" -- the explicit ``transform`` names
+  a *different* hex prepped for a later turn; F5's own color fix is
+  implicit, paid from the 1 spade ACT6 left banked after G2's). This
+  engine ports that by folding a same-shaped auto-transform directly into
+  ``handle_build`` (reusing ``hooks_for(faction).spade_transform_cost`` for
+  Giants' flat-2 override, same as ``handle_transform``) rather than
+  literally recursing into ``handle_transform``, since ``handle_build``
+  always names an *explicit* target color (home), never the "closest to
+  home" default-target selection ``handle_transform`` needs for a bare
+  ``transform HEX`` row.
   ``pay``/``gain`` only outside round 0 (224-227, ``$free = ($game{round}
   == 0)`` at 152); ``note_leech`` (239, this module's ``leech.queue_leech``)
   fires **unconditionally**, ``FREE_D`` build included (Task 10 cross-check
   against the corpus's ``action ACTW. build X`` rows: always followed by
   ordinary opponent ``Leech`` rows when adjacent); ``advance_track`` for D
   count/cost (241); ``detect_towns_from`` (252, ``_maybe_queue_town``).
-  Score-tile BUILD VP (244-245) is explicitly **not** applied -- reserved
-  for a `score_vp` row handler (Task 12).
+  Score-tile BUILD VP (244-245, ``tiles.scored_vp``) is applied for D,
+  guarded by ``state.round >= 1`` (Task 13 fix, matching the same
+  ``if ($game{round})`` guard).
 - ``command_upgrade`` (258-311): wrong-color is always a hard error
   (266-267, no ``FREE_D``-style bypass for upgrades). ``note_leech`` fires
   *before* cost (280) for the D->TP neighbour-cost rule (282-293): a live
@@ -395,18 +412,22 @@ def handle_build(state: GameState, faction: str, cmd: ParsedCommand) -> GameStat
 
     setup = state.phase == Phase.SETUP_DWELLINGS
     color = FACTIONS[faction].color
-    if hex_state.color != color:
+    tf_needed = hex_state.color != color
+
+    free_d_index = None if setup else _find_pending_optional(state, faction, "free_d")
+
+    if tf_needed and (setup or free_d_index is not None):
         # ACTW's FREE_D marker (module docstring) does NOT bypass this
         # check -- build_color_ok is never skipped in Perl, only cost and
-        # reachability are.
+        # reachability are. Setup dwellings are always placed on an
+        # already-matching hex by construction, so this branch is a hard
+        # error there too.
         raise EngineError(
             f"{hex_key} is {hex_state.color}, not {faction}'s home color {color}",
             state=state,
             faction=faction,
             cmd=cmd,
         )
-
-    free_d_index = None if setup else _find_pending_optional(state, faction, "free_d")
 
     if not setup and free_d_index is None and hex_key not in reachable(state, faction):
         raise EngineError(
@@ -422,6 +443,28 @@ def handle_build(state: GameState, faction: str, cmd: ParsedCommand) -> GameStat
             faction=faction,
             cmd=cmd,
         )
+
+    if tf_needed:
+        # command_build's own implicit "transform $where to $color" dispatch
+        # (commands.pm 213-219, module docstring) -- an ordinary (non-FREE_D)
+        # build on a wrong-colored hex pays spades_available to recolor it
+        # to home color before placing the dwelling, in the same ledger row,
+        # with no separate `transform` command of its own (empirically:
+        # reference-game row 58, "burn 6. action ACT6. transform G2. build
+        # F5" -- F5 is brown, 1 spade from red->yellow's distance away, and
+        # the only explicit `transform` in the row targets G2, a different
+        # hex prepped for a later turn; task-13 report).
+        cost = hooks_for(faction).spade_transform_cost(state, faction, hex_state.color, color)
+        if cost > fs.spades_available:
+            raise EngineError(
+                f"{hex_key} needs {cost} spades to transform to {faction}'s home color "
+                f"{color} ({faction} has {fs.spades_available})",
+                state=state,
+                faction=faction,
+                cmd=cmd,
+            )
+        fs = replace(fs, spades_available=fs.spades_available - cost)
+        hex_state = replace(hex_state, color=color)
 
     if not setup and free_d_index is None:
         fs = _pay(state, faction, fs, d_track.cost, cmd)

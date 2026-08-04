@@ -94,6 +94,10 @@ def test_build_pays_cost_and_places_dwelling() -> None:
 
 
 def test_build_wrong_color_rejected() -> None:
+    """0 spades banked (fresh ``FactionState``): the implicit auto-transform
+    (module docstring) can't afford the recolor, so this is still a hard
+    error -- contrast ``test_build_wrong_color_with_enough_spades_auto_
+    transforms`` below."""
     s = _state()
     s = _place(s, "engineers", ANCHOR, "D")
     hexes = dict(s.hexes)
@@ -101,6 +105,26 @@ def test_build_wrong_color_rejected() -> None:
     s = replace(s, hexes=hexes)
     with pytest.raises(EngineError):
         handle_build(s, "engineers", _cmd("build", loc=TARGET))
+
+
+def test_build_wrong_color_with_enough_spades_auto_transforms() -> None:
+    """Reference-game row 58: an ordinary build on a wrong-colored hex
+    implicitly pays ``spades_available`` to recolor it to home color first
+    (``command_build``'s internal ``transform $where to $color`` dispatch,
+    module docstring) -- no separate ``transform`` command needed, unlike
+    ``test_build_wrong_color_rejected`` above (0 spades banked there)."""
+    s = _state()
+    s = _place(s, "engineers", ANCHOR, "D")
+    hexes = dict(s.hexes)
+    hexes[TARGET] = replace(hexes[TARGET], color="red", building=None, owner=None)  # gray<->red: 1
+    s = replace(s, hexes=hexes)
+    fs = replace(s.factions["engineers"], spades_available=2)
+    s = with_faction(s, "engineers", fs)
+    s2 = handle_build(s, "engineers", _cmd("build", loc=TARGET))
+    after = s2.factions["engineers"]
+    assert s2.hexes[TARGET].color == FACTIONS["engineers"].color
+    assert s2.hexes[TARGET].building == "D"
+    assert after.spades_available == 1  # 2 banked - 1 spent
 
 
 def test_build_occupied_hex_rejected() -> None:
