@@ -99,7 +99,7 @@ from dataclasses import replace
 
 from bgai.data.ledger_parser import ParsedCommand
 from bgai.engine.tm.apply import EngineError, push_pending, register_handler
-from bgai.engine.tm.board import RIVER
+from bgai.engine.tm.board import RIVER, base_board
 from bgai.engine.tm.factions.hooks import HOOKS, FactionHooks, hooks_for
 from bgai.engine.tm.factions_data import FACTIONS
 from bgai.engine.tm.state import FactionState, GameState, PendingDecision, Phase, with_faction
@@ -307,8 +307,33 @@ def _cluster_key(cluster: frozenset[str]) -> str:
     return ",".join(sorted(cluster))
 
 
+def _river_between(state: GameState, loc: str, loc2: str, cmd: ParsedCommand, faction: str) -> str:
+    """The single river hex adjacent to *both* ``loc`` and ``loc2`` --
+    ``commands.pm``'s ``command_connect`` (930-967) is fully generic over
+    an arbitrary ``@hexes`` list, finding whichever river hex is adjacent
+    to *every* one of them (``next if $rivers{$river} != @hexes``); this
+    engine only ever sees the corpus's 2-hex early-era form (task-14 fix,
+    ``ledger_parser.py``'s ``connect`` rule already parsed a second
+    ``loc2`` for this, but ``handle_connect`` never used it -- corpus
+    ``4pLeague_S1_D2L1_G1`` row 258, ``connect loc=A4 loc2=C1``: neither
+    A4 nor C1 is ever river-colored, so treating ``loc`` as the river
+    hex directly hard-errored "A4 is not a river hex").
+    """
+    board = base_board()
+    if loc not in board.adjacent or loc2 not in board.adjacent:
+        raise EngineError(f"unknown hex {loc!r} or {loc2!r}", state=state, faction=faction, cmd=cmd)
+    candidates = [h for h in board.adjacent[loc] & board.adjacent[loc2] if board.hexes[h].color == RIVER]
+    if len(candidates) != 1:
+        raise EngineError(
+            f"no unique river hex connects {loc} and {loc2}", state=state, faction=faction, cmd=cmd
+        )
+    return candidates[0]
+
+
 def handle_connect(state: GameState, faction: str, cmd: ParsedCommand) -> GameState:
-    """``connect R<n>``: Mermaids-only river-hex town join (module docstring).
+    """``connect R<n>`` or the corpus's early-era 2-land-hex form (``connect
+    A<n> C<n>``, module docstring / ``_river_between``): Mermaids-only
+    river-hex town join.
 
     Uses ``towns.river_town_candidate`` -- the single-river BFS scoped to
     exactly ``river`` -- rather than filtering ``towns.new_towns``'s
@@ -318,15 +343,20 @@ def handle_connect(state: GameState, faction: str, cmd: ParsedCommand) -> GameSt
     from a *different* river hex).
     """
     assert cmd.loc is not None
-    river = cmd.loc
     if faction != "mermaids":
         raise EngineError(
             f"{faction} cannot connect (Mermaids-only)", state=state, faction=faction, cmd=cmd
         )
-    if river not in state.hexes:
-        raise EngineError(f"unknown hex {river!r}", state=state, faction=faction, cmd=cmd)
-    if state.hexes[river].color != RIVER:
-        raise EngineError(f"{river} is not a river hex", state=state, faction=faction, cmd=cmd)
+    if cmd.loc2 is not None:
+        river = _river_between(state, cmd.loc, cmd.loc2, cmd, faction)
+    else:
+        river = cmd.loc
+        if river not in state.hexes:
+            raise EngineError(f"unknown hex {river!r}", state=state, faction=faction, cmd=cmd)
+        if state.hexes[river].color != RIVER:
+            raise EngineError(
+                f"{river} is not a river hex", state=state, faction=faction, cmd=cmd
+            )
 
     cluster = river_town_candidate(state, faction, river)
     if cluster is None:

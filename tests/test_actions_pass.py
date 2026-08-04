@@ -377,6 +377,26 @@ def test_connect_scopes_the_candidate_to_the_named_river_not_any_touching_river(
     assert set(pendings[0].source.split(",")) == {"A3", "A4", "B2", "B3"}
 
 
+def test_connect_two_hex_early_era_form_derives_the_river() -> None:
+    """Task-14 fix, corpus ``4pLeague_S1_D2L1_G1`` row 258 (an early-era
+    ledger encoding): ``connect`` can name the two land hexes on either
+    side of the river instead of the river hex itself
+    (``ledger_parser.py``'s ``connect`` rule already parsed a second
+    ``loc2`` for this; ``handle_connect`` never used it, always treating
+    ``cmd.loc`` as the river directly and hard-erroring "not a river
+    hex"). ``_river_between`` derives the unique river hex adjacent to
+    both, mirroring ``commands.pm``'s fully generic ``command_connect``
+    (930-967: finds whichever river is adjacent to *every* hex in the
+    given list)."""
+    a, a2, river, b, b2 = _mermaid_river_layout()
+    s = _state()
+    s = _place_all(s, "mermaids", {a: "SH", a2: "D", b: "TE", b2: "D"})
+    s2 = handle_connect(s, "mermaids", _cmd("connect", loc=a, loc2=b))
+    pendings = [p for p in s2.pending if p.kind == "gain_town" and p.faction == "mermaids"]
+    assert len(pendings) == 1
+    assert set(pendings[0].source.split(",")) == {a, a2, b, b2}
+
+
 def test_connect_rejects_non_mermaids() -> None:
     _a, _a2, river, _b, _b2 = _mermaid_river_layout()
     s = _state()
