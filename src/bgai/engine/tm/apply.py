@@ -58,19 +58,34 @@ def register_handler(verb: str, handler: Handler) -> None:
 # Verbs that may be applied even when `faction` is not `active_faction(state)`.
 _ORDER_EXEMPT_VERBS = frozenset({"wait", "annotation"})
 _LEECH_ANSWER_VERBS = frozenset({"leech", "decline"})
+# `+CULT` answering an outstanding `cult_choice` pending (Cultists'
+# leech_effect "taken" cult step, pushed mid-batch by leech.py -- see that
+# module's docstring): the Cultists' answer can legitimately sit behind
+# still-outstanding sibling leech offers from the same build in the pending
+# queue, so this needs the same anywhere-in-queue exemption as leech/decline,
+# not just an active_faction()-is-literally-me check.
+_CULT_CHOICE_ANSWER_VERBS = frozenset({"gain_cult"})
 
 
-def _has_queued_leech_for(state: GameState, faction: str) -> bool:
-    """Any queued leech offer for `faction`, anywhere in the queue. Strict
-    `acting.pm` semantics (only the faction's own head offer) is Task 8's.
+def _has_queued_pending_of_kind(state: GameState, faction: str, kind: str) -> bool:
+    """Any queued pending of `kind` for `faction`, anywhere in the queue.
+    Strict `acting.pm` semantics (only the faction's own head entry) is a
+    later task's; this only asks "is there one at all".
     """
-    return any(p.faction == faction and p.kind == "leech" for p in state.pending)
+    return any(p.faction == faction and p.kind == kind for p in state.pending)
 
 
 def apply(state: GameState, faction: str, cmd: ParsedCommand) -> GameState:
     """The engine's single entry point: dispatch `cmd` for `faction`."""
-    exempt = cmd.verb in _ORDER_EXEMPT_VERBS or (
-        cmd.verb in _LEECH_ANSWER_VERBS and _has_queued_leech_for(state, faction)
+    exempt = (
+        cmd.verb in _ORDER_EXEMPT_VERBS
+        or (
+            cmd.verb in _LEECH_ANSWER_VERBS and _has_queued_pending_of_kind(state, faction, "leech")
+        )
+        or (
+            cmd.verb in _CULT_CHOICE_ANSWER_VERBS
+            and _has_queued_pending_of_kind(state, faction, "cult_choice")
+        )
     )
     if not exempt and faction != active_faction(state):
         raise EngineError(
@@ -156,14 +171,6 @@ def _find_pending_index(state: GameState, faction: str, kind: str) -> int | None
         if p.faction == faction and p.kind == kind:
             return i
     return None
-
-
-def _pending_head_is(state: GameState, faction: str, kind: str) -> bool:
-    return (
-        bool(state.pending)
-        and state.pending[0].faction == faction
-        and state.pending[0].kind == kind
-    )
 
 
 def _consume_pending_amount(
@@ -332,10 +339,13 @@ def handle_convert_marker(state: GameState, faction: str, cmd: ParsedCommand) ->
 
 
 def handle_gain_cult(state: GameState, faction: str, cmd: ParsedCommand) -> GameState:
-    """`+N<CULT>`: advance `faction`'s track by N (default 1). If a
-    `cult_choice` pending is queued at this faction's head, this row is its
-    answer and pops it (Cultists' leech choice, ACTA/BON2/FAV-action steps,
-    town-tile cult gains).
+    """`+N<CULT>`: advance `faction`'s track by N (default 1). If `faction`
+    has a `cult_choice` pending queued *anywhere* (not just the head --
+    Cultists' leech-effect choice, pushed mid-batch by `leech.py`, can
+    legitimately sit behind still-outstanding sibling leech offers from
+    the same build), this row is its answer and pops that specific entry
+    (Cultists' leech choice, ACTA/BON2/FAV-action steps, town-tile cult
+    gains).
     """
     assert cmd.cult is not None
     cult = cmd.cult
@@ -344,8 +354,10 @@ def handle_gain_cult(state: GameState, faction: str, cmd: ParsedCommand) -> Game
 
     result = _advance_track(state, faction, fs, cult, steps)
     new_state, new_fs = _apply_cult_advance(state, faction, fs, cult, result)
-    if _pending_head_is(state, faction, "cult_choice"):
-        new_state = pop_pending(new_state, 0)
+
+    cult_choice_index = _find_pending_index(state, faction, "cult_choice")
+    if cult_choice_index is not None:
+        new_state = pop_pending(new_state, cult_choice_index)
 
     return with_faction(new_state, faction, new_fs)
 

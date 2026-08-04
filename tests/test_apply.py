@@ -67,6 +67,22 @@ def _cmd(verb: str, kind: Kind = Kind.DECISION, **fields: object) -> ParsedComma
     return ParsedCommand(verb=verb, kind=kind, raw=verb, **fields)  # type: ignore[arg-type]
 
 
+def _restore_handler(verb: str, previous: object | None) -> None:
+    """Undo a test's temporary `register_handler(verb, stub)` override.
+
+    HANDLERS is process-global and, since Task 8, "leech"/"decline" have
+    real registered handlers by the time any test runs (leech.py
+    registers them at import time). Restore whatever was there before
+    (real handler or nothing) instead of unconditionally `del`-ing, which
+    would otherwise permanently break every later test that dispatches a
+    leech/decline verb through `apply()`.
+    """
+    if previous is None:
+        HANDLERS.pop(verb, None)
+    else:
+        HANDLERS[verb] = previous  # type: ignore[assignment]
+
+
 # --------------------------------------------------------------------------
 # convert
 # --------------------------------------------------------------------------
@@ -413,6 +429,12 @@ def test_apply_allows_leech_answer_out_of_turn_when_queued_for_that_faction() ->
     )
     assert active_faction(s) == "nomads"
 
+    # Save/restore rather than `del`: Task 8 (leech.py) registers real
+    # "leech"/"decline" handlers at import time, so HANDLERS is no longer
+    # empty for these verbs by the time this test runs -- blindly deleting
+    # them after the stub override would permanently wipe the real
+    # handlers for the rest of the test session.
+    prev_leech, prev_decline = HANDLERS.get("leech"), HANDLERS.get("decline")
     register_handler("leech", lambda state, faction, cmd: state)
     register_handler("decline", lambda state, faction, cmd: state)
     try:
@@ -421,20 +443,21 @@ def test_apply_allows_leech_answer_out_of_turn_when_queued_for_that_faction() ->
         s3 = apply(s, "darklings", _cmd("decline"))
         assert s3 == s
     finally:
-        del HANDLERS["leech"]
-        del HANDLERS["decline"]
+        _restore_handler("leech", prev_leech)
+        _restore_handler("decline", prev_decline)
 
 
 def test_apply_rejects_leech_answer_with_no_queued_offer_for_that_faction() -> None:
     s = _state()
     s = push_pending(s, PendingDecision(faction="nomads", kind="gain_favor"))
 
+    prev_leech = HANDLERS.get("leech")
     register_handler("leech", lambda state, faction, cmd: state)
     try:
         with pytest.raises(EngineError):
             apply(s, "darklings", _cmd("leech"))
     finally:
-        del HANDLERS["leech"]
+        _restore_handler("leech", prev_leech)
 
 
 def test_push_pending_appends_fifo() -> None:

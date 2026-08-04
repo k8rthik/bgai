@@ -13,13 +13,20 @@ from dataclasses import replace
 import pytest
 
 from bgai.data.ledger_parser import Kind, ParsedCommand
-from bgai.engine.tm.apply import EngineError
+from bgai.engine.tm.apply import EngineError, apply
 from bgai.engine.tm.board import base_board
 from bgai.engine.tm.factions_data import FACTIONS
 from bgai.engine.tm.leech import handle_decline, handle_leech, offers_for_build, queue_leech
 from bgai.engine.tm.power import Power
 from bgai.engine.tm.setup import load_setup
-from bgai.engine.tm.state import FactionState, GameState, PendingDecision, Phase, with_faction
+from bgai.engine.tm.state import (
+    FactionState,
+    GameState,
+    PendingDecision,
+    Phase,
+    active_faction,
+    with_faction,
+)
 
 GAME_ID = "4pLeague_S10_D1L1_G1"
 BOARD = base_board()
@@ -283,6 +290,52 @@ def test_cultists_first_accept_fires_cult_choice_immediately_mid_batch() -> None
     cult_choices = [p for p in s3.pending if p.kind == "cult_choice"]
     assert cult_choices == [PendingDecision(faction="cultists", kind="cult_choice", amount=1)]
     assert not any(p.kind == "cultist_leech_watch" for p in s3.pending)
+
+
+def test_apply_lets_cultists_answer_cult_choice_mid_batch_through_the_gate() -> None:
+    """Regression test (code review round 2, apply()-level): with two
+    opponents adjacent to a Cultists build, after the first accept the
+    pending queue is [leech(nomads), cultist_leech_watch, cult_choice] --
+    `nomads`, not `cultists`, is `active_faction`. Cultists must still be
+    able to submit their `+CULT` answer *through `apply()`* (not just by
+    calling the handler directly), and doing so must consume exactly
+    their `cult_choice` pending (not the head-of-queue entry), leaving
+    the still-outstanding `nomads` leech offer and `active_faction`
+    untouched.
+    """
+    s = _state()
+    factions = dict(s.factions)
+    factions["cultists"] = FactionState.initial(FACTIONS["cultists"])
+    cults = {**s.cults, "cultists": dict(FACTIONS["cultists"].cults)}
+    s = replace(s, factions=factions, cults=cults, turn_order=("cultists", "darklings", "nomads"))
+    s = _place(s, "darklings", ANCHOR, "TP", FACTIONS["darklings"].color)
+    s = _place(s, "nomads", NEIGHBOR, "TP", FACTIONS["nomads"].color)
+    hexes = dict(s.hexes)
+    hexes[TARGET] = replace(
+        hexes[TARGET], color=FACTIONS["cultists"].color, building=None, owner=None
+    )
+    s = replace(s, hexes=hexes)
+    s = queue_leech(s, "cultists", TARGET)
+
+    # darklings accepts through apply() -- exempt via the queued-leech rule.
+    s = apply(s, "darklings", _cmd("leech", n1=2, target="cultists"))
+    assert [p.kind for p in s.pending] == ["leech", "cultist_leech_watch", "cult_choice"]
+    assert active_faction(s) == "nomads"  # NOT cultists -- the crux of the repro
+
+    # Before the fix this raised EngineError("faction acted out of turn").
+    s2 = apply(s, "cultists", _cmd("gain_cult", cult="FIRE", n1=1))
+
+    assert s2.cults["cultists"]["FIRE"] == 2  # cultists start FIRE=1
+    assert not any(p.kind == "cult_choice" for p in s2.pending)
+    # The sibling nomads offer (and the game's real active_faction) is
+    # untouched by cultists jumping the queue to answer their own choice.
+    remaining_leech = [p for p in s2.pending if p.kind == "leech"]
+    assert [p.faction for p in remaining_leech] == ["nomads"]
+    assert active_faction(s2) == "nomads"
+
+    # And the normal out-of-turn rejection still applies to everything else.
+    with pytest.raises(EngineError):
+        apply(s2, "cultists", _cmd("burn", n1=1))
 
 
 def test_cultists_all_decline_grants_power_under_errata_option() -> None:

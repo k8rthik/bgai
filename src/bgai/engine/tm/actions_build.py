@@ -522,7 +522,14 @@ def handle_gain_town(state: GameState, faction: str, cmd: ParsedCommand) -> Game
     assert cmd.tile is not None
     idx = _find_pending(state, faction, "gain_town", cmd)
     pending = state.pending[idx]
-    assert pending.source is not None, "gain_town pending missing its cluster source"
+    if pending.source is None:
+        raise EngineError(
+            "gain_town pending missing its cluster source (internal bookkeeping bug -- "
+            "_maybe_queue_town should always set it)",
+            state=state,
+            faction=faction,
+            cmd=cmd,
+        )
 
     new_state = pop_pending(state, idx)
     try:
