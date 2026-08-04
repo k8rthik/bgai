@@ -227,6 +227,16 @@ def test_pass_rejects_a_tile_already_held_by_someone_else() -> None:
         handle_pass(s, "engineers", _cmd("pass", tile="BON7"))
 
 
+_NON_PASS_PHASES = [Phase.INCOME, Phase.CLEANUP, Phase.SETUP_DWELLINGS, Phase.FINISHED]
+
+
+@pytest.mark.parametrize("phase", _NON_PASS_PHASES)
+def test_pass_rejects_every_phase_other_than_actions_and_setup_bonus(phase: Phase) -> None:
+    s = replace(_state(), phase=phase)
+    with pytest.raises(EngineError):
+        handle_pass(s, "engineers", _cmd("pass", tile="BON7"))
+
+
 # --------------------------------------------------------------------------
 # pass: SETUP_BONUS one-time pick
 # --------------------------------------------------------------------------

@@ -20,11 +20,12 @@ know which of ``income.py``'s four ``faction_income`` categories
 "cult" one is computed. This was settled by joining ``moves.parquet``
 against ``deltas.parquet`` (which gives, per ledger row, the *resulting*
 C/W/P/VP running totals and per-row deltas, plus a snapshot ``cult``
-string "F/W/E/A" and ``pw`` bowl-string) for game
-``4pLeague_S10_D1L1_G1`` (the same reference game the setup-order test
-below reproduces):
+string "F/W/E/A" and ``pw`` bowl-string) across **three independent
+games**:
 
-- Rows 42-45 (``other_income_for_faction``, one per faction, seat order:
+- **Game 1**, ``4pLeague_S10_D1L1_G1`` (the same reference game the
+  setup-order test below reproduces). Rows 42-45
+  (``other_income_for_faction``, one per faction, seat order:
   engineers/darklings/nomads/mermaids) fire *immediately after* the
   SETUP_BONUS pass rows (37-40), i.e. at the very start of round 1's
   INCOME phase -- before any ACTIONS-phase row exists yet. Their C/W/P
@@ -32,15 +33,14 @@ below reproduces):
   building/bonus-tile counts (e.g. darklings' row 43, C +6, W +3 --
   their board.pm buildings + BON3's ``{C: 6}`` income). Round 1's own
   SCORE tile (``score_tiles[0]``: cult WATER, req 4, income
-  ``{SPADE: 1}``) plays no part here at all.
-- Rows 94-97 (``cult_income_for_faction``, all 4 factions, in a *different*
-  order each time -- not seat order) fire near the end of round 1's
-  ACTIONS phase, right before round 2's ``other_income_for_faction`` rows
-  (100-103) begin. Their C/W/P deltas are **all zero** -- consistent with
-  round 1's SCORE tile granting SPADE, a resource ``deltas.parquet``
-  simply has no column for.
-- The decisive cross-check is round 2's SCORE tile (``score_tiles[1]``:
-  cult EARTH, req 1, income ``{C: 1}``) and its cleanup rows, 136-139:
+  ``{SPADE: 1}``) plays no part here at all. Rows 94-97
+  (``cult_income_for_faction``, all 4 factions) fire near the end of
+  round 1's ACTIONS phase, right before round 2's
+  ``other_income_for_faction`` rows (100-103) begin. Their C/W/P deltas
+  are **all zero** -- consistent with round 1's SCORE tile granting
+  SPADE, a resource ``deltas.parquet`` simply has no column for. The
+  decisive cross-check is round 2's SCORE tile (``score_tiles[1]``: cult
+  EARTH, req 1, income ``{C: 1}``) and its cleanup rows, 136-139:
   mermaids/engineers/nomads/darklings show C deltas of exactly 3/5/1/5,
   which match **exactly** ``floor(EARTH_position / 1) * 1`` read off each
   faction's post-row ``cult`` snapshot string (EARTH 3/5/1/5
@@ -50,6 +50,25 @@ below reproduces):
   engineers FIRE=0 -> W+0, mermaids FIRE=0 -> W+0, nomads FIRE=4 -> W+2
   (floor(4/2)) -- every single delta matches, including the *zero* cases
   (the row is still emitted for a faction that earned nothing).
+- **Game 2**, ``4pLeague_S3_D1L1_G1``, ``all_income_for_faction`` (under
+  ``merge-income-phases``) rows 91-94: C/W/P deltas 3/4/1, 3/3/1, 7/5/1,
+  3/6/1 for dwarves/giants/darklings/nomads -- ordinary building/bonus/
+  favor-sized amounts, confirming a merged row is not scaled down or
+  otherwise different from the sum of the two split rows.
+- **Game 3**, ``4pLeague_S10_D1L1_G2``, isolates the *favor*-income
+  contribution specifically (base/buildings/bonus alone were already
+  covered by game 1). Darklings gain FAV9 (``income={"C": 3}``) at row
+  103; by their next ``other_income_for_faction`` row (148) their board
+  is D=3/TP=1/TE=1 (reconstructed from every intervening ``build``/
+  ``upgrade`` row: 5 dwellings built total, 2 upgraded away to TP then
+  one of those to TE) holding BON10 (``income={"PW": 3}``, taken at row
+  119). Predicted C = TP's ``income["C"][1]`` (2) + FAV9's 3 = 5; W = D's
+  ``income["W"][3]`` (4); P = TE's ``income["P"][1]`` (1). Row 148's
+  actual deltas: C +5, W +4, P +1 -- an exact match on all three,
+  confirming favor income flows through the same ``other_income_for_faction``
+  bucket as base/building/bonus income (test:
+  ``test_other_income_matches_a_third_independent_corpus_game`` in
+  ``tests/test_round_flow.py`` reproduces this exact board/tile state).
 
 **Finding**: ``other_income_for_faction`` = ``income.faction_income``'s
 four categories (base + buildings + bonus + favors), granted once per
@@ -60,11 +79,31 @@ tile's ``cult_income`` (``tiles.ScoringTile.cult_income``), scaled by
 granted once per faction at CLEANUP (end of ACTIONS phase, using that
 faction's cult position as it stands at that moment) -- **always** emitted,
 even when the faction earns 0. ``all_income_for_faction`` (under
-``merge-income-phases``) grants both components together in one row; spot
-checked against game 4pLeague_S3_D1L1_G1 rows 91-94 (C/W/P deltas 3/4/1,
-3/3/1, 7/5/1, 3/6/1 for dwarves/giants/darklings/nomads -- ordinary
-building/bonus/favor-sized amounts, confirming it is not scaled down or
-otherwise different from the sum of the two split rows).
+``merge-income-phases``) grants both components together in one row.
+
+**On row ordering** (code review correction): a first pass at this
+docstring characterized game 1's cult-income rows (94-97) as arriving "in
+a different order -- not seat order" as if that were some anomaly unique
+to cult income. That framing was misleading. Per the reference
+implementation, *both* verbs are emitted the same way: ``command_income``
+(``commands.pm`` 994-1016) iterates ``$game{acting}->factions_in_turn_order()``
+for the ``'other'`` batch exactly as it does for the ``'cult'`` batch
+(both call sites live in ``command_start_planning``, ``commands.pm``
+1144-1154), and ``factions_in_turn_order`` (``acting.pm`` 203-210) is
+itself just ``factions_in_order`` rotated to start after whichever
+faction currently holds ``{start_player}`` -- which, under
+``variable-turn-order`` (this reference game's own options -- see
+``setup.py``'s ``GameOptions``), is exactly the *previous* round's pass
+order, the same source ``end_of_round`` below feeds into next round's
+``turn_order``. So there is no separate "cult order" mechanism to model;
+the apparent seat-order-vs-not difference between the two batches in the
+sampled rows simply reflects whatever ``factions_in_turn_order`` evaluated
+to at each call site, not a distinct rule. This is why the finding above
+does not encode any particular row order as load-bearing: every row names
+its own faction explicitly, ``apply.py``'s gate exempts all three income
+verbs, and ``handle_income_row`` reads only ``state``/``faction`` -- the
+order rows arrive in is provably irrelevant to correctness here, whatever
+produces it in a given replay.
 
 A companion finding, needed for ``end_of_round``'s cult-reward plumbing:
 which resource bucket does a SPADE-valued ``cult_income`` (round 1's own
@@ -155,12 +194,14 @@ sequence this implies.
   "active" there any more -- cleanup rows are gate-exempt, see below).
 - ``Phase.INCOME``/``Phase.CLEANUP``: a no-op. Income and cult-income rows
   apply to an explicit ``faction`` named by the row itself, in whatever
-  order the corpus lists them (not seat order for cleanup -- see Step 1
-  above) -- ``apply.py``'s turn-order gate now exempts all three income
-  verbs (plus the bookkeeping-only ``setup`` verb) for exactly this
-  reason, so ``active_index``/``active_faction`` are irrelevant during
-  these two phases. ``begin_actions``/``end_of_round`` below own their
-  phase transitions instead.
+  order the corpus lists them -- both verbs share the same underlying
+  Perl ordering mechanism and neither this engine's handler nor its
+  correctness depend on row order at all (see Step 1 above, "On row
+  ordering") -- ``apply.py``'s turn-order gate now exempts all three
+  income verbs (plus the bookkeeping-only ``setup`` verb) for exactly
+  this reason, so ``active_index``/``active_faction`` are irrelevant
+  during these two phases. ``begin_actions``/``end_of_round`` below own
+  their phase transitions instead.
 
 --------------------------------------------------------------------------
 Task 12 contract (the replay harness)

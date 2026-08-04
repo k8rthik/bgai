@@ -41,6 +41,27 @@ _REFERENCE_SETUP_ROWS = (
     ("nomads", "G4"),
 )
 
+# A second reference game -- roster engineers/halflings/chaosmagicians/mermaids
+# (no Nomads), exercising acting.pm:186-189's *other* branch (a single-dwelling
+# faction placed last) instead of the 3-dwelling one. Ledger rows 28-34.
+CM_GAME_ID = "4pLeague_S10_D2L1_G4"
+_CM_REFERENCE_SETUP_ROWS = (
+    ("engineers", "E7"),
+    ("halflings", "F5"),
+    ("mermaids", "D5"),
+    ("mermaids", "E4"),
+    ("halflings", "D8"),
+    ("engineers", "C5"),
+    ("chaosmagicians", "D7"),
+)
+# rows 35-38: reverse seat order (mermaids, chaosmagicians, halflings, engineers).
+_CM_REFERENCE_BONUS_PICKS = (
+    ("mermaids", "BON1"),
+    ("chaosmagicians", "BON4"),
+    ("halflings", "BON5"),
+    ("engineers", "BON2"),
+)
+
 
 def _state() -> GameState:
     s = GameState.initial(load_setup(GAME_ID))
@@ -129,6 +150,37 @@ def test_all_income_for_faction_grants_both_components() -> None:
     fs = s2.factions["nomads"]
     assert fs.spades_available == 1  # cult component
     assert fs.workers >= 0  # other-income component ran without error
+
+
+def test_other_income_matches_a_third_independent_corpus_game() -> None:
+    """Game 3 of the Step-1 empirical evidence (module docstring):
+    ``4pLeague_S10_D1L1_G2``, darklings' row-148 ``other_income_for_faction``
+    -- board D=3/TP=1/TE=1, holding BON10 (``{"PW": 3}``) and FAV9
+    (``{"C": 3}``, gained at row 103). Corpus deltas: C +5, W +4, P +1.
+    This isolates the favor-income contribution specifically (FAV9's C:3
+    is the only source of C besides TP's own C:2).
+    """
+    s = _state()
+    s = _rich(
+        s,
+        "darklings",
+        coins=0,
+        workers=0,
+        priests=0,
+        bonus="BON10",
+        favors=("FAV9",),
+        buildings={
+            **s.factions["darklings"].buildings,
+            "D": frozenset({"d1", "d2", "d3"}),
+            "TP": frozenset({"tp1"}),
+            "TE": frozenset({"te1"}),
+        },
+    )
+    s2 = handle_income_row(s, "darklings", _cmd("other_income_for_faction"))
+    fs = s2.factions["darklings"]
+    assert fs.coins == 5
+    assert fs.workers == 4
+    assert fs.priests == 1
 
 
 def test_income_row_verb_gated_exempt_from_turn_order() -> None:
@@ -292,7 +344,55 @@ def test_setup_bonus_reverse_order_then_round_1_income() -> None:
     assert s.phase == Phase.INCOME
     assert s.round == 1
     assert s.turn_order == s.setup.factions
+
+
+def test_setup_dwellings_snake_order_reproduces_chaos_magicians_game() -> None:
+    """Second, independent corpus game (no Nomads): exercises the
+    single-dwelling-faction-placed-last branch of ``acting.pm``'s
+    setup_order (module docstring citation lines 186-189) instead of the
+    3-dwelling-faction-extra-turn branch the reference game covers.
+    Chaos Magicians (``start_dwellings=1``) sit out both the forward and
+    reverse passes entirely and place their one dwelling last.
+    """
+    s = GameState.initial(load_setup(CM_GAME_ID))
+    s = start_setup(s)
+    for faction, hex_key in _CM_REFERENCE_SETUP_ROWS:
+        assert active_faction(s) == faction
+        s = apply(s, faction, _cmd("build", loc=hex_key))
+        s = advance_turn(s)
+    assert s.phase == Phase.SETUP_BONUS
+    assert s.turn_order == tuple(reversed(s.setup.factions))
     assert s.active_index == 0
+    # chaosmagicians placed exactly once, last, after 6 other builds.
+    assert len(s.factions["chaosmagicians"].buildings["D"]) == 1
+    assert len(s.factions["engineers"].buildings["D"]) == 2
+    assert len(s.factions["halflings"].buildings["D"]) == 2
+    assert len(s.factions["mermaids"].buildings["D"]) == 2
+
+    for faction, tile in _CM_REFERENCE_BONUS_PICKS:
+        assert active_faction(s) == faction
+        s = apply(s, faction, _cmd("pass", tile=tile))
+        s = advance_turn(s)
+    assert s.phase == Phase.INCOME
+    assert s.round == 1
+    assert s.turn_order == s.setup.factions
+
+
+def test_setup_dwellings_order_places_single_dwelling_faction_last() -> None:
+    from bgai.engine.tm.round_flow import _setup_dwellings_order
+
+    order = _setup_dwellings_order(load_setup(CM_GAME_ID))
+    assert order == (
+        "engineers",
+        "halflings",
+        "mermaids",
+        "mermaids",
+        "halflings",
+        "engineers",
+        "chaosmagicians",
+    )
+    assert order[-1] == "chaosmagicians"
+    assert order.count("chaosmagicians") == 1
 
 
 # --------------------------------------------------------------------------

@@ -72,7 +72,14 @@ Ported from the reference implementation (jsnell/terra-mystica, MIT):
   ``new_towns`` at that point can only surface a genuinely new
   river-joined candidate -- cross-checked against the crawled corpus (game
   4pLeague_S10_D1L1_G1 row 208: ``dig 1. build A3. connect R1.
-  gain_town TW1``, all one ledger row/turn).
+  gain_town TW1``, all one ledger row/turn). **Known limitation**: this
+  reasoning assumes ``connect`` always follows a ``build``/``upgrade``/
+  ``bridge`` row earlier in the *same* turn, which is the only pattern
+  observed across the sampled corpus rows -- a hypothetical ``connect``
+  fired with no board change earlier that turn is unverified (there is
+  nothing in principle wrong with ``handle_connect`` in that case, since
+  it re-derives candidates fresh rather than trusting a stale detection
+  pass, but no corpus row was found to confirm it).
 
 Engineers' stronghold pass-VP hook (``scoring.pm`` lines 166-178, quoted in
 ``factions_data.py``'s ``notes`` field): "3 VP for each bridge whose two
@@ -177,9 +184,16 @@ def handle_pass(state: GameState, faction: str, cmd: ParsedCommand) -> GameState
     this is a bare round-6 pass) take ``cmd.tile`` with its accumulated
     ``bonus_coins`` (module docstring). During ``Phase.SETUP_BONUS`` this is
     instead the one-time starting-tile pick, with none of that machinery.
+    A ``pass`` row is only ever legal during ``Phase.ACTIONS`` (the real
+    round-by-round pass) or ``Phase.SETUP_BONUS`` (the one-time pick) --
+    any other phase raises.
     """
     if state.phase == Phase.SETUP_BONUS:
         return _handle_setup_bonus_pick(state, faction, cmd)
+    if state.phase != Phase.ACTIONS:
+        raise EngineError(
+            f"pass is not legal during {state.phase.name}", state=state, faction=faction, cmd=cmd
+        )
 
     fs = state.factions[faction]
     vp = _bonus_pass_vp(fs) + _favor_pass_vp(fs) + hooks_for(faction).pass_vp_extra(state, faction)

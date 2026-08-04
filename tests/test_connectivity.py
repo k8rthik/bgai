@@ -3,7 +3,7 @@
 from dataclasses import replace
 
 from bgai.engine.tm.board import RIVER, base_board
-from bgai.engine.tm.connectivity import clusters, directly_adjacent, reachable
+from bgai.engine.tm.connectivity import clusters, directly_adjacent, effective_shipping, reachable
 from bgai.engine.tm.factions_data import FACTIONS
 from bgai.engine.tm.setup import load_setup
 from bgai.engine.tm.state import FactionState, GameState, with_faction
@@ -51,6 +51,46 @@ def test_shipping_one_reaches_across_single_river_hex() -> None:
         s, factions={**s.factions, "engineers": replace(s.factions["engineers"], shipping=1)}
     )
     assert b in reachable(s, "engineers")
+
+
+def _with_faction_fields(state: GameState, faction: str, **fields: object) -> GameState:
+    fs = replace(state.factions[faction], **fields)  # type: ignore[arg-type]
+    return replace(state, factions={**state.factions, faction: fs})
+
+
+def test_bon4_grants_plus_one_shipping_at_level_zero() -> None:
+    """map.pm check_reachable (connectivity.py's module docstring): BON4's
+    held-tile passive adds 1 to shipping range even at ship level 0."""
+    a, _r, b = _river_gap()
+    s = _place(_fresh(), "engineers", a)
+    assert b not in reachable(s, "engineers")  # sanity: unreachable without BON4
+    s = _with_faction_fields(s, "engineers", bonus="BON4")
+    assert b in reachable(s, "engineers")
+
+
+def test_bon4_reach_reverts_once_the_tile_is_passed_away() -> None:
+    a, _r, b = _river_gap()
+    s = _place(_fresh(), "engineers", a)
+    s = _with_faction_fields(s, "engineers", bonus="BON4")
+    assert b in reachable(s, "engineers")
+    # give the tile up (a real `pass` hands it to whoever takes it next;
+    # this test only cares that reach reverts once it's no longer held).
+    s2 = _with_faction_fields(s, "engineers", bonus=None)
+    assert b not in reachable(s2, "engineers")
+
+
+def test_bon4_does_not_apply_once_the_holder_has_passed() -> None:
+    """ "Bon4 doesn't apply in phase III" (map.pm's own comment)."""
+    a, _r, b = _river_gap()
+    s = _place(_fresh(), "engineers", a)
+    s = _with_faction_fields(s, "engineers", bonus="BON4", passed=True)
+    assert b not in reachable(s, "engineers")
+
+
+def test_bon4_does_not_apply_to_a_faction_with_no_shipping_track() -> None:
+    s = _with_dwarves(_fresh())
+    s = _with_faction_fields(s, "dwarves", bonus="BON4")
+    assert effective_shipping(s, "dwarves") == 0
 
 
 def test_direct_neighbors_always_reachable() -> None:

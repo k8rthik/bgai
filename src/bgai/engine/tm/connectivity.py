@@ -46,6 +46,24 @@ later task's (build-command validation), per ``check_reachable`` itself,
 which is only ever called from build-location enumeration
 (``update_reachable_build_locations``, lines 666-694) alongside a
 separate ``build_color_ok``/occupancy check.
+
+- ``check_reachable`` (lines 214-222): BON4 (``special => { ship => 1 }``,
+  ``Constants.pm`` line 130) adds 1 to the acting faction's shipping range
+  while ``$faction->{BON4}`` is truthy and ``$faction->{max_level}`` (the
+  track exists at all) -- ``and !$faction->{passed}`` ("Bon4 doesn't apply
+  in phase III" per the Perl's own comment: a faction that has already
+  passed for the round no longer benefits). Grepping ``resources.pm``
+  (``adjust_resource``, the ``$type =~ /^BON/`` branch, lines 313-397)
+  shows ``$faction->{BON4}`` is not an independent counter with its own
+  set/unset lifecycle -- it is the exact same generic
+  ``$faction->{$type} += $delta`` mechanism every resource gain uses,
+  incremented to 1 when the tile is taken and decremented back to 0 when
+  it is given up at a later pass. That is precisely
+  ``FactionState.bonus == "BON4"`` in this port -- a live field read fresh
+  at query time, not a snapshot -- so the effective-shipping helper below
+  (computed on demand from ``fs.bonus``) is exactly faithful to the Perl,
+  not merely an approximation of some other "grant on take, remove on
+  return" mechanism.
 """
 
 from __future__ import annotations
@@ -55,6 +73,7 @@ from collections import deque
 from bgai.engine.tm.board import RIVER, Board, base_board, hex_distance
 from bgai.engine.tm.factions_data import FACTIONS
 from bgai.engine.tm.state import GameState
+from bgai.engine.tm.tiles import BONUS_TILES
 
 
 def _faction_buildings(state: GameState, faction: str) -> frozenset[str]:
@@ -123,6 +142,21 @@ def _teleport_reach(board: Board, source: str, effective_range: int) -> frozense
     )
 
 
+def effective_shipping(state: GameState, faction: str) -> int:
+    """``faction``'s shipping range for reachability purposes: track level
+    plus BON4's +1 passive while held (module docstring). BON4 only ever
+    applies to a faction with a shipping track at all (``max_level > 0``
+    -- e.g. never Dwarves) and only before ``faction`` has passed this
+    round.
+    """
+    fs = state.factions[faction]
+    level = fs.shipping
+    track = FACTIONS[faction].shipping
+    if track.max_level > 0 and not fs.passed and fs.bonus is not None:
+        level += BONUS_TILES[fs.bonus].passive.get("ship", 0)
+    return level
+
+
 def reachable(state: GameState, faction: str) -> frozenset[str]:
     """Hexes ``faction`` may build/transform on: direct, shipping, or teleport range.
 
@@ -133,12 +167,13 @@ def reachable(state: GameState, faction: str) -> frozenset[str]:
     fs = state.factions[faction]
     building_hexes = _faction_buildings(state, faction)
     teleport = FACTIONS[faction].teleport
+    ship_level = effective_shipping(state, faction)
 
     result: set[str] = set()
     for loc in building_hexes:
         result |= directly_adjacent(state, loc)
-        if fs.shipping > 0:
-            result |= _shipping_reach(board, loc, fs.shipping)
+        if ship_level > 0:
+            result |= _shipping_reach(board, loc, ship_level)
         if teleport is not None:
             effective_range = min(teleport.range + fs.teleport_level, teleport.max_range)
             result |= _teleport_reach(board, loc, effective_range)
