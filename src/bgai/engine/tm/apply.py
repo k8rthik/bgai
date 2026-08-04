@@ -344,8 +344,15 @@ def _apply_cult_advance(
     if result.key_spent:
         new_keys -= 1
         new_cult_10[cult] = faction
+        # A track that was previously parked at 9 for lack of a key and
+        # *now* successfully crosses is no longer blocked -- task-14 fix,
+        # see `actions_build.py`'s `_advance_cult_track` for the full
+        # citation trail (this is the third of three near-identical
+        # copies of this fold, `handle_gain_cult`/`handle_send`'s shared
+        # helper).
+        new_cult_blocked = new_cult_blocked - {cult}
     if result.blocked_at_9:
-        new_cult_blocked = fs.cult_blocked | {cult}
+        new_cult_blocked = new_cult_blocked | {cult}
 
     new_state = replace(state, cults=new_cults, cult_10=new_cult_10)
     new_fs = replace(

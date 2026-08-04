@@ -728,3 +728,20 @@ def test_end_of_round_completeness_excludes_a_dropped_faction(
     result = replay_game("4pLeague_S3_D1L1_G1", moves_df, deltas_df)
     assert result.error is None, result.error
     assert result.mismatches == ()
+
+
+def test_cult_blocked_clears_once_a_track_crosses_mid_turn(
+    frames: tuple[pl.DataFrame, pl.DataFrame],
+) -> None:
+    """``4pLeague_S13_D2L1_G2`` row 339: chaosmagicians' FAV5 blocks FIRE
+    at 9; the very next command, TW5 (+1 to all four tracks), crosses FIRE
+    to 10 using its own key while newly blocking AIR at 9 -- before this
+    fix, FIRE lingered in ``cult_blocked`` even after crossing, inflating
+    the retry gate so TW8's own key (later in the same row) couldn't
+    retry AIR alone (unit test in ``test_actions_build.py`` pins the
+    handler-level fix directly).
+    """
+    moves_df, deltas_df = frames
+    result = replay_game("4pLeague_S13_D2L1_G2", moves_df, deltas_df)
+    assert result.error is None, result.error
+    assert result.mismatches == ()
