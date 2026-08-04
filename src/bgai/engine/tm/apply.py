@@ -62,7 +62,12 @@ def register_handler(verb: str, handler: Handler) -> None:
 # grantee, independent of turn_order/active_index -- see that module's
 # docstring for the empirical evidence that cleanup's cult-income rows in
 # particular arrive in a different order each round) are bookkeeping
-# anchors, not turns, so they never need the active_faction() gate.
+# anchors, not turns, so they never need the active_faction() gate. `score_vp`
+# and `score_resources` (Task 12's `scoring.py`) join them for the same
+# reason: round 6's final-scoring rows name their own faction and arrive
+# grouped by cult/network ranking (nobody scores on a level they don't
+# hold), not in `turn_order` rotation -- see `scoring.py`'s module
+# docstring citation of the corpus row order.
 _ORDER_EXEMPT_VERBS = frozenset(
     {
         "wait",
@@ -71,6 +76,8 @@ _ORDER_EXEMPT_VERBS = frozenset(
         "other_income_for_faction",
         "cult_income_for_faction",
         "all_income_for_faction",
+        "score_vp",
+        "score_resources",
     }
 )
 _LEECH_ANSWER_VERBS = frozenset({"leech", "decline"})
@@ -477,3 +484,4 @@ from bgai.engine.tm import actions_power as _actions_power  # noqa: E402,F401
 from bgai.engine.tm import actions_terraform as _actions_terraform  # noqa: E402,F401
 from bgai.engine.tm import leech as _leech  # noqa: E402,F401
 from bgai.engine.tm import round_flow as _round_flow  # noqa: E402,F401
+from bgai.engine.tm import scoring as _scoring  # noqa: E402,F401

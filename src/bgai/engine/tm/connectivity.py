@@ -181,7 +181,7 @@ def reachable(state: GameState, faction: str) -> frozenset[str]:
 
 
 def clusters(
-    state: GameState, faction: str, *, river_skip: bool = False
+    state: GameState, faction: str, *, river_skip: bool = False, indirect: bool = False
 ) -> tuple[frozenset[str], ...]:
     """Connected components of ``faction``'s building hexes.
 
@@ -189,6 +189,22 @@ def clusters(
     ``river_skip=True``, two building hexes sharing a common river-hex
     neighbor are also joined (see module docstring on the Mermaids
     ``{skip}`` port).
+
+    ``indirect=True`` additionally joins two building hexes whenever one is
+    within the faction's shipping or tunnel/carpet range of the other --
+    this is ``map.pm`` ``find_building_cliques``'s ``$allow_indirect``
+    branch (module docstring), the mode ``scoring.py`` uses for final
+    network-size scoring (``scoring.pm`` ``compute_network_size`` always
+    calls ``find_building_cliques($faction, 1)``). It reuses the exact
+    range primitives ``reachable()`` already uses for build/transform
+    legality (``_shipping_reach``/``_teleport_reach``, ``effective_shipping``
+    for BON4's passive), just evaluated hex-to-hex instead of
+    hex-to-anywhere. Dwarves/Fakirs have no shipping track (``ship.level``
+    forever 0) but do have a nonzero innate ``teleport.range`` from turn
+    one (``factions_data.py``'s ``TeleportTrack``), so this *does* fold
+    their tunnel/carpet reach into final network scoring exactly as the
+    Perl does -- there is no special-case exclusion for them anywhere in
+    ``find_building_cliques``.
     """
     building_hexes = _faction_buildings(state, faction)
     if not building_hexes:
@@ -204,6 +220,22 @@ def clusters(
             for h in building_hexes
         }
 
+    indirect_reach: dict[str, frozenset[str]] = {}
+    if indirect:
+        ship_level = effective_shipping(state, faction)
+        teleport = FACTIONS[faction].teleport
+        fs = state.factions[faction]
+        teleport_range = (
+            min(teleport.range + fs.teleport_level, teleport.max_range) if teleport else 0
+        )
+        for h in building_hexes:
+            reach: set[str] = set()
+            if ship_level > 0:
+                reach |= _shipping_reach(board, h, ship_level)
+            if teleport_range > 0:
+                reach |= _teleport_reach(board, h, teleport_range)
+            indirect_reach[h] = frozenset(reach) & building_hexes
+
     remaining = set(building_hexes)
     components: list[frozenset[str]] = []
     while remaining:
@@ -217,6 +249,8 @@ def clusters(
                 for other in building_hexes:
                     if other not in seen and river_neighbors[node] & river_neighbors[other]:
                         neighbors.add(other)
+            if indirect:
+                neighbors |= indirect_reach[node]
             for neighbor in neighbors - seen:
                 seen.add(neighbor)
                 stack.append(neighbor)

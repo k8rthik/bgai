@@ -35,6 +35,7 @@ _MODULES = [
     "bgai.engine.tm.actions_power",
     "bgai.engine.tm.actions_pass",
     "bgai.engine.tm.round_flow",
+    "bgai.engine.tm.scoring",
     "bgai.engine.tm.apply",
 ]
 
@@ -64,7 +65,7 @@ def test_all_verb_families_register_regardless_of_import_order() -> None:
                 "'gain_favor', 'gain_town', 'dig', 'transform', 'lose_spade', "
                 "'action', 'lose_marker', 'pass', 'advance', 'connect', "
                 "'other_income_for_faction', 'cult_income_for_faction', "
-                "'all_income_for_faction'):\n"
+                "'all_income_for_faction', 'score_vp', 'score_resources'):\n"
                 "    assert verb in HANDLERS, verb\n"
             ),
         ],
