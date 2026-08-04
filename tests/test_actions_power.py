@@ -180,6 +180,19 @@ def test_act5_adds_1_spade_to_the_balance() -> None:
     assert s2.factions["engineers"].spades_available == 1
 
 
+def test_act6_spade_gain_scores_current_round_tiles_gain_vp() -> None:
+    """GAME_ID's round 2 tile (``score_tiles[1]``) is ``SPADE >> 2``, gain
+    mode (same mechanic as ``test_actions_terraform.py``'s dig-side pinned
+    test -- ACT5/ACT6 feed the identical ``spades_available`` balance
+    through the generic ``resources.pm`` gain loop, module docstring)."""
+    s = replace(_state(), round=2)
+    s = _rich(s, "engineers", power=Power(0, 0, 6))
+    before_vp = s.factions["engineers"].vp
+    s2 = handle_action(s, "engineers", _cmd("action", tile="ACT6"))
+    assert s2.factions["engineers"].spades_available == 2
+    assert s2.factions["engineers"].vp == before_vp + 4  # 2 spades * 2 VP/spade
+
+
 def test_power_actions_taken_blocking_is_global_but_per_tile() -> None:
     s = _state()
     s = _rich(s, "engineers", power=Power(0, 0, 8))

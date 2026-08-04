@@ -236,6 +236,47 @@ def test_upgrade_d_to_tp_adjacent_opponent_pays_normal_cost() -> None:
     assert fs.coins == before.coins - tp_cost["C"]
 
 
+def test_upgrade_to_tp_scores_current_round_tiles_build_vp() -> None:
+    """Reference-game replay row 47: engineers ``upgrade F6 to TP`` under
+    round 1's ``TP >> 3`` tile jumps VP by exactly 3, with no companion
+    ledger row (task-13 report; ``tiles.scored_vp``/``commands.pm`` 304)."""
+    s = _state()  # round=1; GAME_ID's own score_tiles[0] is `TP >> 3`, build mode.
+    s = _place(s, "engineers", TARGET, "D")
+    before_vp = s.factions["engineers"].vp
+    s2 = handle_upgrade(s, "engineers", _cmd("upgrade", loc=TARGET, building="TP"))
+    assert s2.factions["engineers"].vp == before_vp + 3
+
+
+def test_build_dwelling_scores_current_round_tiles_build_vp_when_keyed() -> None:
+    """Round 6's tile (``4pLeague_S10_D1L1_G1``'s ``score_tiles[5]``) is
+    ``D >> 2``, build mode -- a fresh dwelling should gain 2 VP; round 1's
+    tile (``TP >> 3``) does not key ``D`` at all, so an equivalent build
+    earlier in the game gains none."""
+    s = replace(_state(), round=6)
+    s = _place(s, "engineers", ANCHOR, "D")
+    s = _clear(s, "engineers", TARGET)
+    before_vp = s.factions["engineers"].vp
+    s2 = handle_build(s, "engineers", _cmd("build", loc=TARGET))
+    assert s2.factions["engineers"].vp == before_vp + 2
+
+    s_round1 = _state()
+    s_round1 = _place(s_round1, "engineers", ANCHOR, "D")
+    s_round1 = _clear(s_round1, "engineers", TARGET)
+    before_vp_round1 = s_round1.factions["engineers"].vp
+    s2_round1 = handle_build(s_round1, "engineers", _cmd("build", loc=TARGET))
+    assert s2_round1.factions["engineers"].vp == before_vp_round1
+
+
+def test_build_dwelling_during_setup_never_scores_tile_vp() -> None:
+    """``command_build``'s ``if ($game{round})`` guard (``commands.pm``
+    244-245): setup dwellings (``round == 0``) never trigger the score-tile
+    build bonus, whatever the tile's own keys might otherwise say."""
+    s = GameState.initial(load_setup(GAME_ID))  # round=0, Phase.SETUP_DWELLINGS
+    before_vp = s.factions["engineers"].vp
+    s2 = handle_build(s, "engineers", _cmd("build", loc="E7"))
+    assert s2.factions["engineers"].vp == before_vp
+
+
 def test_upgrade_wrong_source_building_rejected() -> None:
     s = _state()
     s = _place(s, "engineers", TARGET, "D")

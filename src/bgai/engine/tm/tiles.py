@@ -152,6 +152,43 @@ class ScoringTile:
         )
 
 
+def scored_vp(tile: ScoringTile, type_: str, mode: str) -> int:
+    """Port of ``scoring.pm`` ``maybe_score_current_score_tile`` (lines
+    20-30)::
+
+        sub maybe_score_current_score_tile {
+            my ($faction, $type, $mode) = @_;
+            my $scoring = current_score_tile;
+            if ($scoring) {
+                my $gain = $scoring->{vp}{$type};
+                if ($gain and $mode eq $scoring->{vp_mode}) {
+                    adjust_resource $faction, 'VP', $gain, $scoring->{vp_display};
+                }
+            }
+        }
+
+    VP granted the instant a ``type_`` unit is gained/built under ``mode``
+    this round -- 0 if ``tile`` doesn't key on ``type_`` at all, or keys on
+    it under a *different* ``vp_mode`` (a game's whole 6-tile corpus sample
+    only ever uses ``"build"`` (keyed by D/TP/TE/SH/SA -- ``command_build``/
+    ``command_upgrade``, ``commands.pm`` 244-245/304) or ``"gain"`` (keyed
+    by SPADE or TW1-8 -- the generic positive-resource-gain loop,
+    ``resources.pm`` 388-391); no corpus game samples ``"spend"``, the
+    third mode Perl's ``command_transform`` fires (``commands.pm`` 636-638,
+    for spent SPADE) but no real ``%tiles`` entry ever keys. This is
+    applied by the caller directly onto ``FactionState.vp`` -- unlike
+    ``other_income_for_faction``/``cult_income_for_faction`` (a bookkeeping
+    ledger row of its own, ``round_flow.py``), the corpus never emits a
+    separate row for this grant; it is folded into the same ``build``/
+    ``upgrade``/``dig``/``+TWx`` row that triggered it (empirically:
+    reference game row 47, ``upgrade F6 to TP`` under round 1's ``TP >> 3``
+    tile, jumps engineers' VP by exactly 3 with no companion row).
+    """
+    if mode != tile.vp_mode:
+        return 0
+    return dict(tile.vp).get(type_, 0)
+
+
 # Constants.pm %actions, lines 56-65: the six base power-wheel actions.
 POWER_ACTIONS: dict[str, PowerAction] = {
     "ACT1": PowerAction(cost_power=3, gain={"BRIDGE": 1}),

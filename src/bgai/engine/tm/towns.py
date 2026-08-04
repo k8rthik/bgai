@@ -86,7 +86,7 @@ from bgai.engine.tm.board import RIVER, base_board
 from bgai.engine.tm.connectivity import clusters, directly_adjacent
 from bgai.engine.tm.factions_data import FACTIONS, TOWN_SIZE
 from bgai.engine.tm.state import FactionState, GameState, with_faction
-from bgai.engine.tm.tiles import FAVOR_TILES, TOWN_TILES
+from bgai.engine.tm.tiles import FAVOR_TILES, TOWN_TILES, scored_vp
 
 # Constants.pm %building_strength, lines 25-31.
 BUILDING_POWER_VALUES: dict[str, int] = {"D": 1, "TP": 2, "TE": 2, "SH": 3, "SA": 3}
@@ -258,7 +258,11 @@ def apply_town_tile(state: GameState, faction: str, tile: str) -> GameState:
     ``adjust_resource`` (lines 355-362: apply ``%tiles{$type}{gain}``) plus
     the generic ``maybe_gain_faction_special $faction, $type, 'gain'`` call
     (line 391) that grants Witches +5 VP / Swarmlings +3 W per town founded
-    (``factions_data.py`` ``special_gain["TOWN"]``). Decrements
+    (``factions_data.py`` ``special_gain["TOWN"]``), plus that same generic
+    loop's sibling call, ``maybe_score_current_score_tile $faction, $type,
+    'gain'`` (``tiles.scored_vp`` -- e.g. round 4's ``TOWN >> 5`` tile
+    grants +5 VP per town founded that round, keyed by the specific TWx id
+    granted). Decrements
     ``state.towns_pool[tile]`` and appends ``tile`` to ``fs.towns``
     (``resources.pm``'s generic pool-decrement, lines 320-326). See the
     module docstring for the gain keys (cult steps, GAIN_SHIP, carpet_range)
@@ -295,6 +299,10 @@ def apply_town_tile(state: GameState, faction: str, tile: str) -> GameState:
             vp += amount
         else:
             raise ValueError(f"unhandled town-tile gain key {resource!r} in {tile}")
+
+    if state.round >= 1:
+        current_tile = state.setup.score_tiles[state.round - 1]
+        vp += scored_vp(current_tile, tile, "gain")
 
     passive = FACTIONS[faction].special_gain.get("TOWN", {})
     vp += passive.get("VP", 0)

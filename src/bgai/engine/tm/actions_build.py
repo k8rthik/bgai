@@ -100,7 +100,7 @@ from bgai.engine.tm.cults import advance
 from bgai.engine.tm.factions.hooks import hooks_for
 from bgai.engine.tm.factions_data import BRIDGE_COUNT, FACTIONS, TOWN_SIZE
 from bgai.engine.tm.state import FactionState, GameState, PendingDecision, Phase, with_faction
-from bgai.engine.tm.tiles import FAVOR_TILES
+from bgai.engine.tm.tiles import FAVOR_TILES, scored_vp
 from bgai.engine.tm.towns import (
     apply_town_tile,
     building_power_value,
@@ -194,6 +194,19 @@ def _apply_spade_gain_bonus(
     return fs
 
 
+def _current_score_tile_vp(state: GameState, type_: str, mode: str) -> int:
+    """``tiles.scored_vp`` against this round's tile, or 0 during setup
+    (``state.round == 0`` -- ``command_build``'s own ``if ($game{round})``
+    guard, ``commands.pm`` 244-245; ``command_upgrade``/the generic
+    resource-gain loop never fire during setup at all, so this guard is
+    only load-bearing for ``handle_build``'s D case).
+    """
+    if state.round < 1:
+        return 0
+    tile = state.setup.score_tiles[state.round - 1]
+    return scored_vp(tile, type_, mode)
+
+
 def _apply_build_gain(state: GameState, faction: str, gain: dict[str, int]) -> GameState:
     """Fold one ``BuildingTrack.build_gain[level]`` dict into state: PW/VP
     apply immediately; SPADE (Halflings' SH) is *also* immediate -- straight
@@ -225,6 +238,7 @@ def _apply_build_gain(state: GameState, faction: str, gain: dict[str, int]) -> G
         elif key == "SPADE":
             fs = replace(fs, spades_available=fs.spades_available + amount)
             fs = _apply_spade_gain_bonus(state, faction, fs, amount)
+            fs = replace(fs, vp=fs.vp + amount * _current_score_tile_vp(state, "SPADE", "gain"))
         elif key == "CONVERT_W_TO_P":
             pendings.append(PendingDecision(faction=faction, kind="convert_w_to_p", amount=amount))
         elif key == "GAIN_SHIP":
@@ -413,6 +427,8 @@ def handle_build(state: GameState, faction: str, cmd: ParsedCommand) -> GameStat
         fs = _pay(state, faction, fs, d_track.cost, cmd)
 
     fs = replace(fs, buildings={**fs.buildings, "D": fs.buildings["D"] | {hex_key}})
+    if not setup:
+        fs = replace(fs, vp=fs.vp + _current_score_tile_vp(state, "D", "build"))
     new_hexes = dict(state.hexes)
     new_hexes[hex_key] = replace(hex_state, building="D", owner=faction)
     new_state = replace(with_faction(state, faction, fs), hexes=new_hexes)
@@ -485,6 +501,7 @@ def handle_upgrade(state: GameState, faction: str, cmd: ParsedCommand) -> GameSt
     fs_buildings[old_type] = fs_buildings[old_type] - {hex_key}
     fs_buildings[new_type] = fs_buildings[new_type] | {hex_key}
     fs = replace(fs, buildings=fs_buildings)
+    fs = replace(fs, vp=fs.vp + _current_score_tile_vp(state, new_type, "build"))
 
     new_hexes = dict(state.hexes)
     new_hexes[hex_key] = replace(hex_state, building=new_type, owner=faction)

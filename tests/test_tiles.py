@@ -11,6 +11,7 @@ from bgai.engine.tm.tiles import (
     SCORE_TILES,
     TOWN_TILES,
     ScoringTile,
+    scored_vp,
 )
 
 
@@ -122,6 +123,37 @@ def test_corpus_pool_coverage() -> None:
             pool = json.load(f)["pool"]
         ids = {k for k in pool if k[:3] in ("BON", "FAV", "ACT") or k[:2] == "TW"}
         assert ids <= known, f"{path.name}: unknown tiles {ids - known}"
+
+
+def test_scored_vp_matches_reference_game_round_1_tp_upgrade() -> None:
+    """Reference game (``4pLeague_S10_D1L1_G1``) round 1's tile is
+    ``TP >> 3`` (``vp={"TP": 3}``, ``vp_mode="build"``) -- replay row 47's
+    ``upgrade F6 to TP`` jumps engineers' VP by exactly 3 with no companion
+    ledger row (task-13 report)."""
+    tile = ScoringTile(cult="WATER", req=4, vp_mode="build", vp=(("TP", 3),), cult_income=(("SPADE", 1),))
+    assert scored_vp(tile, "TP", "build") == 3
+    # Wrong mode (this is a build-mode tile, not a gain-mode one): no VP.
+    assert scored_vp(tile, "TP", "gain") == 0
+    # Right mode, unkeyed type: no VP.
+    assert scored_vp(tile, "D", "build") == 0
+
+
+def test_scored_vp_gain_mode_keys_spade_and_town_tiles() -> None:
+    tile = ScoringTile(
+        cult="EARTH", req=1, vp_mode="gain", vp=(("SPADE", 2),), cult_income=(("C", 1),)
+    )
+    assert scored_vp(tile, "SPADE", "gain") == 2
+    assert scored_vp(tile, "SPADE", "build") == 0
+
+    town_tile = ScoringTile(
+        cult="EARTH",
+        req=4,
+        vp_mode="gain",
+        vp=tuple((f"TW{i}", 5) for i in range(1, 9)),
+        cult_income=(("SPADE", 1),),
+    )
+    assert scored_vp(town_tile, "TW3", "gain") == 5
+    assert scored_vp(town_tile, "TW9", "gain") == 0
 
 
 def test_corpus_score_tiles_parse_via_from_snellman() -> None:

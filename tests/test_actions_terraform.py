@@ -104,6 +104,26 @@ def test_dig_standard_pays_3w_and_gains_one_spade_at_level_0() -> None:
     assert fs.spades_available == before.spades_available + 1
 
 
+def test_dig_scores_current_round_tiles_gain_vp_per_spade() -> None:
+    """GAME_ID's round 2 tile (``score_tiles[1]``) is ``SPADE >> 2``, gain
+    mode (``tiles.scored_vp``; ``resources.pm``'s generic per-unit
+    positive-gain loop, 388-391) -- 3 spades dug nets 3*2 = 6 VP on top of
+    the ordinary resource cost/gain. Round 1's tile (``TP >> 3``) does not
+    key SPADE at all, so an identical dig one round earlier gains none."""
+    s = replace(_state(), round=2)
+    s = _place(s, "engineers", ANCHOR)
+    s = _rich(s, "engineers", workers=10)
+    before = s.factions["engineers"]
+    s2 = handle_dig(s, "engineers", _cmd("dig", n1=3))
+    assert s2.factions["engineers"].vp == before.vp + 6
+
+    s_round1 = _place(_state(), "engineers", ANCHOR)
+    s_round1 = _rich(s_round1, "engineers", workers=10)
+    before_round1 = s_round1.factions["engineers"]
+    s2_round1 = handle_dig(s_round1, "engineers", _cmd("dig", n1=3))
+    assert s2_round1.factions["engineers"].vp == before_round1.vp
+
+
 def test_dig_uses_cost_at_current_level() -> None:
     s = _state()
     s = _place(s, "engineers", ANCHOR)

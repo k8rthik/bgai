@@ -152,6 +152,23 @@ def test_apply_town_tile_grants_vp_and_gain() -> None:
     assert s2.towns_pool["TW1"] == before_pool - 1
 
 
+def test_apply_town_tile_scores_current_round_tiles_gain_vp() -> None:
+    """``4pLeague_S10_D1L1_G1``'s round 4 tile (``score_tiles[3]``) is
+    ``TOWN >> 5``, gain mode, keyed by every TW1-8 id at the same value
+    (``tiles.scored_vp``; ``resources.pm``'s generic per-unit positive-gain
+    loop, 388-391, fired once for the single town-tile "unit" gained --
+    town founding is a one-shot ``adjust_resource $faction, $type, 1``, not
+    scaled by anything). Round 0 (every other test in this file) never
+    scores this bonus at all -- ``apply_town_tile``'s own ``state.round >=
+    1`` guard, matching ``command_build``'s setup exemption these tests
+    already lean on via ``_fresh()``'s default ``round=0``.
+    """
+    s = replace(_fresh(), round=4)
+    before = s.factions["engineers"]
+    s2 = apply_town_tile(s, "engineers", "TW1")
+    assert s2.factions["engineers"].vp == before.vp + 5 + 5  # tile's own VP + score-tile bonus
+
+
 def test_apply_town_tile_power_gain_uses_power_bowl() -> None:
     s = _fresh()
     before = s.factions["engineers"]

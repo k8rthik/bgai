@@ -103,6 +103,7 @@ from bgai.engine.tm.factions.hooks import HOOKS, FactionHooks, hooks_for
 from bgai.engine.tm.factions_data import COLOR_WHEEL, FACTIONS
 from bgai.engine.tm.state import FactionState, GameState, with_faction
 from bgai.engine.tm.terraform import spade_distance
+from bgai.engine.tm.tiles import scored_vp
 
 _DIG_COST_RES: dict[str, str] = {"W": "workers", "C": "coins", "P": "priests"}
 
@@ -181,6 +182,20 @@ def _pay_resources(
             )
         fs = replace(fs, **{attr: new_value})
     return fs
+
+
+def _current_score_tile_vp(state: GameState, type_: str, mode: str) -> int:
+    """``actions_build.py``'s identically-named helper, duplicated locally
+    (same no-cross-coupling rationale this module already documents for
+    ``_apply_extra_dig_gain`` -- see ``tiles.scored_vp``'s own docstring
+    for the ``maybe_score_current_score_tile`` port this wraps). ``dig``
+    never happens during setup (``state.round == 0``), but the guard is
+    kept for parity with the build-side caller and future-proofing.
+    """
+    if state.round < 1:
+        return 0
+    tile = state.setup.score_tiles[state.round - 1]
+    return scored_vp(tile, type_, mode)
 
 
 def _apply_extra_dig_gain(
@@ -292,6 +307,7 @@ def handle_dig(state: GameState, faction: str, cmd: ParsedCommand) -> GameState:
 
     fs = replace(fs, spades_available=fs.spades_available + spades)
     fs = _apply_extra_dig_gain(state, faction, fs, spades)
+    fs = replace(fs, vp=fs.vp + spades * _current_score_tile_vp(state, "SPADE", "gain"))
     return with_faction(state, faction, fs)
 
 

@@ -181,7 +181,7 @@ from bgai.engine.tm.apply import EngineError, pop_pending, push_pending, registe
 from bgai.engine.tm.factions.hooks import hooks_for
 from bgai.engine.tm.factions_data import FACTION_SPECIAL_ACTIONS, FACTIONS
 from bgai.engine.tm.state import FactionState, GameState, PendingDecision, with_faction
-from bgai.engine.tm.tiles import BONUS_TILES, FAVOR_TILES, POWER_ACTIONS
+from bgai.engine.tm.tiles import BONUS_TILES, FAVOR_TILES, POWER_ACTIONS, scored_vp
 
 _COST_RES: dict[str, str] = {"W": "workers", "C": "coins", "P": "priests"}
 
@@ -244,6 +244,18 @@ def _pay_simple(
     return fs
 
 
+def _current_score_tile_vp(state: GameState, type_: str, mode: str) -> int:
+    """``actions_build.py``'s/``actions_terraform.py``'s identically-named
+    helper, a fourth private copy by the same no-cross-coupling rationale
+    (see ``tiles.scored_vp``'s docstring). ACT5/ACT6/BON1 never fire
+    during setup, but the guard is kept for parity.
+    """
+    if state.round < 1:
+        return 0
+    tile = state.setup.score_tiles[state.round - 1]
+    return scored_vp(tile, type_, mode)
+
+
 def _apply_spade_gain_bonus(
     state: GameState, faction: str, fs: FactionState, spades: int
 ) -> FactionState:
@@ -291,6 +303,7 @@ def _apply_action_gain(
         elif key == "SPADE":
             fs = replace(fs, spades_available=fs.spades_available + amount)
             fs = _apply_spade_gain_bonus(state, faction, fs, amount)
+            fs = replace(fs, vp=fs.vp + amount * _current_score_tile_vp(state, "SPADE", "gain"))
         elif key == "GAIN_ACTION":
             fs = replace(fs, extra_actions=fs.extra_actions + amount)
         elif key in _NO_OP_GAIN_KEYS:
