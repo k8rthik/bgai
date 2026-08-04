@@ -104,10 +104,9 @@ rotation"; corpus rows bear this out for both -- e.g.
 ``4pLeague_S3_D3L3_G2`` row where engineers converts PW while swarmlings
 is ``active_faction`` during ``Phase.INCOME``). So every
 :func:`legal_moves_for` call computes this baseline once, unconditionally
-(except ``Phase.FINISHED``/a dropped faction/an outstanding blocking
-pending -- the brief's own "leech pending -> exactly {leech n, decline}"
-hand test wants *no* baseline noise mixed into a blocking answer set), and
-unions it into whatever phase-specific enumeration follows. ``Phase.INCOME``/
+for live factions (except ``Phase.FINISHED`` and dropped factions), and
+unions it with any pending-decision answers to form the result -- an
+additive model where both sets are available simultaneously. ``Phase.INCOME``/
 ``Phase.CLEANUP`` additionally allow a ``transform`` for any faction
 sitting on an unspent ``spades_available`` balance -- ``apply.py``'s own
 docstring cites the corpus mechanism (a cult-income SPADE grant forces an

@@ -61,3 +61,11 @@ anomaly, `4pLeague_S53_D1L1_G3`, is tracked in `tests/test_replay_corpus.py`'s
 `KNOWN_ANOMALIES` (Cultists receive a duplicate cult-score row within the
 same scoring block — snellman's own ledger contains a state that the
 scoring algorithm cannot produce, treated as a server-side anomaly).
+
+**Validated scope — 4 players only:** The entire corpus of 3,563 games
+consists exclusively of 4-player games (every game_id starts with `4pLeague`).
+Player-count-dependent machinery (bonus-tile pool size = `player_count + 3`,
+turn rotation, leech seat order) is oracle-validated only at 4 players; the
+reference-rules implementations for 2-player, 3-player, and 5-player play are
+correct per specification but have never been replay-validated against real
+tournament data.

@@ -45,14 +45,16 @@ class HexState:
 class PendingDecision:
     """A forced sub-decision queued ahead of the turn-order successor.
 
-    ``kind`` values used by later tasks: "leech", "gain_favor", "gain_town",
-    "cult_choice", "convert_w_to_p", "bonus_choice", "spade_use", "bridge",
-    "free_d", "free_tp", "free_tf". (Task 9's initial "halflings_spades"
-    kind was retired -- a Halflings SH's spade grant is applied immediately
-    by ``actions_build.py`` instead, see that module's docstring; kept out
-    of this list so it doesn't get reused. "bridge"/"free_d"/"free_tp"/
-    "free_tf" are Task 10's one-shot markers from ACT1/ACTE, ACTW, ACTS,
-    and ACTN respectively -- see ``actions_power.py``'s module docstring.)
+    ``kind`` values produced by the engine: "leech", "gain_favor", "gain_town",
+    "cult_choice", "convert_w_to_p", "bridge", "free_d", "free_tp", "free_tf",
+    "cultist_leech_watch". (The "bridge"/"free_d"/"free_tp"/"free_tf" are
+    Task 10's one-shot markers from ACT1/ACTE, ACTW, ACTS, and ACTN
+    respectively -- see ``actions_power.py``'s module docstring.
+    "cultist_leech_watch" is an internal batch-tracking marker produced and
+    consumed by ``leech.py`` -- see that module's docstring. Task 9's initial
+    "halflings_spades" kind was retired: a Halflings SH's spade grant is
+    applied immediately by ``actions_build.py`` instead, documented in that
+    module's docstring.)
     """
 
     faction: str
