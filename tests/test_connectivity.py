@@ -3,7 +3,13 @@
 from dataclasses import replace
 
 from bgai.engine.tm.board import RIVER, base_board
-from bgai.engine.tm.connectivity import clusters, directly_adjacent, effective_shipping, reachable
+from bgai.engine.tm.connectivity import (
+    clusters,
+    directly_adjacent,
+    effective_shipping,
+    reachable,
+    teleport_crossing,
+)
 from bgai.engine.tm.factions_data import FACTIONS
 from bgai.engine.tm.setup import load_setup
 from bgai.engine.tm.state import FactionState, GameState, with_faction
@@ -125,6 +131,63 @@ def test_dwarves_tunnel_skips_one_land_hex() -> None:
             assert b in reachable(s, "dwarves")
             return
     raise AssertionError("no skip-chain found")
+
+
+def test_teleport_crossing_is_free_for_direct_adjacency() -> None:
+    """``teleport_crossing`` (module docstring, ``check_reachable``'s own
+    early ``({}, {})`` returns): a hex reached by plain adjacency owes no
+    tunnel cost/gain, even for a faction with a live ``TeleportTrack``."""
+    for mid in (k for k, h in BOARD.hexes.items() if h.color != RIVER):
+        lands = [n for n in BOARD.adjacent[mid] if BOARD.hexes[n].color != RIVER]
+        pair = next(
+            ((a, b) for a in lands for b in lands if a != b and b not in BOARD.adjacent[a]), None
+        )
+        if pair:
+            a, _b = pair
+            s = _place(_with_dwarves(_fresh()), "dwarves", a)
+            assert teleport_crossing(s, "dwarves", mid) == ({}, 0)
+            return
+    raise AssertionError("no skip-chain found")
+
+
+def test_teleport_crossing_charges_tunnel_cost_and_vp_when_only_teleport_reaches() -> None:
+    """Dwarves' tunnel (``factions_data.py``'s ``TeleportTrack``): a hex
+    reachable *only* by skipping one land hex (module docstring's
+    ``check_reachable`` port) owes the tunnel's own ``cost``/``vp_gain``
+    at ``teleport_level`` 0 -- ``({"W": 2}, {"W": 1})``/``(4, 4)``,
+    indexed pre-SH."""
+    for mid in (k for k, h in BOARD.hexes.items() if h.color != RIVER):
+        lands = [n for n in BOARD.adjacent[mid] if BOARD.hexes[n].color != RIVER]
+        pair = next(
+            ((a, b) for a in lands for b in lands if a != b and b not in BOARD.adjacent[a]), None
+        )
+        if pair:
+            a, b = pair
+            s = _place(_with_dwarves(_fresh()), "dwarves", a)
+            assert teleport_crossing(s, "dwarves", b) == ({"W": 2}, 4)
+            return
+    raise AssertionError("no skip-chain found")
+
+
+def test_teleport_crossing_uses_post_sh_cost_at_teleport_level_one() -> None:
+    for mid in (k for k, h in BOARD.hexes.items() if h.color != RIVER):
+        lands = [n for n in BOARD.adjacent[mid] if BOARD.hexes[n].color != RIVER]
+        pair = next(
+            ((a, b) for a in lands for b in lands if a != b and b not in BOARD.adjacent[a]), None
+        )
+        if pair:
+            a, b = pair
+            s = _place(_with_dwarves(_fresh()), "dwarves", a)
+            s = _with_faction_fields(s, "dwarves", teleport_level=1)
+            assert teleport_crossing(s, "dwarves", b) == ({"W": 1}, 4)
+            return
+    raise AssertionError("no skip-chain found")
+
+
+def test_teleport_crossing_is_empty_for_a_faction_with_no_teleport_track() -> None:
+    a, _r, b = _river_gap()
+    s = _place(_fresh(), "engineers", a)
+    assert teleport_crossing(s, "engineers", b) == ({}, 0)
 
 
 def test_directly_adjacent_includes_bridge_endpoints() -> None:

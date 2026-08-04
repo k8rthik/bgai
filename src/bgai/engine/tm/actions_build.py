@@ -115,7 +115,7 @@ from bgai.data.ledger_parser import ParsedCommand
 from bgai.engine.tm import leech
 from bgai.engine.tm.apply import EngineError, pop_pending, push_pending, register_handler
 from bgai.engine.tm.board import RIVER, base_board
-from bgai.engine.tm.connectivity import clusters, reachable
+from bgai.engine.tm.connectivity import clusters, reachable, teleport_crossing
 from bgai.engine.tm.cults import advance
 from bgai.engine.tm.factions.hooks import hooks_for
 from bgai.engine.tm.factions_data import BRIDGE_COUNT, FACTIONS, TOWN_SIZE
@@ -548,6 +548,23 @@ def handle_build(state: GameState, faction: str, cmd: ParsedCommand) -> GameStat
         hex_state = replace(hex_state, color=color)
 
     if not setup and free_d_index is None:
+        # commands.pm 220-227 (tf_needed=false) / map.pm transform_cost's own
+        # check_reachable call (tf_needed=true, folded into the implicit
+        # transform above) -- either way, a build that could only reach
+        # hex_key via the faction's TeleportTrack (Dwarves tunnel / Fakirs
+        # carpet) pays that crossing's own W cost and gains its own VP,
+        # *in addition to* the D building's ordinary cost below. Empty
+        # ({}, 0) for a direct/shipping-reached hex (connectivity.py's
+        # ``teleport_crossing`` docstring). Skipped entirely under FREE_D
+        # (ACTW grants FREE_D+TELEPORT_NO_TF together, Game/Constants.pm
+        # line 76; TELEPORT_NO_TF's branch, commands.pm 207-210, never
+        # calls check_reachable at all) -- the ``free_d_index is None``
+        # guard on this whole block already matches that.
+        teleport_cost, teleport_vp = teleport_crossing(state, faction, hex_key)
+        if teleport_cost:
+            fs = _pay(state, faction, fs, teleport_cost, cmd)
+        if teleport_vp:
+            fs = replace(fs, vp=fs.vp + teleport_vp)
         fs = _pay(state, faction, fs, d_track.cost, cmd)
 
     fs = replace(fs, buildings={**fs.buildings, "D": fs.buildings["D"] | {hex_key}})

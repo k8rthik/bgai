@@ -172,6 +172,56 @@ def test_build_with_free_tf_marker_rejects_non_adjacent_hex() -> None:
         handle_build(s, "nomads", _cmd("build", loc=far))
 
 
+def _with_dwarves(state: GameState) -> GameState:
+    return with_faction(state, "dwarves", FactionState.initial(FACTIONS["dwarves"]))
+
+
+def _skip_chain() -> tuple[str, str]:
+    """(a, b): two land hexes at ``hex_distance`` 2 via some middle hex,
+    not directly adjacent -- Dwarves' tunnel range
+    (``test_connectivity.py``'s identically-shaped helper)."""
+    land = set(BOARD.land_hexes())
+    for mid in land:
+        neighbors = [n for n in BOARD.adjacent[mid] if n in land]
+        pair = next(
+            (
+                (a, b)
+                for a in neighbors
+                for b in neighbors
+                if a != b and b not in BOARD.adjacent[a]
+            ),
+            None,
+        )
+        if pair:
+            return pair
+    raise AssertionError("no skip-chain found")
+
+
+def test_build_across_tunnel_pays_teleport_cost_and_gains_vp() -> None:
+    """Task-13 report, ``4pLeague_S10_D1L1_G4`` row 71: Dwarves' tunnel
+    (``factions_data.py``'s ``TeleportTrack``) was entirely unwired from
+    ``handle_build`` -- a build on a hex reachable only by skipping one
+    land hex silently dropped the tunnel's own W cost and VP gain,
+    leaving the reference deltas 4 VP low and 2 W high.
+    ``connectivity.py``'s ``teleport_crossing`` (module docstring) now
+    supplies that cost/gain; this pins the fix at the ``handle_build``
+    integration level (``test_connectivity.py`` pins the geometry/cost
+    primitive itself)."""
+    a, b = _skip_chain()
+    s = _with_dwarves(_state())
+    s = _place(s, "dwarves", a, "D")
+    s = _clear(s, "dwarves", b)
+    before = s.factions["dwarves"]
+    s2 = handle_build(s, "dwarves", _cmd("build", loc=b))
+    after = s2.factions["dwarves"]
+    d_cost = FACTIONS["dwarves"].buildings["D"].cost
+    assert after.workers == before.workers - d_cost["W"] - 2  # + tunnel's 2W (teleport_level 0)
+    assert after.coins == before.coins - d_cost["C"]
+    assert after.vp == before.vp + 4  # tunnel's flat VP gain
+    assert s2.hexes[b].building == "D"
+    assert s2.hexes[b].owner == "dwarves"
+
+
 def test_build_occupied_hex_rejected() -> None:
     s = _state()
     s = _place(s, "engineers", ANCHOR, "D")

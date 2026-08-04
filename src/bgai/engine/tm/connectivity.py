@@ -180,6 +180,50 @@ def reachable(state: GameState, faction: str) -> frozenset[str]:
     return frozenset(result)
 
 
+def teleport_crossing(
+    state: GameState, faction: str, hex_key: str
+) -> tuple[dict[str, int], int]:
+    """Cost/VP-gain pair for reaching ``hex_key`` if doing so requires
+    crossing via ``faction``'s ``TeleportTrack`` (Dwarves' tunnel /
+    Fakirs' carpet flight) rather than plain adjacency or shipping range.
+
+    Ports ``map.pm``'s ``check_reachable`` (module docstring): every one
+    of the faction's building hexes is checked for direct adjacency
+    first (209-235); only if none matches are shipping ranges checked
+    (237-245); only if *that* also comes up empty does the teleport
+    range table apply (255-269), and only then is
+    ``TeleportTrack.cost[level]``/``.vp_gain[level]`` (indexed by the
+    faction's current ``teleport_level`` -- ``factions_data.py``'s
+    ``TeleportTrack`` docstring: "1 = post-SH") the actual cost/gain --
+    ``({}, {})`` for the direct/shipping cases (check_reachable's own
+    early returns). ``round == 0`` is not special-cased here the way
+    Perl's ``check_reachable`` does at its top (``if ($game{round} == 0)
+    { return ({}, {}) }``) because every call site already gates this
+    function behind its own ``not setup`` check (``actions_build.py``'s
+    ``handle_build``), so ``state.round`` is never 0 when this runs.
+    """
+    teleport = FACTIONS[faction].teleport
+    building_hexes = _faction_buildings(state, faction)
+    for loc in building_hexes:
+        if hex_key in directly_adjacent(state, loc):
+            return {}, 0
+    board = base_board()
+    ship_level = effective_shipping(state, faction)
+    if ship_level > 0:
+        for loc in building_hexes:
+            if hex_key in _shipping_reach(board, loc, ship_level):
+                return {}, 0
+    if teleport is None:
+        return {}, 0
+    fs = state.factions[faction]
+    effective_range = min(teleport.range + fs.teleport_level, teleport.max_range)
+    for loc in building_hexes:
+        if hex_key in _teleport_reach(board, loc, effective_range):
+            level = min(fs.teleport_level, len(teleport.cost) - 1)
+            return dict(teleport.cost[level]), teleport.vp_gain[level]
+    return {}, 0
+
+
 def clusters(
     state: GameState, faction: str, *, river_skip: bool = False, indirect: bool = False
 ) -> tuple[frozenset[str], ...]:
