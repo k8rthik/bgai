@@ -37,6 +37,16 @@ _MODULES = [
     "bgai.engine.tm.round_flow",
     "bgai.engine.tm.scoring",
     "bgai.engine.tm.apply",
+    # Task 15's legal.py/legal_actions.py import actions_build.py (for
+    # `_bridgable_pairs`) and leech.py (for `has_leechable_neighbor`)
+    # directly -- neither registers a HANDLERS entry (legal_moves is a
+    # pure query), but both sit downstream of the same apply.py-rooted
+    # import graph the modules above already probe, so they're a fresh
+    # potential cycle root the same way `leech`/`actions_build` originally
+    # were (module docstring above).
+    "bgai.engine.tm.legal_shared",
+    "bgai.engine.tm.legal_actions",
+    "bgai.engine.tm.legal",
 ]
 
 
