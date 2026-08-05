@@ -8,10 +8,10 @@
 
 ## Opening patterns (dwellings by end of round 1; mean first-upgrade round)
 
-| faction | won | mean_dwellings_by_r1 | SA | TE | SH | TP |
+| faction | won | mean_dwellings_by_r1 | SH | TP | TE | SA |
 |---|---|---|---|---|---|---|
-| cultists | False | 3.15 | 4.00 | 1.02 | 5.63 | 1.01 |
-| cultists | True | 3.47 | 4.11 | 1.01 | 5.67 | 1.00 |
+| cultists | False | 3.15 | 5.63 | 1.01 | 1.02 | 4.00 |
+| cultists | True | 3.47 | 5.67 | 1.00 | 1.01 | 4.11 |
 
 ## Timing curves (mean occurrences per game, by round)
 

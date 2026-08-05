@@ -8,10 +8,10 @@
 
 ## Opening patterns (dwellings by end of round 1; mean first-upgrade round)
 
-| faction | won | mean_dwellings_by_r1 | SA | TE | SH | TP |
+| faction | won | mean_dwellings_by_r1 | SH | TP | TE | SA |
 |---|---|---|---|---|---|---|
-| alchemists | False | 3.22 | 4.38 | 1.75 | 2.08 | 1.02 |
-| alchemists | True | 3.86 | 4.18 | 1.32 | 2.29 | 1.00 |
+| alchemists | False | 3.22 | 2.08 | 1.02 | 1.75 | 4.38 |
+| alchemists | True | 3.86 | 2.29 | 1.00 | 1.32 | 4.18 |
 
 ## Timing curves (mean occurrences per game, by round)
 

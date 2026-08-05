@@ -8,10 +8,10 @@
 
 ## Opening patterns (dwellings by end of round 1; mean first-upgrade round)
 
-| faction | won | mean_dwellings_by_r1 | SA | TE | SH | TP |
+| faction | won | mean_dwellings_by_r1 | SH | TP | TE | SA |
 |---|---|---|---|---|---|---|
-| nomads | False | 4.20 | 4.67 | 1.87 | 2.33 | 1.01 |
-| nomads | True | 4.46 | 4.65 | 1.90 | 2.37 | 1.01 |
+| nomads | False | 4.20 | 2.33 | 1.01 | 1.87 | 4.67 |
+| nomads | True | 4.46 | 2.37 | 1.01 | 1.90 | 4.65 |
 
 ## Timing curves (mean occurrences per game, by round)
 

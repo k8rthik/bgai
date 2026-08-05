@@ -8,10 +8,10 @@
 
 ## Opening patterns (dwellings by end of round 1; mean first-upgrade round)
 
-| faction | won | mean_dwellings_by_r1 | SA | TE | SH | TP |
+| faction | won | mean_dwellings_by_r1 | SH | TP | TE | SA |
 |---|---|---|---|---|---|---|
-| darklings | False | 2.86 | 2.79 | 1.04 | 5.49 | 1.01 |
-| darklings | True | 2.89 | 2.44 | 1.03 | 5.64 | 1.01 |
+| darklings | False | 2.86 | 5.49 | 1.01 | 1.04 | 2.79 |
+| darklings | True | 2.89 | 5.64 | 1.01 | 1.03 | 2.44 |
 
 ## Timing curves (mean occurrences per game, by round)
 

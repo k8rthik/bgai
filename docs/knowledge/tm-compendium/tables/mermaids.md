@@ -8,10 +8,10 @@
 
 ## Opening patterns (dwellings by end of round 1; mean first-upgrade round)
 
-| faction | won | mean_dwellings_by_r1 | SA | TE | SH | TP |
+| faction | won | mean_dwellings_by_r1 | SH | TP | TE | SA |
 |---|---|---|---|---|---|---|
-| mermaids | False | 4.00 | 4.62 | 1.29 | 5.12 | 1.11 |
-| mermaids | True | 4.52 | 4.58 | 1.34 | 5.27 | 1.19 |
+| mermaids | False | 4.00 | 5.12 | 1.11 | 1.29 | 4.62 |
+| mermaids | True | 4.52 | 5.27 | 1.19 | 1.34 | 4.58 |
 
 ## Timing curves (mean occurrences per game, by round)
 

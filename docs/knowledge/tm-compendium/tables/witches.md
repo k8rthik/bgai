@@ -8,10 +8,10 @@
 
 ## Opening patterns (dwellings by end of round 1; mean first-upgrade round)
 
-| faction | won | mean_dwellings_by_r1 | SA | TE | SH | TP |
+| faction | won | mean_dwellings_by_r1 | SH | TP | TE | SA |
 |---|---|---|---|---|---|---|
-| witches | False | 4.08 | 4.51 | 1.75 | 2.87 | 1.14 |
-| witches | True | 4.43 | 4.43 | 1.87 | 2.56 | 1.19 |
+| witches | False | 4.08 | 2.87 | 1.14 | 1.75 | 4.51 |
+| witches | True | 4.43 | 2.56 | 1.19 | 1.87 | 4.43 |
 
 ## Timing curves (mean occurrences per game, by round)
 
