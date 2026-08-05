@@ -67,8 +67,8 @@ def test_projection_matches_cult_scoring():
     scores = compute_cult_scoring(session.state)
     text = projection(session)
     assert "ended now" in text
-    for cult, per_faction in scores.items():
-        for faction, vp in per_faction.items():
+    for per_faction in scores.values():
+        for faction in per_faction:
             assert faction in text
     assert "network" in text.lower()
 
