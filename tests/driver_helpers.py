@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 from bgai.agents.base import progress_moves
-from bgai.arena.driver import new_game, next_actor
+from bgai.arena.driver import new_game, next_actor, offered_moves
 from bgai.arena.setup_factory import fresh_setup
 from bgai.data.ledger_parser import ParsedCommand
 from bgai.engine.tm.apply import apply
-from bgai.engine.tm.legal import legal_moves_for
 from bgai.engine.tm.round_flow import advance_turn
 from bgai.engine.tm.state import GameState, Phase
 
@@ -20,7 +19,7 @@ def fast_forward_setup(seed: int) -> GameState:
     while state.phase in (Phase.SETUP_DWELLINGS, Phase.SETUP_BONUS):
         actor = next_actor(state)
         assert actor is not None, f"no actor during {state.phase}"
-        move = progress_moves(legal_moves_for(state, actor))[0]
+        move = progress_moves(offered_moves(state, actor, turn_open=False))[0]
         state = apply(state, actor, move)
         state = advance_turn(state)
     return state
