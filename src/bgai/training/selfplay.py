@@ -147,13 +147,21 @@ def regularized_loss(
             batch["candidates"], batch["cand_mask"],
         )
 
+    # Padding slots carry -inf logits, so log_softmax gives -inf there and
+    # the soft targets give 0 -- and 0 * -inf is NaN, which silently
+    # poisons the whole batch. (The imitation loop never hit this: its
+    # cross_entropy reads only the chosen index.) Zero those terms out
+    # explicitly rather than relying on the multiply.
+    mask = batch["cand_mask"]
     log_probs = F.log_softmax(logits, dim=-1)
+    safe_log_probs = log_probs.masked_fill(~mask, 0.0)
     target = batch["visits"] / batch["visits"].sum(dim=-1, keepdim=True).clamp(min=1e-6)
-    policy_loss = -(target * log_probs).sum(dim=-1).mean()
+    policy_loss = -(target * safe_log_probs).sum(dim=-1).mean()
     value_loss = F.mse_loss(value, batch["value"])
-    kl = F.kl_div(
-        log_probs, F.log_softmax(ref_logits, dim=-1), reduction="batchmean", log_target=True
-    )
+
+    ref_log_probs = F.log_softmax(ref_logits, dim=-1)
+    kl_terms = (log_probs.exp() * (safe_log_probs - ref_log_probs.masked_fill(~mask, 0.0)))
+    kl = kl_terms.masked_fill(~mask, 0.0).sum(dim=-1).mean()
     loss = policy_loss + 0.5 * value_loss + lambda_kl * kl
     return loss, {
         "policy": float(policy_loss.item()),
