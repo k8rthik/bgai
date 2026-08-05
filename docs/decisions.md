@@ -263,6 +263,33 @@ t=2 needs roughly 1,000 paired games -- ~2 hours of local compute. A
 confirmatory run at that scale is the right way to settle it; anything
 smaller re-measures noise.
 
+**D6.7 — Settled: search adds nothing measurable. 1,000 paired games,
+64 sims, sampled visits, 0 errors:**
+
+    paired rank-sum diff: -0.005 +/- 0.083 (se)   t = -0.06
+    MCTS      mean rank 1.464   mean VP 63.2
+    imitation mean rank 1.466   mean VP 62.7
+
+This is not "not significant" -- it is a tight zero. The 95% interval
+(+/-0.16 rank-sum, i.e. +/-0.08 mean placement per seat) rules out even a
+small benefit. Every earlier wobble (+0.125, -0.33, +0.18) was noise, as
+the power analysis predicted.
+
+*Conclusion:* 64-simulation max^n search over this value head is exactly
+as strong as sampling the policy directly, and costs ~75x more compute
+per game (3.6 s vs 48 ms). Nobody should run it in that configuration.
+
+*What it isolates:* the bottleneck is the value function, not the search
+code. The search machinery is correct (it beats greedy by +0.85, it
+explores, its vectors re-base properly). It has nothing useful to
+search *with*: a value head trained only on human-reached states cannot
+rank the off-distribution states search generates, so deeper lookahead
+averages noise. This is the precise failure mode self-play fixes --
+training the value head on the states the search actually visits -- and
+it is why Phase 6b is the indicated next step rather than a speculative
+one. Repeating this measurement is the acceptance test for any future
+value head.
+
 *What this does not license:* claiming search works. Until a
 significant result exists, the honest summary is "search is at best a
 small gain over its own prior, and only when its move choice is

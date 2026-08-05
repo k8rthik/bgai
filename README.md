@@ -160,13 +160,22 @@ rather than by random rollouts. It runs on `arena/driver.py`'s
 immutable `SimState`, which exists so positions can be cloned and
 branched — see `docs/decisions.md` D6.1.
 
-**Honest status: search does not yet beat the policy it is built from.**
+**Honest status: search adds nothing over the policy it is built from.**
 Against greedy, MCTS wins comfortably (+0.85 mean rank). Against the
-imitation policy that supplies its priors, it is level at 64
-simulations and slightly *behind* at 128 (paired, 100 games, t = 1.18
-the wrong way). The master plan's "each rung beats the previous" gate is
-therefore **not met for Phase 6**, and `docs/decisions.md` D6.5 records
-the three leading hypotheses rather than the one flattering number.
+imitation policy that supplies its priors, a 1,000-game paired run
+settles it: **-0.005 +/- 0.083 mean rank (t = -0.06)** — a tight zero,
+not merely a null result, ruling out even a small benefit. It costs ~75x
+more compute per game (3.6 s vs 48 ms) to play exactly as well.
+
+The master plan's "each rung beats the previous" gate is therefore **not
+met for Phase 6**. The search code is not the problem — it beats greedy,
+it explores, its value vectors re-base correctly. The **value head** is:
+trained only on positions humans reached, it cannot rank the
+off-distribution positions search generates, so deeper lookahead
+averages noise rather than finding signal. That is exactly what
+self-play fixes (train the value head on states the search visits), so
+Phase 6b is the indicated next step rather than a speculative one. See
+`docs/decisions.md` D6.5–D6.7.
 
 `src/bgai/training/selfplay.py` implements human-regularized self-play
 (policy toward the search distribution, value toward realised final VP
