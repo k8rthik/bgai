@@ -16,12 +16,12 @@ from mcp.server import MCPServer
 from bgai.arena.driver import (
     ALWAYS_END_VERBS,
     MAIN_TRACK_VERBS,
+    answer_moves,
     end_action,
     must_continue,
     next_actor,
     offered_moves,
     oldest_blocking_pending,
-    pending_answer_moves,
     play_until_decision,
     spade_holder,
 )
@@ -54,7 +54,7 @@ def _branch_offered(bs: BranchState) -> tuple[ParsedCommand, ...]:
         return ()
     pending = oldest_blocking_pending(state)
     if pending is not None and pending.faction == actor:
-        return pending_answer_moves(state, actor, pending)
+        return answer_moves(state, actor)
     if spade_holder(state) == actor:
         return offered_moves(state, actor, turn_open=False)
     return offered_moves(state, actor, turn_open=bs.turn_open_verb is not None)

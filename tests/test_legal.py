@@ -590,8 +590,7 @@ def test_giants_transform_moves_only_propose_home_color() -> None:
     apply()-time EngineError ("giants must transform to red, not black")
     on a move the generator itself had offered.
     """
-    from bgai.agents.base import progress_moves
-    from bgai.arena.driver import new_game, next_actor, offered_moves
+    from bgai.arena.driver import new_game, next_actor, offered_moves, progress_moves
     from bgai.arena.setup_factory import fresh_setup
     from bgai.engine.tm.round_flow import advance_turn
 
@@ -622,8 +621,7 @@ def test_free_tf_build_moves_still_require_dwelling_cost() -> None:
     charges the dwelling's own cost (corpus: "nomads cannot afford 1 W"
     EngineError on a generator-offered build).
     """
-    from bgai.agents.base import progress_moves
-    from bgai.arena.driver import new_game, next_actor, offered_moves
+    from bgai.arena.driver import new_game, next_actor, offered_moves, progress_moves
     from bgai.arena.setup_factory import fresh_setup
     from bgai.engine.tm.round_flow import advance_turn
 

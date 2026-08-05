@@ -9,13 +9,18 @@ _resolve_cultist_watch), so the driver never emits those verbs.
 
 from __future__ import annotations
 
+import random
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 
 from bgai.agents.base import Agent
 from bgai.data.ledger_parser import Kind, ParsedCommand
 from bgai.engine.tm.apply import apply
-from bgai.engine.tm.legal import BLOCKING_PENDING_KINDS, legal_moves_for
+from bgai.engine.tm.legal import (
+    BLOCKING_PENDING_KINDS,
+    legal_moves_for,
+    pending_answer_moves,
+)
 from bgai.engine.tm.legal_shared import cmd
 from bgai.engine.tm.round_flow import advance_turn, begin_actions, end_of_round, start_setup
 from bgai.engine.tm.scoring import final_scoring
@@ -27,6 +32,9 @@ MAIN_TRACK_VERBS = frozenset(
     {"build", "upgrade", "action", "advance", "pass", "send", "dig", "transform", "bridge",
      "connect"}
 )
+AUX_VERBS: frozenset[str] = frozenset({"convert", "burn", "wait"})
+"""Order-exempt resource/no-op moves -- a first-legal-move picker (test
+helpers) must skip these or it would convert forever."""
 ALWAYS_END_VERBS = frozenset({"pass", "send", "advance"})
 CONTINUATION_MARKER_KINDS = frozenset({"free_d", "free_tp", "free_tf", "bridge"})
 
@@ -40,6 +48,12 @@ cleanup batch is re-entrant, and the driver needs a marker inside the
 every engine scan (legal.py/leech.py/round_flow.py all match specific
 kinds), and it is popped before ``end_of_round`` runs.
 """
+
+
+def progress_moves(moves: tuple[ParsedCommand, ...]) -> tuple[ParsedCommand, ...]:
+    """Moves that advance the game (non-AUX); falls back to `moves` if empty."""
+    filtered = tuple(m for m in moves if m.verb not in AUX_VERBS)
+    return filtered or moves
 
 
 class DriverError(Exception):
@@ -178,15 +192,6 @@ DONE = cmd("done")
 """Driver-level end-of-turn sentinel: interpreted by the driver (advance_turn),
 never passed to apply() -- the engine's own `done` handler is a no-op."""
 
-_PENDING_ANSWER_VERBS: dict[str, tuple[str, ...]] = {
-    "leech": ("leech", "decline"),
-    "cult_choice": ("gain_cult",),
-    "gain_favor": ("gain_favor",),
-    "gain_town": ("gain_town",),
-    "convert_w_to_p": ("convert",),
-}
-
-
 def canonical_order(moves: tuple[ParsedCommand, ...]) -> tuple[ParsedCommand, ...]:
     """Sort moves by their full field tuple. Engine enumeration iterates
     frozensets, whose order depends on the per-process hash seed -- without
@@ -244,11 +249,11 @@ def offered_moves(state: GameState, faction: str, turn_open: bool) -> tuple[Pars
     Design decision 4 -- not a judgment call).
     """
     moves = canonical_order(legal_moves_for(state, faction))
-    # The engine's own bare `done` (a no-op verb) is not a turn: Perl's
-    # require_action demands a real action per turn, and offering it lets
-    # an agent silently skip its setup dwelling or whole turns. The
-    # driver's DONE sentinel below is the only sanctioned turn-ender.
-    moves = tuple(m for m in moves if m.verb != "done")
+    # The engine's bare `done`/`wait` no-ops are not turns: Perl's
+    # require_action demands a real action per turn, and a uniform-random
+    # agent offered `wait` would no-op forever. The driver's DONE sentinel
+    # below is the only sanctioned turn-ender.
+    moves = tuple(m for m in moves if m.verb not in ("done", "wait"))
     if must_continue(state, faction):
         restricted = tuple(m for m in moves if m.verb in _continuation_verbs(state, faction))
         if restricted:
@@ -307,20 +312,10 @@ def _pop_pending(state: GameState, pending: PendingDecision) -> GameState:
     return replace(state, pending=state.pending[:idx] + state.pending[idx + 1 :])
 
 
-def pending_answer_moves(
-    state: GameState, faction: str, pending: PendingDecision
-) -> tuple[ParsedCommand, ...]:
-    """The canonical answer set for one blocking pending: legal moves
-    restricted to the pending kind's answer verbs (leech answers further
-    restricted to the offer's own source).
-    """
-    answer_verbs = _PENDING_ANSWER_VERBS[pending.kind]
-    moves = canonical_order(
-        tuple(m for m in legal_moves_for(state, faction) if m.verb in answer_verbs)
-    )
-    if pending.kind == "leech":
-        moves = tuple(m for m in moves if m.target == pending.source)
-    return moves
+def answer_moves(state: GameState, faction: str) -> tuple[ParsedCommand, ...]:
+    """Every answer `faction` can give to its own outstanding blocking
+    pendings (legal.py's public pending API), canonically ordered."""
+    return canonical_order(pending_answer_moves(state, faction))
 
 
 def _answer_step(
@@ -329,27 +324,31 @@ def _answer_step(
     faction: str,
     pending: PendingDecision,
     events: list[str],
+    rng: random.Random,
 ) -> GameState:
     """One blocking-pending answer (no advance_turn -- sub-decisions carry
-    no turn-order weight). An unanswerable pending (e.g. gain_favor with
-    every eligible tile gone) is popped, mirroring Perl's skip.
+    no turn-order weight). A faction whose outstanding pendings have no
+    legal answer at all (e.g. gain_favor with every eligible tile gone)
+    gets its oldest one popped, mirroring Perl's skip.
     """
-    moves = pending_answer_moves(state, faction, pending)
+    moves = answer_moves(state, faction)
     if not moves:
         events.append(f"-- {faction}: pending {pending.kind} had no legal answer, skipped")
         return _pop_pending(state, pending)
-    move = agent.choose(state, faction, moves)
+    move = agent.choose(state, faction, moves, rng)
     _check_offered(move, moves, agent, faction)
     events.append(f"{faction}: {render_command(move)}")
     return apply(state, faction, move)
 
 
-def _spade_step(state: GameState, agent: Agent, faction: str, events: list[str]) -> GameState:
+def _spade_step(
+    state: GameState, agent: Agent, faction: str, events: list[str], rng: random.Random
+) -> GameState:
     """One forced income/cleanup spade transform (phase-exempt; advance_turn
     is a documented no-op in these phases).
     """
     moves = offered_moves(state, faction, turn_open=False)
-    move = agent.choose(state, faction, moves)
+    move = agent.choose(state, faction, moves, rng)
     _check_offered(move, moves, agent, faction)
     events.append(f"{faction}: {render_command(move)}")
     return apply(state, faction, move)
@@ -366,7 +365,12 @@ class _Budget:
 
 
 def _bot_full_action(
-    state: GameState, agent: Agent, faction: str, events: list[str], budget: _Budget
+    state: GameState,
+    agent: Agent,
+    faction: str,
+    events: list[str],
+    budget: _Budget,
+    rng: random.Random,
 ) -> GameState:
     """One full main-track action for the structurally active faction, per
     the plan's turn protocol: DONE or an ALWAYS_END verb ends it; so does
@@ -376,7 +380,7 @@ def _bot_full_action(
     prev_main: str | None = None
     while True:
         moves = offered_moves(state, faction, turn_open=prev_main is not None)
-        move = agent.choose(state, faction, moves)
+        move = agent.choose(state, faction, moves, rng)
         _check_offered(move, moves, agent, faction)
         if move.verb == "done":
             return end_action(state, faction)
@@ -400,12 +404,14 @@ def play_until_decision(
     external: frozenset[str],
     events: list[str],
     max_commands: int = 10000,
+    rng: random.Random | None = None,
 ) -> GameState:
     """Advance the game -- bot decisions and bookkeeping -- until an
     external seat owes a decision or the game is FINISHED (final scoring
     applied). Appends one event line per applied command ("faction: cmd")
     and "-- note" lines for driver notes.
     """
+    rng = rng if rng is not None else random.Random(0)
     budget = _Budget(remaining=max_commands)
     while True:
         if state.phase is Phase.FINISHED:
@@ -422,13 +428,13 @@ def play_until_decision(
         agent = bots[actor]
         pending = oldest_blocking_pending(state)
         if pending is not None and pending.faction == actor:
-            state = _answer_step(state, agent, actor, pending, events)
+            state = _answer_step(state, agent, actor, pending, events, rng)
             budget.spend()
         elif spade_holder(state) == actor:
-            state = _spade_step(state, agent, actor, events)
+            state = _spade_step(state, agent, actor, events, rng)
             budget.spend()
         else:
-            state = _bot_full_action(state, agent, actor, events, budget)
+            state = _bot_full_action(state, agent, actor, events, budget, rng)
 
 
 @dataclass(frozen=True)
@@ -440,13 +446,20 @@ class GameResult:
 
 
 def run_game(
-    setup: GameSetup, agents: Mapping[str, Agent], max_commands: int = 10000
+    setup: GameSetup,
+    agents: Mapping[str, Agent],
+    max_commands: int = 10000,
+    seed: int = 0,
 ) -> GameResult:
     """Play a full game with an agent on every seat; returns final scores.
-    Winners = all factions tied at max VP (snellman shares wins).
+    Winners = all factions tied at max VP (snellman shares wins). Agents
+    draw randomness only from the seeded rng (Agent protocol), so the
+    result is a pure function of (setup, agents, seed).
     """
     events: list[str] = []
-    state = play_until_decision(new_game(setup), agents, frozenset(), events, max_commands)
+    state = play_until_decision(
+        new_game(setup), agents, frozenset(), events, max_commands, rng=random.Random(seed)
+    )
     vp = {f: state.factions[f].vp for f in setup.factions}
     top = max(vp.values())
     winners = tuple(f for f in setup.factions if vp[f] == top)

@@ -1,26 +1,34 @@
-"""Agent protocol shared by baseline bots and the arena driver."""
+"""The Agent protocol: the single interface every Terra Mystica player
+implements (master plan Phase 4; plan 2026-08-04-arena-baselines Task 1).
+"""
 
 from __future__ import annotations
 
+import random
 from typing import Protocol
 
 from bgai.data.ledger_parser import ParsedCommand
 from bgai.engine.tm.state import GameState
 
-AUX_VERBS: frozenset[str] = frozenset({"convert", "burn", "wait"})
-"""Order-exempt resource moves, always legal -- an unbiased random pick over
-the full legal set would convert forever and never end its turn."""
-
 
 class Agent(Protocol):
+    """Anything that can play Terra Mystica in the arena.
+
+    The arena calls ``choose`` once per decision -- main actions, setup
+    dwelling placements, leech answers, favor picks, and income-window
+    spade transforms all arrive through this single method (the engine's
+    pending-decision queue makes them all ordinary moves). ``offer`` is
+    always non-empty and the return value must be one of its elements.
+    ``rng`` is the arena's seeded generator: agents must draw randomness
+    only from it so games are reproducible from (setup, seats, seed).
+    """
+
     name: str
 
     def choose(
-        self, state: GameState, faction: str, moves: tuple[ParsedCommand, ...]
+        self,
+        state: GameState,
+        faction: str,
+        offer: tuple[ParsedCommand, ...],
+        rng: random.Random,
     ) -> ParsedCommand: ...
-
-
-def progress_moves(moves: tuple[ParsedCommand, ...]) -> tuple[ParsedCommand, ...]:
-    """Moves that advance the game (non-AUX); falls back to `moves` if empty."""
-    filtered = tuple(m for m in moves if m.verb not in AUX_VERBS)
-    return filtered or moves

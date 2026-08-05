@@ -17,7 +17,7 @@ def test_dry_run_writes_valid_configs(tmp_path, monkeypatch):
     out = tmp_path / "run"
     arena_llm.main(
         [
-            "--games", "3", "--seed", "100", "--opponents", "heuristic",
+            "--games", "3", "--seed", "100", "--opponents", "greedy",
             "--rungs", "1,2,3", "--out", str(out), "--dry-run",
         ]
     )

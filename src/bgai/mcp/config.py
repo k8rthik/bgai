@@ -26,7 +26,7 @@ class SessionConfig:
     llm_faction_index: int = 0
     """Seat index 0-3 for the external (LLM) seat; -1 = every seat external
     (interactive analysis / corpus-style driving)."""
-    opponents: str = "heuristic"  # "random" | "heuristic"
+    opponents: str = "greedy"  # "random" | "greedy"
     rungs: tuple[int, ...] = (1, 2, 3)
     result_path: str | None = None
     max_commands: int = 10000
@@ -35,8 +35,8 @@ class SessionConfig:
     def __post_init__(self) -> None:
         if self.llm_faction_index not in (-1, 0, 1, 2, 3):
             raise ValueError(f"llm_faction_index must be -1..3, got {self.llm_faction_index}")
-        if self.opponents not in ("random", "heuristic"):
-            raise ValueError(f"opponents must be 'random' or 'heuristic', got {self.opponents!r}")
+        if self.opponents not in ("random", "greedy"):
+            raise ValueError(f"opponents must be 'random' or 'greedy', got {self.opponents!r}")
         if not self.rungs or set(self.rungs) - {1, 2, 3} or 1 not in self.rungs:
             raise ValueError(f"rungs must be a subset of (1,2,3) including 1, got {self.rungs}")
         if self.factions is not None and len(self.factions) != 4:

@@ -136,11 +136,15 @@ def build_moves(state: GameState, faction: str, fs: FactionState) -> list[Parsed
         # transform when the target is directly (plain-board) adjacent to
         # an existing building -- actions_build.py's handle_build docstring,
         # corpus pattern "action ACTN. build F2" (task-13 report row 174).
-        # Only the transform is free: handle_build still charges the
-        # dwelling's own cost (LLM-harness task-5 regression).
-        if free_tf and _directly_adjacent_plain(fs, hex_key):
-            if _can_afford_build(state, faction, fs, hex_key, d_track.cost):
-                moves.append(cmd("build", loc=hex_key))
+        # The marker waives the transform, not the dwelling cost
+        # (handle_build still charges it -- arena fuzz finding,
+        # test_legal_soundness).
+        if (
+            free_tf
+            and _directly_adjacent_plain(fs, hex_key)
+            and _can_afford_build(state, faction, fs, hex_key, d_track.cost)
+        ):
+            moves.append(cmd("build", loc=hex_key))
             continue
         tf_cost = hooks_for(faction).spade_transform_cost(state, faction, hx.color, color)
         if tf_cost <= fs.spades_available and _can_afford_build(
@@ -220,9 +224,10 @@ def transform_moves(state: GameState, faction: str, fs: FactionState) -> list[Pa
         for target in COLOR_WHEEL:
             if target == hx.color:
                 continue
-            # actions_terraform.py rejects any requested color the faction's
-            # spade_transform_target hook redirects (Giants: home only), so
-            # only hook-stable targets are genuinely legal.
+            # handle_transform rejects any requested color the faction's
+            # target hook overrides (Giants: always home terrain), so only
+            # offer targets the hook leaves unchanged -- identity for every
+            # faction but Giants (arena fuzz finding, test_legal_soundness).
             if hooks_for(faction).spade_transform_target(state, faction, hex_key, target) != target:
                 continue
             cost = hooks_for(faction).spade_transform_cost(state, faction, hx.color, target)

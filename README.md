@@ -70,6 +70,41 @@ reference-rules implementations for 2-player, 3-player, and 5-player play are
 correct per specification but have never been replay-validated against real
 tournament data.
 
+## Arena (Phase 4)
+
+`src/bgai/agents/` holds the `Agent` protocol (one method: pick a
+`ParsedCommand` from the offered tuple — the engine's pending-decision
+queue makes leech answers, favor/town picks, and setup placements
+ordinary moves) plus the two baselines: `RandomAgent` and a one-ply
+`GreedyAgent`. `src/bgai/arena/` plays complete headless games between
+agents:
+
+```
+uv run python -m bgai.arena.run --tables 50 --seed 20260804 \
+    --agents random,greedy --report /tmp/arena.html
+```
+
+One *table* = one corpus-sampled setup (real Div 1–3 game configuration
+via `load_setup`, drop history cleared; no synthetic setup generator)
+played once per mirrored seat rotation (4 games), so every agent
+occupies every seat and faction equally often. Ratings are TrueSkill
+(faction/seat covariates reported separately per the master plan); the
+HTML report lists ratings, per-faction/per-seat mean placement, and
+every error verbatim.
+
+**Phase 4 gate** (pinned as a slow test, `tests/test_arena_verify.py`):
+greedy ≫ random over 200 mirrored games — mean placement 1.02 vs 1.91
+(0-based ranks), zero errored games, seed 20260804. Headless 4p games
+run at ~50–60 ms (target was <1s; no optimization warranted yet).
+
+Random-play arena fuzzing doubles as a `legal_moves` soundness check —
+it found two offered-but-rejected move classes the corpus containment
+sweep cannot see (Giants non-home transforms, ACTN fold-in builds
+skipping the dwelling-cost check), both fixed and pinned in
+`tests/test_legal_soundness.py`. (The LLM track's live driver, built in
+parallel, independently hit the same two — also pinned in
+`tests/test_legal.py`.)
+
 ## LLM agent track
 
 The LLM plays through an MCP server whose tools expose **facts only**
@@ -77,21 +112,21 @@ The LLM plays through an MCP server whose tools expose **facts only**
 with the model. Design: `docs/superpowers/specs/2026-08-04-llm-tm-mcp-harness-design.md`.
 
 - **Interactive:** the repo's `.mcp.json` registers the `tm` server; tell
-  Claude Code "pilot a game" and it plays a seat against bot opponents.
-  Configure via a JSON file pointed at by `$BGAI_TM_SESSION`
-  (`src/bgai/mcp/config.py` documents the schema).
+  Claude Code "pilot a game" and it plays a seat against bot opponents
+  (random or greedy). Configure via a JSON file pointed at by
+  `$BGAI_TM_SESSION` (`src/bgai/mcp/config.py` documents the schema).
 - **Tool rungs** (per-session config, for ablations): 1 = state/legal/play,
   2 = factual analysis (`preview_move`, `score_projection`), 3 = sandbox
   branches where the LLM plays *all* seats for lookahead, 4 = the
   corpus-statistics compendium in the prompt
   (`docs/knowledge/tm-compendium/`, see `GENERATE.md` there).
-- **Bot arena** (baselines):
-  `uv run python -m bgai.arena --agents random,random,random,heuristic --games 8 --seed 1`
 - **Headless LLM arena** (spawns `claude -p` per game, aggregates win rate,
   VP, $/game):
   `uv run python scripts/arena_llm.py --games 4 --seed 100 --rungs 1,2,3 --out runs/r123/`
 
-The live-game driver (`src/bgai/arena/driver.py`) adapts the replay
-harness's row-grouping contract to games with no ledger: it generates
-income/cleanup/final-scoring bookkeeping and routes real decisions
-(turns, leech offers, forced spade transforms) to agents.
+The live-game driver (`src/bgai/arena/driver.py`) is the *external-seat*
+counterpart of `arena/sim.py`'s self-driving loop: same engine contract,
+but it stops at any external seat's decision so the MCP session (or a
+test) can supply the move, and resumes bots + bookkeeping afterwards.
+`arena/setup_factory.py` provides seeded synthetic setups for MCP
+determinism where `arena/setups.py` corpus-samples real ones.
