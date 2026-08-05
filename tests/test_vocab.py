@@ -56,3 +56,17 @@ def test_canonical_moves_is_public_and_sorted() -> None:
     out = canonical_moves(moves)
     assert [m.verb for m in out] == ["build", "pass", "pass"]
     assert [m.tile for m in out] == [None, "BON1", "BON2"]
+
+
+def test_verbs_cover_every_generated_candidate_verb() -> None:
+    """legal_moves must never offer a verb the encoders can't express --
+    the extraction pipeline meets generated candidates, not just ledger
+    rows (this caught gain_cult/lose_marker during Phase 5 Task 5)."""
+    import re
+    from pathlib import Path
+
+    generated = set()
+    for path in Path("src/bgai/engine/tm").glob("legal*.py"):
+        generated |= set(re.findall(r'cmd\("([a-z_]+)"', path.read_text()))
+    missing = sorted(generated - set(VERB_INDEX))
+    assert missing == [], missing

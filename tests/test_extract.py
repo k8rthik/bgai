@@ -33,3 +33,22 @@ def test_capture_hook_transparent_and_fires(dfs) -> None:
     assert all(cmd.kind is Kind.DECISION for _, _, cmd in captured)
     # first decisions are setup dwelling placements (round 0)
     assert captured[0][0] == 0 and captured[0][2].verb == "build"
+
+
+def test_extract_game_chosen_index_invariant(dfs) -> None:
+    from bgai.training.extract import extract_game
+
+    moves_df, deltas_df = dfs
+    records, skipped = extract_game("4pLeague_S10_D1L1_G1", moves_df, deltas_df)
+    assert skipped == 0
+    assert len(records) > 80
+    for rec in records[:200]:
+        assert 0 <= rec.chosen < rec.candidates.shape[0]
+        assert rec.candidates.shape[0] >= 2
+        assert rec.candidates.shape[1] == 12
+        assert rec.season == 10 and rec.division == 1
+        assert rec.final_vps.shape == (4,)
+    # mover-relative final VPs: seat 0 of the first record is the game's
+    # first setup mover; sum of any record's final_vps is the game total
+    total = sum(rec.final_vps.sum() for rec in records[:1])
+    assert total == 112 + 147 + 135 + 147
