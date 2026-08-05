@@ -102,3 +102,30 @@ it found two offered-but-rejected move classes the corpus containment
 sweep cannot see (Giants non-home transforms, ACTN fold-in builds
 skipping the dwelling-cost check), both fixed and pinned in
 `tests/test_legal_soundness.py`.
+
+## Imitation (Phase 5)
+
+`src/bgai/training/` turns the corpus into a faction-conditioned
+policy/value net; `src/bgai/agents/imitation.py` wraps a trained
+checkpoint in the arena's `Agent` protocol.
+
+```
+uv run python -m bgai.training.dataset_build --out data/datasets/imitation
+uv run python -m bgai.training.train --shards data/datasets/imitation \
+    --out data/checkpoints/imitation_v1 --epochs 10
+```
+
+Extraction replays every clean game through the engine and captures each
+`Kind.DECISION` command with the legal candidate set at that state:
+**1,195,522 decisions** from 3,373 games (1.08M train / 117k val), split
+by season (>= 67 is validation, so no future game informs an earlier
+prediction) and weighted by division (Div 1 1.0 / Div 2 0.8 / Div 3 0.6).
+
+The net scores *candidates* rather than a fixed action space: the state
+embedding dots with each legal move's embedding, softmaxed over exactly
+the moves the engine offers, so legality is structural and an untrained
+net is still a legal player. See `docs/imitation-design.md`.
+
+Training runs on MPS/CUDA/CPU (auto-detected), ~2 min/epoch on an M3 Pro.
+Inference costs ~1 ms/decision, so arena games stay well under the <1s
+target.
