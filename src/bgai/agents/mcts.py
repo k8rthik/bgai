@@ -67,10 +67,11 @@ class MCTSAgent:
     backs the vector up. With ``simulations=0`` the agent degenerates to
     sampling the raw policy (useful as a control in ablations).
 
-    ``temperature`` applies to the final visit counts. It defaults to
-    1.0 (sample) rather than 0 (argmax) because argmax measurably hurt
-    both this agent and the raw imitation policy -- decisions D5.6 and
-    D6.6. Set 0 for a deterministic control.
+    ``temperature`` applies to the final visit counts. It is 0 (argmax
+    over visits), the usual choice. It was briefly 1.0 on the strength of
+    D6.6, which turned out to share a root cause with D5.6: the driver's
+    uncapped free-action loop, not the selection rule. Fixed in
+    arena/driver.py; see docs/decisions.md D5.6/D6.6.
     """
 
     def __init__(
@@ -79,7 +80,7 @@ class MCTSAgent:
         name: str = "mcts",
         simulations: int = 64,
         c_puct: float = 1.5,
-        temperature: float = 1.0,
+        temperature: float = 0.0,
         device: str = "cpu",
         net: PolicyValueNet | None = None,
         max_depth: int = 24,

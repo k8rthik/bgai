@@ -71,18 +71,19 @@ def test_mcts_plays_a_full_game_through_the_arena() -> None:
     assert result.decisions > 50
 
 
-def test_default_temperature_samples_visit_counts() -> None:
-    """Decisions D5.6/D6.6: argmax measurably hurts both the raw policy
-    and the search built on it, so sampling is the default."""
+def test_default_temperature_is_argmax_over_visits() -> None:
+    """Shares a root cause with D5.6: the earlier sampling default was
+    compensating for the driver's free-action loop, not for a flaw in
+    argmax selection."""
     import inspect
 
     signature = inspect.signature(MCTSAgent.__init__)
-    assert signature.parameters["temperature"].default == 1.0
+    assert signature.parameters["temperature"].default == 0.0
 
     sim = new_game(load_setup("4pLeague_S10_D1L1_G1"))
     faction, offer = decision(sim)
     agent = _agent(simulations=8)
     picks = {
-        agent.choose_sim(sim, faction, offer, random.Random(i)).loc for i in range(20)
+        agent.choose_sim(sim, faction, offer, random.Random(i)).loc for i in range(5)
     }
-    assert len(picks) > 1, "sampling should not collapse to one move"
+    assert len(picks) == 1, "argmax over visits must be deterministic"

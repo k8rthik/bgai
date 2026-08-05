@@ -50,6 +50,36 @@ MAIN_TRACK_VERBS = frozenset(
 _NOOP_VERBS = frozenset({"wait", "done"})
 _FREE_VERBS = frozenset({"convert", "burn"})
 
+FREE_ACTIONS_PER_TURN = 1
+"""How many free convert/burn moves a faction may make in one turn.
+
+Free actions are order-exempt and cost no action, so a naive driver
+re-offers them after every one -- asking "convert again?" dozens of
+times per turn. A human never faces that prompt: they submit a whole
+turn as one ledger row. The result was a train/inference mismatch that
+dominated agent play -- ~49% of our agents' decisions were converts
+against 8.3% of humans', shredding the economy they needed to build
+with (tools/diagnose_gap.py: 29% of human structures, 2% of their
+towns).
+
+The cap is set from the corpus rather than taste: humans average 0.12
+converts per turn-row, so one free action per turn is already eight
+times the human rate -- generous, while forbidding the loop.
+
+Measured effect (12 games per cell, argmax policy):
+
+    cap   VP    structures  towns   convert share
+    0     93.1  9.93        1.05    0.001
+    1     96.0  9.93        0.90    0.183   <- chosen
+    2     80.3  8.00        0.57    0.301
+    3     70.9  6.15        0.30    0.379
+    uncapped (old behaviour): 61.0  3.71  0.04  0.485
+
+Strictly monotonic: every extra free action per turn costs real play.
+Cap 1 rather than 0 because converting is sometimes genuinely required
+to afford a build, and 1 scores best.
+"""
+
 
 def canonical_moves(
     moves: tuple[ParsedCommand, ...] | list[ParsedCommand],
@@ -86,6 +116,9 @@ class SimState:
 
     game: GameState
     fresh_taken: bool = False
+    free_used: int = 0
+    """Free convert/burn moves already taken in the current turn; see
+    :data:`FREE_ACTIONS_PER_TURN`. Resets when the turn ends."""
     prev_verb: str | None = None
     decisions: int = 0
     income_marker: tuple[int, str] | None = None
@@ -153,12 +186,15 @@ def advance(sim: SimState, choice: ParsedCommand) -> SimState:
     pre = sim.game
     game = apply(sim.game, faction, choice)
     fresh_taken, prev_verb = sim.fresh_taken, sim.prev_verb
+    free_used = sim.free_used
     end_turn = False
 
     if _is_actions_turn_choice(sim, faction):
         if choice.verb == "done":
             end_turn = True
         else:
+            if choice.verb in _FREE_VERBS:
+                free_used += 1
             if choice.verb in MAIN_TRACK_VERBS:
                 if is_turn_boundary(choice, pre, faction, prev_verb):
                     fresh_taken = True
@@ -171,11 +207,12 @@ def advance(sim: SimState, choice: ParsedCommand) -> SimState:
         game=game,
         fresh_taken=fresh_taken,
         prev_verb=prev_verb,
+        free_used=free_used,
         decisions=sim.decisions + 1,
     )
     if end_turn:
         nxt = replace(
-            _end_actions_turn(nxt), fresh_taken=False, prev_verb=None
+            _end_actions_turn(nxt), fresh_taken=False, prev_verb=None, free_used=0
         )
     if sim.game.phase in (Phase.SETUP_DWELLINGS, Phase.SETUP_BONUS) and _forced_answer(
         nxt.game
@@ -245,8 +282,14 @@ def _actions_offer(sim: SimState) -> tuple[str, tuple[ParsedCommand, ...]]:
     """
     game = sim.game
     faction = active_faction(game)
+    frees_allowed = sim.free_used < FREE_ACTIONS_PER_TURN
     if not sim.fresh_taken:
-        offer = tuple(m for m in legal_moves(game) if m.verb not in _NOOP_VERBS)
+        offer = tuple(
+            m
+            for m in legal_moves(game)
+            if m.verb not in _NOOP_VERBS
+            and (frees_allowed or m.verb not in _FREE_VERBS)
+        )
     else:
         moves = legal_moves(game)
         continuations = tuple(
@@ -256,7 +299,9 @@ def _actions_offer(sim: SimState) -> tuple[str, tuple[ParsedCommand, ...]]:
             and m.verb != "pass"
             and not is_turn_boundary(m, game, faction, sim.prev_verb)
         )
-        frees = tuple(m for m in moves if m.verb in _FREE_VERBS)
+        frees = (
+            tuple(m for m in moves if m.verb in _FREE_VERBS) if frees_allowed else ()
+        )
         offer = continuations + frees + (cmd("done"),)
     return faction, canonical_moves(offer)
 
