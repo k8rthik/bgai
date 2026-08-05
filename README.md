@@ -69,3 +69,36 @@ turn rotation, leech seat order) is oracle-validated only at 4 players; the
 reference-rules implementations for 2-player, 3-player, and 5-player play are
 correct per specification but have never been replay-validated against real
 tournament data.
+
+## Arena (Phase 4)
+
+`src/bgai/agents/` holds the `Agent` protocol (one method: pick a
+`ParsedCommand` from the offered tuple — the engine's pending-decision
+queue makes leech answers, favor/town picks, and setup placements
+ordinary moves) plus the two baselines: `RandomAgent` and a one-ply
+`GreedyAgent`. `src/bgai/arena/` plays complete headless games between
+agents:
+
+```
+uv run python -m bgai.arena.run --tables 50 --seed 20260804 \
+    --agents random,greedy --report /tmp/arena.html
+```
+
+One *table* = one corpus-sampled setup (real Div 1–3 game configuration
+via `load_setup`, drop history cleared; no synthetic setup generator)
+played once per mirrored seat rotation (4 games), so every agent
+occupies every seat and faction equally often. Ratings are TrueSkill
+(faction/seat covariates reported separately per the master plan); the
+HTML report lists ratings, per-faction/per-seat mean placement, and
+every error verbatim.
+
+**Phase 4 gate** (pinned as a slow test, `tests/test_arena_verify.py`):
+greedy ≫ random over 200 mirrored games — mean placement 1.02 vs 1.91
+(0-based ranks), zero errored games, seed 20260804. Headless 4p games
+run at ~50–60 ms (target was <1s; no optimization warranted yet).
+
+Random-play arena fuzzing doubles as a `legal_moves` soundness check —
+it found two offered-but-rejected move classes the corpus containment
+sweep cannot see (Giants non-home transforms, ACTN fold-in builds
+skipping the dwelling-cost check), both fixed and pinned in
+`tests/test_legal_soundness.py`.
