@@ -61,6 +61,7 @@ from bgai.data.ledger_parser import Kind, ParsedCommand
 from bgai.engine.tm.apply import EngineError, apply
 from bgai.engine.tm.factions_data import FACTIONS
 from bgai.engine.tm.legal import legal_moves, legal_moves_all, legal_moves_for
+from bgai.engine.tm.legal_match import is_contained
 from bgai.engine.tm.power import Power
 from bgai.engine.tm.replay import (
     _CULT_INCOME_VERBS,
@@ -216,54 +217,11 @@ def test_setup_dwellings_offers_exactly_the_valid_dwelling_spots() -> None:
 # Step 2: containment + generative smoke, against real replayed games
 # --------------------------------------------------------------------------
 
-_COLOR_ALIASES = {"grey": "gray"}
-
-
-def _norm_color(color: str | None) -> str | None:
-    return _COLOR_ALIASES.get(color, color) if color else color
-
-
+# Verb identity keys now live in bgai.engine.tm.legal_match (promoted
+# from this file in Phase 5 so extraction and this sweep share one
+# owner); this sweep remains that module's regression test.
 def _is_contained(legal: tuple[ParsedCommand, ...], real: ParsedCommand) -> bool:
-    verb = real.verb
-    if verb == "convert":
-        return any(
-            m.verb == "convert" and m.res1 == real.res1 and m.res2 == real.res2 for m in legal
-        )
-    if verb in ("dig", "burn"):
-        return any(m.verb == verb and m.n1 == real.n1 for m in legal)
-    if verb == "transform":
-        real_color = _norm_color(real.color)
-        if real_color is None:
-            return any(m.verb == "transform" and m.loc == real.loc for m in legal)
-        return any(
-            m.verb == "transform" and m.loc == real.loc and _norm_color(m.color) == real_color
-            for m in legal
-        )
-    if verb == "gain_town":
-        return any(m.verb == "gain_town" and m.tile == real.tile for m in legal)
-    if verb in ("leech", "decline"):
-        return any(m.verb == verb for m in legal)
-    if verb == "send":
-        return any(m.verb == "send" and m.cult == real.cult for m in legal)
-    if verb == "pass":
-        return any(m.verb == "pass" and m.tile == real.tile for m in legal)
-    if verb == "advance":
-        return any(m.verb == "advance" and m.reason == real.reason for m in legal)
-    if verb == "bridge":
-        return any(m.verb == "bridge" and {m.loc, m.loc2} == {real.loc, real.loc2} for m in legal)
-    if verb == "action":
-        return any(m.verb == "action" and m.tile == real.tile for m in legal)
-    if verb == "build":
-        return any(m.verb == "build" and m.loc == real.loc for m in legal)
-    if verb == "upgrade":
-        return any(
-            m.verb == "upgrade" and m.loc == real.loc and m.building == real.building for m in legal
-        )
-    if verb == "connect":
-        return any(m.verb == "connect" and m.loc == real.loc for m in legal)
-    if verb == "gain_favor":
-        return any(m.verb == "gain_favor" and m.tile == real.tile for m in legal)
-    return any(m.verb == verb for m in legal)
+    return is_contained(legal, real)
 
 
 def _apply_row_commands_with_hook(state, faction, cmds, oracle_cult, on_decision):
