@@ -15,6 +15,7 @@ import argparse
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Sequence
 
 import numpy as np
 import polars as pl
@@ -58,11 +59,22 @@ def _pack(records: list[DecisionRecord]) -> dict[str, np.ndarray]:
     }
 
 
-def build(out_dir: Path, limit: int | None = None, raw_dir: Path | None = None) -> ShardStats:
+def build(
+    out_dir: Path,
+    limit: int | None = None,
+    raw_dir: Path | None = None,
+    game_ids: Sequence[str] | None = None,
+) -> ShardStats:
+    """Extract ``game_ids`` (default: every clean corpus game, optionally
+    the first ``limit`` of them) into shards under ``out_dir``.
+    """
     moves_df = pl.read_parquet("data/datasets/moves.parquet")
     deltas_df = pl.read_parquet("data/datasets/deltas.parquet")
     meta_df = pl.read_parquet("data/datasets/games_meta.parquet")
-    game_ids = list(clean_game_ids() if raw_dir is None else clean_game_ids(raw_dir))
+    if game_ids is None:
+        game_ids = list(clean_game_ids() if raw_dir is None else clean_game_ids(raw_dir))
+    else:
+        game_ids = list(game_ids)
     if limit is not None:
         game_ids = game_ids[:limit]
 
