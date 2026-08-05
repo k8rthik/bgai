@@ -3,12 +3,12 @@
 import dataclasses
 import re
 
+from bgai.engine.tm.scoring import compute_cult_scoring
+from bgai.engine.tm.state import Phase
 from bgai.mcp.analysis import preview, projection
 from bgai.mcp.config import SessionConfig
 from bgai.mcp.render import render_command
 from bgai.mcp.session import Session
-from bgai.engine.tm.scoring import compute_cult_scoring
-from bgai.engine.tm.state import Phase
 
 JUDGMENT_WORDS = re.compile(
     r"\b(recommend|best|should|strong|weak|good|bad)\b", re.IGNORECASE
