@@ -218,12 +218,19 @@ def must_continue(state: GameState, faction: str) -> bool:
 def _end_action(state: GameState, faction: str) -> GameState:
     """Close `faction`'s full action: forfeit any leftover (unspendable or
     voluntarily unspent) spade balance -- Perl's turn-end ``lose_spade`` --
-    then advance the turn.
+    and, if the faction just passed, its unused extra actions (an ACTC
+    ticket dies with the pass; advance_turn would otherwise keep the
+    passed faction structurally active and strand the round). Then
+    advance the turn.
     """
     fs = state.factions[faction]
-    if fs.spades_available > 0:
+    if fs.spades_available > 0 or (fs.passed and fs.extra_actions > 0):
         new_factions = dict(state.factions)
-        new_factions[faction] = replace(fs, spades_available=0)
+        new_factions[faction] = replace(
+            fs,
+            spades_available=0,
+            extra_actions=0 if fs.passed else fs.extra_actions,
+        )
         state = replace(state, factions=new_factions)
     return advance_turn(state)
 
@@ -241,13 +248,43 @@ def offered_moves(state: GameState, faction: str, turn_open: bool) -> tuple[Pars
     # an agent silently skip its setup dwelling or whole turns. The
     # driver's DONE sentinel below is the only sanctioned turn-ender.
     moves = tuple(m for m in moves if m.verb != "done")
-    if state.phase in (Phase.INCOME, Phase.CLEANUP) and spade_holder(state) == faction:
-        forced = tuple(m for m in moves if m.verb == "transform")
-        if forced:
-            return forced
-    if turn_open and not must_continue(state, faction):
+    if must_continue(state, faction):
+        restricted = tuple(m for m in moves if m.verb in _continuation_verbs(state, faction))
+        if restricted:
+            return restricted
+        return moves  # defensive: should not happen (decline moves always exist)
+    if turn_open:
         moves = moves + (DONE,)
     return moves
+
+
+def _continuation_verbs(state: GameState, faction: str) -> frozenset[str]:
+    """Verbs that resolve `faction`'s forced continuation (spend or decline
+    the outstanding spade balance / one-shot markers). While one is
+    outstanding, offering anything else would let an agent open a second
+    main action inside the same turn -- the engine does not gate
+    one-action-per-turn (that is this driver's job), so the turn
+    accounting would silently desync (observed: heuristic dwarves taking
+    two power actions in one turn on an unspent ACT1 bridge marker).
+    """
+    fs = state.factions[faction]
+    allowed: set[str] = {"lose_marker"}
+    if fs.spades_available > 0 and _can_spend_spades(state, faction):
+        allowed.add("transform")
+    kinds = {
+        p.kind
+        for p in state.pending
+        if p.faction == faction and p.kind in CONTINUATION_MARKER_KINDS
+    }
+    if "free_d" in kinds:
+        allowed.add("build")
+    if "free_tp" in kinds:
+        allowed.add("upgrade")
+    if "free_tf" in kinds:
+        allowed |= {"transform", "build"}
+    if "bridge" in kinds:
+        allowed.add("bridge")
+    return frozenset(allowed)
 
 
 def _oldest_blocking_pending(state: GameState) -> PendingDecision | None:
