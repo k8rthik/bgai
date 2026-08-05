@@ -22,14 +22,36 @@ from bgai.training.model import ModelConfig, PolicyValueNet
 from bgai.training.vocab import ENCODING_VERSION, FACTION_INDEX
 
 
+DEFAULT_TEMPERATURE = 1.0
+"""Sample from the policy rather than taking its argmax.
+
+Measured, not assumed (80 mirrored games per setting vs the greedy
+baseline, seed 4242, checkpoint imitation_v1):
+
+    T=0.0  imitation 1.562 vs greedy 1.413   (-0.150)
+    T=0.3  imitation 1.531 vs greedy 1.381   (-0.150)
+    T=0.5  imitation 1.419 vs greedy 1.488   (+0.069)
+    T=0.7  imitation 1.394 vs greedy 1.525   (+0.131)
+    T=1.0  imitation 1.363 vs greedy 1.531   (+0.169)
+
+Greedy *beats* the argmax policy and loses to the sampled one, and the
+trend is monotonic in temperature. A behavior-cloned policy's argmax is
+brittle: it commits to the single most-imitated move in states the
+expert corpus never contains, and repeats that commitment every time the
+same state recurs. Sampling at the trained distribution keeps the
+diversity the human data actually had. T=1.0 is the honest default --
+it is the policy as trained, with no sharpening.
+"""
+
+
 class ImitationAgent:
-    """Argmax (or temperature-sampled) policy over the offered moves."""
+    """Temperature-sampled (or, at T=0, argmax) policy over the offer."""
 
     def __init__(
         self,
         checkpoint_path: Path | None = None,
         name: str = "imitation",
-        temperature: float = 0.0,
+        temperature: float = DEFAULT_TEMPERATURE,
         device: str = "cpu",
         net: PolicyValueNet | None = None,
     ) -> None:
