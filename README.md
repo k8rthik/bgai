@@ -149,3 +149,42 @@ the most-likely move loses to the greedy heuristic (-0.15 mean rank);
 sampling at the trained distribution beats it (+0.17), and the trend is
 monotonic in temperature. High imitation accuracy does not imply playing
 strength -- see `docs/decisions.md` D5.6.
+
+## Search, self-play, and the LLM track (Phases 6–7)
+
+`src/bgai/agents/mcts.py` is a max^n MCTS: every node carries a value
+vector with one component per seat (a 4-player game is not zero-sum, so
+a scalar would be a lie), selection maximises the *acting* seat's own
+component, and leaves are evaluated by the imitation net's value head
+rather than by random rollouts. It runs on `arena/driver.py`'s
+immutable `SimState`, which exists so positions can be cloned and
+branched — see `docs/decisions.md` D6.1.
+
+**Honest status: search does not yet beat the policy it is built from.**
+Against greedy, MCTS wins comfortably (+0.85 mean rank). Against the
+imitation policy that supplies its priors, it is level at 64
+simulations and slightly *behind* at 128 (paired, 100 games, t = 1.18
+the wrong way). The master plan's "each rung beats the previous" gate is
+therefore **not met for Phase 6**, and `docs/decisions.md` D6.5 records
+the three leading hypotheses rather than the one flattering number.
+
+`src/bgai/training/selfplay.py` implements human-regularized self-play
+(policy toward the search distribution, value toward realised final VP
+shares, KL toward the frozen imitation policy — the Cicero/piKL anchor
+that keeps a 4-player economic game from drifting into conventions no
+human would punish). It is correct and unit-tested but **not run at
+scale**: one 4-seat self-play game costs ~14 s here, so 10^5 games is
+cluster work, exactly the MSI Agate request the master plan anticipates.
+
+`src/bgai/llm/` + `src/bgai/agents/llm_agent.py` implement ladder rungs
+L0–L4 (bare → knowledge → engine tools → corpus retrieval → propose /
+critique / pick with a persistent game plan) behind a provider-agnostic
+interface. All of it is mock-tested with no API key and no spend; **none
+of it is measured**, because no LLM credentials exist in this
+environment. See `docs/llm-track.md` for what each rung adds and why
+retrieval deliberately avoids the imitation net's embedding.
+
+Phase 8 (playing real humans) is prepared but deliberately not executed:
+it requires contacting terra.snellman.net's operator and creating an
+account on someone else's service. `docs/phase8-human-play.md` holds the
+plan and a drafted request for the maintainer to review and send.
