@@ -16,6 +16,8 @@ from bgai.training.model import ModelConfig, PolicyValueNet
 
 
 def _agent(temperature: float = 0.0) -> ImitationAgent:
+    """Tests pin temperature explicitly; the production default is
+    ``DEFAULT_TEMPERATURE`` (1.0, measured -- see that docstring)."""
     torch.manual_seed(0)
     net = PolicyValueNet(ModelConfig(hidden=64, embed=32, move_hidden=32, dropout=0.0))
     return ImitationAgent(net=net, temperature=temperature)
@@ -46,3 +48,18 @@ def test_untrained_agent_completes_a_full_game() -> None:
     agent = _agent()
     result = run_game(setup, {f: agent for f in setup.factions}, random.Random(3))
     assert result.error is None, result.error
+
+
+def test_default_temperature_samples_rather_than_argmaxes() -> None:
+    """The measured default (DEFAULT_TEMPERATURE) must be sampling: the
+    argmax policy loses to the greedy baseline in the arena, the sampled
+    one beats it (see agents/imitation.py's DEFAULT_TEMPERATURE table)."""
+    from bgai.agents.imitation import DEFAULT_TEMPERATURE
+
+    assert DEFAULT_TEMPERATURE > 0
+    state = start_setup(GameState.initial(load_setup("4pLeague_S10_D1L1_G1")))
+    faction = active_faction(state)
+    offer = legal_moves(state)
+    agent = _agent(temperature=DEFAULT_TEMPERATURE)
+    picks = {agent.choose(state, faction, offer, random.Random(i)).loc for i in range(25)}
+    assert len(picks) > 1, "sampling should not collapse to a single move"
