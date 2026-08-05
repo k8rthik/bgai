@@ -99,10 +99,19 @@ def run_game(
             if sim.decisions >= max_decisions:
                 error = f"decision cap exceeded ({max_decisions})"
                 break
-            choice = seats[faction].choose(sim.game, faction, offer, rng)
+            agent = seats[faction]
+            # Optional protocol extension (Phase 6): a search agent needs
+            # the whole SimState to branch from, not just the GameState.
+            # Ordinary agents implement `choose` and never see the driver.
+            chooser = getattr(agent, "choose_sim", None)
+            choice = (
+                chooser(sim, faction, offer, rng)
+                if chooser is not None
+                else agent.choose(sim.game, faction, offer, rng)
+            )
             if choice not in offer:
                 raise EngineError(
-                    f"agent {seats[faction].name!r} returned a move outside its offer",
+                    f"agent {agent.name!r} returned a move outside its offer",
                     state=sim.game,
                     faction=faction,
                     cmd=choice,
