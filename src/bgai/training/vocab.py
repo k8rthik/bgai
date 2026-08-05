@@ -17,13 +17,16 @@ ENCODING_VERSION = 1
 HEXES: tuple[str, ...] = tuple(sorted(base_board().hexes))
 HEX_INDEX: dict[str, int] = {h: i for i, h in enumerate(HEXES)}
 
-# The 18 corpus decision verbs (verified against moves.parquet by
-# tests/test_vocab.py) plus lose_spade, which the arena driver offers as
-# an income-window forfeit and imitation states must be able to express.
+# Every verb the encoders can meet: the 18 corpus decision verbs, plus
+# the three verbs only *generated* play produces -- `lose_spade` (the
+# arena's income-window forfeit) and `gain_cult`/`lose_marker` (offered
+# by legal_moves as pending answers / marker retirement, and so present
+# among candidate sets even though no ledger row is a bare one). Both
+# invariants are pinned in tests/test_vocab.py.
 VERBS: tuple[str, ...] = (
     "action", "advance", "bridge", "build", "burn", "connect", "convert",
-    "decline", "dig", "done", "gain_favor", "gain_town", "leech", "lose_spade",
-    "pass", "send", "transform", "upgrade", "wait",
+    "decline", "dig", "done", "gain_cult", "gain_favor", "gain_town", "leech",
+    "lose_marker", "lose_spade", "pass", "send", "transform", "upgrade", "wait",
 )
 VERB_INDEX: dict[str, int] = {v: i for i, v in enumerate(VERBS)}
 
