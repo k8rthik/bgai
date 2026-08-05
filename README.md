@@ -177,13 +177,26 @@ self-play fixes (train the value head on states the search visits), so
 Phase 6b is the indicated next step rather than a speculative one. See
 `docs/decisions.md` D6.5–D6.7.
 
-`src/bgai/training/selfplay.py` implements human-regularized self-play
-(policy toward the search distribution, value toward realised final VP
-shares, KL toward the frozen imitation policy — the Cicero/piKL anchor
-that keeps a 4-player economic game from drifting into conventions no
-human would punish). It is correct and unit-tested but **not run at
-scale**: one 4-seat self-play game costs ~14 s here, so 10^5 games is
-cluster work, exactly the MSI Agate request the master plan anticipates.
+`src/bgai/training/selfplay.py` + `selfplay_train.py` implement
+human-regularized self-play (policy toward the search distribution,
+value toward realised final VP shares, KL toward the frozen imitation
+policy). It **ran**: 6 iterations x 400 games = 2,400 games and 789k
+decision records, ~2,600 games/hour across 9 parallel workers.
+
+**It made the agent significantly worse** (+0.554 ± 0.163 mean rank,
+t = 3.40, 61.1 VP vs 64.7), and training the value head on 789k
+search-visited states still did not make search pay (−0.104 ± 0.171).
+The per-iteration drift curve shows damage growing with distance from
+the human anchor: iteration 1 level (−0.075), iteration 3 worse
+(+0.458), iteration 6 plateaued (+0.450).
+
+The diagnosis (D6.8): self-play trains the policy toward the *search's*
+distribution, and D6.7 measured that this search has no edge over the
+policy — so the loop distills a teacher no stronger than its student,
+and every iteration is a lossy copy. Search must acquire an edge before
+self-play can bootstrap; a larger KL weight would limit the damage but
+cannot manufacture a teacher. The imitation checkpoint remains the
+strongest agent.
 
 `src/bgai/llm/` + `src/bgai/agents/llm_agent.py` implement ladder rungs
 L0–L4 (bare → knowledge → engine tools → corpus retrieval → propose /
