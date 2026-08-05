@@ -66,6 +66,11 @@ class MCTSAgent:
     edges to a leaf, evaluates the leaf with the net's value head, and
     backs the vector up. With ``simulations=0`` the agent degenerates to
     sampling the raw policy (useful as a control in ablations).
+
+    ``temperature`` applies to the final visit counts. It defaults to
+    1.0 (sample) rather than 0 (argmax) because argmax measurably hurt
+    both this agent and the raw imitation policy -- decisions D5.6 and
+    D6.6. Set 0 for a deterministic control.
     """
 
     def __init__(
@@ -74,7 +79,7 @@ class MCTSAgent:
         name: str = "mcts",
         simulations: int = 64,
         c_puct: float = 1.5,
-        temperature: float = 0.0,
+        temperature: float = 1.0,
         device: str = "cpu",
         net: PolicyValueNet | None = None,
         max_depth: int = 24,
