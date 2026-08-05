@@ -1,0 +1,83 @@
+"""Imitation-net agent (plan Task 9).
+
+Wraps a trained policy/value checkpoint in the arena's ``Agent``
+protocol. The offer the arena passes is already in canonical order --
+the same order the training pipeline indexed candidates in -- so the
+net's argmax over the offer is directly the predicted expert move.
+"""
+
+from __future__ import annotations
+
+import random
+from pathlib import Path
+
+import numpy as np
+import torch
+
+from bgai.data.ledger_parser import ParsedCommand
+from bgai.engine.tm.state import GameState
+from bgai.training.encode_move import encode_move
+from bgai.training.encode_state import encode_state
+from bgai.training.model import ModelConfig, PolicyValueNet
+from bgai.training.vocab import ENCODING_VERSION, FACTION_INDEX
+
+
+class ImitationAgent:
+    """Argmax (or temperature-sampled) policy over the offered moves."""
+
+    def __init__(
+        self,
+        checkpoint_path: Path | None = None,
+        name: str = "imitation",
+        temperature: float = 0.0,
+        device: str = "cpu",
+        net: PolicyValueNet | None = None,
+    ) -> None:
+        self.name = name
+        self.temperature = temperature
+        self.device = torch.device(device)
+        if net is not None:
+            self.net = net
+        else:
+            if checkpoint_path is None:
+                raise ValueError("either checkpoint_path or net must be given")
+            ckpt = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
+            if ckpt.get("encoding_version") != ENCODING_VERSION:
+                raise ValueError(
+                    f"checkpoint encoding v{ckpt.get('encoding_version')} != code "
+                    f"v{ENCODING_VERSION} -- retrain or check out the matching commit"
+                )
+            self.net = PolicyValueNet(ModelConfig())
+            self.net.load_state_dict(ckpt["model"])
+        self.net.to(self.device).eval()
+
+    @torch.no_grad()
+    def choose(
+        self,
+        state: GameState,
+        faction: str,
+        offer: tuple[ParsedCommand, ...],
+        rng: random.Random,
+    ) -> ParsedCommand:
+        enc = encode_state(state, faction)
+        candidates = np.stack([encode_move(m, state, faction) for m in offer])
+        hex_planes = torch.from_numpy(enc.hex_planes.astype(np.float32))[None].to(self.device)
+        globals_ = torch.from_numpy(enc.globals.astype(np.float32))[None].to(self.device)
+        cand = torch.from_numpy(candidates.astype(np.int64))[None].to(self.device)
+        mask = torch.ones((1, len(offer)), dtype=torch.bool, device=self.device)
+        faction_id = torch.tensor([FACTION_INDEX[faction]], device=self.device)
+
+        logits, _ = self.net(hex_planes, globals_, faction_id, cand, mask)
+        if self.temperature <= 0:
+            return offer[int(logits[0].argmax().item())]
+        probs = (logits[0] / self.temperature).softmax(dim=-1).cpu().numpy()
+        # draw from the arena's seeded rng so games stay reproducible
+        threshold = rng.random()
+        cumulative = float(np.cumsum(probs)[-1])
+        target = threshold * cumulative
+        running = 0.0
+        for index, p in enumerate(probs):
+            running += float(p)
+            if running >= target:
+                return offer[index]
+        return offer[-1]
