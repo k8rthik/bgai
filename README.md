@@ -144,6 +144,30 @@ than at *where* and *how much*.
 both baselines over 100 mirrored games -- mean placement **1.08** vs
 greedy 1.33 and random 2.41, zero errors.
 
+**Absolute strength, honestly** (`docs/decisions.md` C1/C2). Placement
+against our own baselines flatters the agent; final scores do not:
+
+| | VP per player | table total |
+|---|---|---|
+| Div 1-3 humans (3,553 games) | **136.3** | 545.2 |
+| tmai `ai_lode`, external heuristic (25 games) | **98.9** | 395.5 |
+| our imitation net | **~65** | ~256 |
+| our greedy heuristic | ~65 | — |
+| random | ~54 | — |
+
+An independent hand-written AI from 2013 — no learning, no search, no
+corpus — scores 1.5x our net. Ours sits closer to random than to it, and
+barely halfway to human level. "Beats greedy" was self-grading: greedy
+and the net score the same in absolute terms, and the net wins only on
+relative placement inside an equally weak field. Reproduce with
+`node tools/tmai_headless.js <tmai_dir> 25 7`.
+
+The per-verb accuracy split explains the shape of the weakness: the net
+is strong where options are few and conventions clear (`leech` 91%,
+`gain_favor` 68%, `build` 62%) and weak exactly where the game is won
+(`send` 12%, `dig` 29%, `transform` 35%, `upgrade` 37%). It learned the
+game's grammar, not its strategy.
+
 One finding worth flagging: the net must **sample**, not argmax. Taking
 the most-likely move loses to the greedy heuristic (-0.15 mean rank);
 sampling at the trained distribution beats it (+0.17), and the trend is
