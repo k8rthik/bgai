@@ -12,7 +12,7 @@ from bgai.data.ledger_parser import ParsedCommand
 from bgai.engine.tm.board import base_board
 from bgai.engine.tm.factions_data import CULTS
 from bgai.engine.tm.state import GameState, active_faction
-from bgai.engine.tm.tiles import BONUS_TILES, FAVOR_TILES, SCORE_TILES, TOWN_TILES
+from bgai.engine.tm.tiles import BONUS_TILES, SCORE_TILES
 
 _BARE_VERBS = frozenset(
     {"wait", "done", "resign", "score_resources", "setup",

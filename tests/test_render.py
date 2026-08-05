@@ -3,13 +3,13 @@
 import dataclasses
 
 import pytest
+from driver_helpers import fast_forward_setup
 
 from bgai.arena.driver import new_game, next_actor, offered_moves
 from bgai.arena.setup_factory import fresh_setup
 from bgai.data.ledger_parser import parse_command
 from bgai.engine.tm.state import PendingDecision
 from bgai.mcp.render import diff_factions, render_command, render_moves, render_state
-from driver_helpers import fast_forward_setup
 
 _FIELDS = (
     "loc", "loc2", "building", "tile", "cult", "color", "target", "reason",
