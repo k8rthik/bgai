@@ -142,6 +142,55 @@ def tile_pick_rates(moves: pl.DataFrame, deltas: pl.DataFrame) -> pl.DataFrame:
     )
 
 
+_MAIN_VERBS = ("build", "upgrade", "action", "advance", "pass", "send", "dig", "transform",
+               "bridge", "connect")
+
+
+def leech_behavior(moves: pl.DataFrame, deltas: pl.DataFrame) -> pl.DataFrame:
+    """Win-conditioned leech accept rate by offer amount: every `leech`
+    (accept) or `decline` row carries the offered amount in n1."""
+    df = _decisions_with_context(moves, deltas).filter(
+        pl.col("verb").is_in(("leech", "decline")) & pl.col("n1").is_not_null()
+    )
+    return (
+        df.group_by(["won", pl.col("n1").alias("amount")])
+        .agg(pl.len().alias("offers"), (pl.col("verb") == "leech").mean().alias("accept_rate"))
+        .sort(["won", "amount"])
+    )
+
+
+def vp_progression(moves: pl.DataFrame, deltas: pl.DataFrame) -> pl.DataFrame:
+    """Mean VP at the end of each round, winners vs losers -- the shape of
+    the engine-first / score-late arc."""
+    ri = round_index(moves)
+    st = final_standings(deltas).select(["game_id", "faction", "won"])
+    d = (
+        deltas.join(ri, on=["game_id", "row"], how="inner")
+        .join(st, on=["game_id", "faction"])
+    )
+    end = d.group_by(["game_id", "faction", "won", "round"]).agg(
+        pl.col("vp_value").max().alias("vp_end")
+    )
+    return (
+        end.group_by(["won", "round"])
+        .agg(pl.col("vp_end").mean().alias("mean_vp"), pl.len().alias("n"))
+        .sort(["won", "round"])
+    )
+
+
+def action_tempo(moves: pl.DataFrame, deltas: pl.DataFrame) -> pl.DataFrame:
+    """Main-track actions per game per round, winners vs losers -- measures
+    the action-economy gap."""
+    df = _decisions_with_context(moves, deltas).filter(
+        pl.col("verb").is_in(_MAIN_VERBS) & (pl.col("round") >= 1)
+    )
+    counts = df.group_by(["faction", "won", "round", "game_id"]).agg(pl.len().alias("n"))
+    per_round = counts.group_by(["won", "round"]).agg(
+        (pl.col("n").sum() / pl.len()).alias("actions_per_game")  # per faction-game
+    )
+    return per_round.sort(["won", "round"])
+
+
 def _md_table(df: pl.DataFrame, float_digits: int = 2) -> str:
     cols = df.columns
     lines = ["| " + " | ".join(cols) + " |", "|" + "---|" * len(cols)]
@@ -175,6 +224,18 @@ def write_compendium_tables(
         "## Faction win rates",
         "",
         _md_table(rates),
+        "",
+        "## Leech accept rate by offer amount (winners vs losers)",
+        "",
+        _md_table(leech_behavior(moves, deltas)),
+        "",
+        "## Mean VP by end of round (winners vs losers)",
+        "",
+        _md_table(vp_progression(moves, deltas)),
+        "",
+        "## Main-track actions per game per round (winners vs losers)",
+        "",
+        _md_table(action_tempo(moves, deltas)),
         "",
     ]
     (out_dir / "_overview.md").write_text("\n".join(overview))

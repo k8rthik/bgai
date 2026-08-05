@@ -8,10 +8,10 @@
 
 ## Opening patterns (dwellings by end of round 1; mean first-upgrade round)
 
-| faction | won | mean_dwellings_by_r1 | SA | TE | SH | TP |
+| faction | won | mean_dwellings_by_r1 | SH | TP | TE | SA |
 |---|---|---|---|---|---|---|
-| giants | False | 3.26 | 4.86 | 3.15 | 1.15 | 1.02 |
-| giants | True | 3.33 | 4.40 | 2.75 | 1.17 | 1.00 |
+| giants | False | 3.26 | 1.15 | 1.02 | 3.15 | 4.86 |
+| giants | True | 3.33 | 1.17 | 1.00 | 2.75 | 4.40 |
 
 ## Timing curves (mean occurrences per game, by round)
 

@@ -8,10 +8,10 @@
 
 ## Opening patterns (dwellings by end of round 1; mean first-upgrade round)
 
-| faction | won | mean_dwellings_by_r1 | SA | TE | SH | TP |
+| faction | won | mean_dwellings_by_r1 | SH | TP | TE | SA |
 |---|---|---|---|---|---|---|
-| chaosmagicians | False | 1.70 | 2.01 | 1.01 | 5.21 | 1.00 |
-| chaosmagicians | True | 1.71 | 1.81 | 1.00 | 5.15 | 1.00 |
+| chaosmagicians | False | 1.70 | 5.21 | 1.00 | 1.01 | 2.01 |
+| chaosmagicians | True | 1.71 | 5.15 | 1.00 | 1.00 | 1.81 |
 
 ## Timing curves (mean occurrences per game, by round)
 

@@ -8,10 +8,10 @@
 
 ## Opening patterns (dwellings by end of round 1; mean first-upgrade round)
 
-| faction | won | mean_dwellings_by_r1 | SA | TE | SH | TP |
+| faction | won | mean_dwellings_by_r1 | SH | TP | TE | SA |
 |---|---|---|---|---|---|---|
-| fakirs | False | 2.98 | 3.73 | 1.07 | 4.56 | 1.00 |
-| fakirs | True | 3.00 | 4.50 | 1.00 | 4.00 | 1.00 |
+| fakirs | False | 2.98 | 4.56 | 1.00 | 1.07 | 3.73 |
+| fakirs | True | 3.00 | 4.00 | 1.00 | 1.00 | 4.50 |
 
 ## Timing curves (mean occurrences per game, by round)
 

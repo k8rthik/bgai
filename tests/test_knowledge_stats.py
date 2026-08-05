@@ -4,12 +4,15 @@ import polars as pl
 import pytest
 
 from bgai.knowledge.stats import (
+    action_tempo,
     faction_win_rates,
     final_standings,
+    leech_behavior,
     opening_patterns,
     round_index,
     tile_pick_rates,
     timing_curves,
+    vp_progression,
     write_compendium_tables,
 )
 
@@ -45,6 +48,9 @@ def fixture_frames():
             _moves_row(game, 21, "y", "other_income_for_faction", kind="INCOME"),
             _moves_row(game, 22, "x", "send", cult="FIRE"),
             _moves_row(game, 23, "y", "gain_favor", tile="FAV11"),
+            _moves_row(game, 24, "x", "leech", n1=1, target="y"),
+            _moves_row(game, 25, "x", "decline", n1=4, target="y"),
+            _moves_row(game, 26, "y", "leech", n1=2, target="x"),
         ]
     moves = pl.DataFrame(rows)
     deltas = pl.DataFrame(
@@ -120,3 +126,25 @@ def test_real_corpus_tables(tmp_path):
     write_compendium_tables(moves, deltas, tmp_path)
     darklings = (tmp_path / "darklings.md").read_text()
     assert "win rate" in darklings.lower()
+
+
+def test_leech_behavior_accept_rates(fixture_frames):
+    moves, deltas = fixture_frames
+    lb = leech_behavior(moves, deltas)
+    x_won_1 = lb.filter(pl.col("won") & (pl.col("amount") == 1))
+    assert x_won_1["accept_rate"].to_list() == [1.0]  # x accepted its amount-1 offer in G_A
+    x_won_4 = lb.filter(pl.col("won") & (pl.col("amount") == 4))
+    assert x_won_4["accept_rate"].to_list() == [0.0]  # and declined the 4
+
+
+def test_vp_progression_shape(fixture_frames):
+    moves, deltas = fixture_frames
+    vp = vp_progression(moves, deltas)
+    assert {"won", "round", "mean_vp"} <= set(vp.columns)
+
+
+def test_action_tempo_counts(fixture_frames):
+    moves, deltas = fixture_frames
+    at = action_tempo(moves, deltas)
+    cell = at.filter(pl.col("won") & (pl.col("round") == 1))
+    assert cell["actions_per_game"].to_list() == [2.0]  # x in G_A: build + pass in round 1
