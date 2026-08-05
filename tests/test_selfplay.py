@@ -7,6 +7,7 @@ anchor actually restrains the policy — at a scale that runs in seconds.
 
 from __future__ import annotations
 
+import math
 import random
 
 import numpy as np
@@ -115,3 +116,30 @@ def test_loss_components_are_all_reported() -> None:
     _, parts = regularized_loss(net, frozen, batch, lambda_kl=1.0)
     assert set(parts) == {"policy", "value", "kl", "total"}
     assert parts["kl"] >= -1e-6
+
+
+def test_losses_are_finite_with_padded_candidates() -> None:
+    """Regression: padding slots carry -inf logits and 0 soft targets, and
+    0 * -inf is NaN -- which silently poisoned every self-play batch until
+    the terms were masked explicitly."""
+    net, frozen = _net(), _net()
+    n, n_cand = 3, 6
+    mask = torch.ones((n, n_cand), dtype=torch.bool)
+    mask[:, 4:] = False  # two padded slots per row
+    visits = torch.zeros(n, n_cand)
+    visits[:, :4] = torch.rand(n, 4) + 0.1
+    batch = {
+        "hex_planes": torch.randn(n, 113, HEX_FEAT_DIM),
+        "globals": torch.randn(n, GLOBAL_DIM),
+        "faction": torch.randint(0, 14, (n,)),
+        "candidates": torch.randint(0, 7, (n, n_cand, MOVE_FIELDS)),
+        "cand_mask": mask,
+        "value": torch.rand(n, 4),
+        "visits": visits,
+    }
+    loss, parts = regularized_loss(net, frozen, batch, lambda_kl=1.0)
+    assert torch.isfinite(loss), parts
+    assert all(math.isfinite(v) for v in parts.values()), parts
+    loss.backward()
+    grads = [p.grad for p in net.parameters() if p.grad is not None]
+    assert grads and all(torch.isfinite(g).all() for g in grads)
