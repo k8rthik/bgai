@@ -132,3 +132,55 @@ distribution as a prior anyway — argmax was never the end goal.
 It imports torch; the arena and engine must stay usable without a
 deep-learning dependency.
 *Cost:* callers write `from bgai.agents.imitation import ImitationAgent`.
+
+---
+
+## Phase 6 — Search
+
+**D6.1 — The driver's control state became explicit and immutable.**
+`arena/driver.py` holds `SimState = (GameState, fresh_taken, prev_verb,
+decisions, income_marker)`; `advance` is a pure function of
+(SimState, choice).
+*Why:* MCTS clones and branches positions. The turn protocol's
+bookkeeping previously lived in `run_game`'s local variables, which
+cannot be cloned — a search would have silently shared or lost it.
+*Rejected:* pausing the old driver with generators/threads. Cloning a
+paused coroutine is not something Python supports cleanly, and MCTS
+needs to re-enter the same position many times.
+*Cost:* one real refactor of a working, fuzz-validated component. Held
+to zero behavior change: all arena tests plus a fresh 200-game random
+fuzz (0 errors) pass on the rewrite.
+*Detail worth remembering:* the income-batch marker lives on `SimState`,
+not `GameState`. Stashing it on the shared game object (my first draft)
+would have leaked across MCTS branches — the classic bug where search
+results depend on visit order.
+
+**D6.2 — max^n value vectors, not a scalar.**
+Every node carries one value component per seat; selection maximizes the
+*acting* seat's component; backup adds the whole vector.
+*Rejected:* scalar minimax/negamax, which assumes zero-sum. In a
+4-player game "my gain is your loss" is false — two trailing players can
+both benefit from attacking the leader.
+*Cost:* 4x the value storage per edge (trivial), and no alpha-beta-style
+pruning is available in max^n.
+*Implementation note:* vectors are re-based to the setup's absolute seat
+order at every node. The net emits mover-relative values, so skipping the
+re-base would make a component mean a different player at each depth —
+pinned by `test_value_vectors_are_absolute_seat_order`.
+
+**D6.3 — No random rollouts; the value head evaluates leaves.**
+*Why:* a TM rollout is ~200 further decisions of noise, and the value
+head was trained on 1.2M real positions. Random rollouts would be both
+slower and worse.
+*Cost:* search quality is bounded by the value head's quality. If the net
+is weak, deeper search inherits that weakness rather than correcting it
+— which is exactly what the arena measurement has to check rather than
+assume.
+
+**D6.4 — Search agents get an optional `choose_sim` hook.**
+`run_game` calls `choose_sim(sim, ...)` when an agent exposes it, else
+the ordinary `choose(state, ...)`.
+*Why:* only search needs the driver's internals; making every agent take
+a `SimState` would leak the driver into the LLM and heuristic agents.
+*Cost:* two entry points to keep in sync. The protocol stays one method
+for everyone who is not a searcher.
