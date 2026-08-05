@@ -21,6 +21,7 @@ from bgai.engine.tm.round_flow import advance_turn, begin_actions, end_of_round,
 from bgai.engine.tm.scoring import final_scoring
 from bgai.engine.tm.setup import GameSetup
 from bgai.engine.tm.state import GameState, PendingDecision, Phase, active_faction
+from bgai.mcp.render import render_command
 
 MAIN_TRACK_VERBS = frozenset(
     {"build", "upgrade", "action", "advance", "pass", "send", "dig", "transform", "bridge",
@@ -215,7 +216,7 @@ def must_continue(state: GameState, faction: str) -> bool:
     )
 
 
-def _end_action(state: GameState, faction: str) -> GameState:
+def end_action(state: GameState, faction: str) -> GameState:
     """Close `faction`'s full action: forfeit any leftover (unspendable or
     voluntarily unspent) spade balance -- Perl's turn-end ``lose_spade`` --
     and, if the faction just passed, its unused extra actions (an ACTC
@@ -287,7 +288,7 @@ def _continuation_verbs(state: GameState, faction: str) -> frozenset[str]:
     return frozenset(allowed)
 
 
-def _oldest_blocking_pending(state: GameState) -> PendingDecision | None:
+def oldest_blocking_pending(state: GameState) -> PendingDecision | None:
     for p in state.pending:
         if p.kind in BLOCKING_PENDING_KINDS:
             return p
@@ -306,6 +307,22 @@ def _pop_pending(state: GameState, pending: PendingDecision) -> GameState:
     return replace(state, pending=state.pending[:idx] + state.pending[idx + 1 :])
 
 
+def pending_answer_moves(
+    state: GameState, faction: str, pending: PendingDecision
+) -> tuple[ParsedCommand, ...]:
+    """The canonical answer set for one blocking pending: legal moves
+    restricted to the pending kind's answer verbs (leech answers further
+    restricted to the offer's own source).
+    """
+    answer_verbs = _PENDING_ANSWER_VERBS[pending.kind]
+    moves = canonical_order(
+        tuple(m for m in legal_moves_for(state, faction) if m.verb in answer_verbs)
+    )
+    if pending.kind == "leech":
+        moves = tuple(m for m in moves if m.target == pending.source)
+    return moves
+
+
 def _answer_step(
     state: GameState,
     agent: Agent,
@@ -317,18 +334,13 @@ def _answer_step(
     no turn-order weight). An unanswerable pending (e.g. gain_favor with
     every eligible tile gone) is popped, mirroring Perl's skip.
     """
-    answer_verbs = _PENDING_ANSWER_VERBS[pending.kind]
-    moves = canonical_order(
-        tuple(m for m in legal_moves_for(state, faction) if m.verb in answer_verbs)
-    )
-    if pending.kind == "leech":
-        moves = tuple(m for m in moves if m.target == pending.source)
+    moves = pending_answer_moves(state, faction, pending)
     if not moves:
         events.append(f"-- {faction}: pending {pending.kind} had no legal answer, skipped")
         return _pop_pending(state, pending)
     move = agent.choose(state, faction, moves)
     _check_offered(move, moves, agent, faction)
-    events.append(f"{faction}: {move.raw or move.verb}")
+    events.append(f"{faction}: {render_command(move)}")
     return apply(state, faction, move)
 
 
@@ -339,7 +351,7 @@ def _spade_step(state: GameState, agent: Agent, faction: str, events: list[str])
     moves = offered_moves(state, faction, turn_open=False)
     move = agent.choose(state, faction, moves)
     _check_offered(move, moves, agent, faction)
-    events.append(f"{faction}: {move.raw or move.verb}")
+    events.append(f"{faction}: {render_command(move)}")
     return apply(state, faction, move)
 
 
@@ -367,19 +379,19 @@ def _bot_full_action(
         move = agent.choose(state, faction, moves)
         _check_offered(move, moves, agent, faction)
         if move.verb == "done":
-            return _end_action(state, faction)
+            return end_action(state, faction)
         state = apply(state, faction, move)
         budget.spend()
-        events.append(f"{faction}: {move.raw or move.verb}")
+        events.append(f"{faction}: {render_command(move)}")
         if move.verb not in MAIN_TRACK_VERBS:
             continue  # aux (convert/burn) or an interleaved own-pending answer
         prev_main = move.verb
         if move.verb in ALWAYS_END_VERBS:
-            return _end_action(state, faction)
+            return end_action(state, faction)
         if move.verb in ("transform", "dig"):
             continue  # dig leaves spades; transform leaves an optional build
         if not must_continue(state, faction):
-            return _end_action(state, faction)
+            return end_action(state, faction)
 
 
 def play_until_decision(
@@ -408,7 +420,7 @@ def play_until_decision(
         if actor in external:
             return state
         agent = bots[actor]
-        pending = _oldest_blocking_pending(state)
+        pending = oldest_blocking_pending(state)
         if pending is not None and pending.faction == actor:
             state = _answer_step(state, agent, actor, pending, events)
             budget.spend()
