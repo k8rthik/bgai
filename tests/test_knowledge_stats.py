@@ -27,7 +27,7 @@ def _moves_row(game_id, row, faction, verb, **kw):
 @pytest.fixture()
 def fixture_frames():
     rows = []
-    for game, (vp_x, vp_y) in (("G_A", (50, 40)), ("G_B", (30, 60))):
+    for game in ("G_A", "G_B"):
         rows += [
             _moves_row(game, 1, "x", "build", loc="A1"),
             _moves_row(game, 2, "y", "build", loc="B1"),
