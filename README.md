@@ -151,16 +151,29 @@ against our own baselines flatters the agent; final scores do not:
 |---|---|---|
 | Div 1-3 humans (3,553 games) | **136.3** | 545.2 |
 | tmai `ai_lode`, external heuristic (25 games) | **98.9** | 395.5 |
-| our imitation net | **~65** | ~256 |
-| our greedy heuristic | ~65 | — |
+| our imitation net (after the driver fix) | **~95–99** | — |
+| our imitation net (before the fix) | ~65 | ~256 |
 | random | ~54 | — |
 
-An independent hand-written AI from 2013 — no learning, no search, no
-corpus — scores 1.5x our net. Ours sits closer to random than to it, and
-barely halfway to human level. "Beats greedy" was self-grading: greedy
-and the net score the same in absolute terms, and the net wins only on
-relative placement inside an equally weak field. Reproduce with
+Reproduce the external baseline with
 `node tools/tmai_headless.js <tmai_dir> 25 7`.
+
+That jump from ~65 to ~96 was **not** a better model — it was a bug in
+the arena driver, found only because these absolute, externally
+referenced numbers existed. Convert and burn cost no action, so the turn
+protocol re-offered them after every one, asking the agent "convert
+again?" dozens of times per turn. Humans never see that prompt (they
+submit a whole turn as one ledger row: 0.12 converts on average), so the
+policy was being asked a question it was never trained on. The agent
+spent **49% of its decisions converting** versus 8.3% for humans, and
+built 29% of the structures and 2% of the towns humans build. Capping
+free actions at 1/turn fixed it. Full diagnosis: `docs/decisions.md` C3.
+
+The same bug had produced a confident, well-powered, and entirely
+wrong conclusion (D5.6: "the policy must sample, not argmax") — argmax
+had been re-picking the *same* convert forever. With the cap, argmax
+wins by t = −11.44. Relative-only metrics cannot see a defect that
+handicaps every agent equally.
 
 The per-verb accuracy split explains the shape of the weakness: the net
 is strong where options are few and conventions clear (`leech` 91%,
