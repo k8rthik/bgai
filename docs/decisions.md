@@ -205,3 +205,42 @@ less certain of the two seats, which penalizes the duplicated agent.
 Mean placement over all seats has no such artifact.
 *Cost:* TrueSkill stays in the report (it is the right tool for
 many-agent round-robins) but is not the number a gate asserts on.
+
+**D6.5 — Phase 6's search rung does NOT clear its gate. Reported, not buried.**
+Paired measurements against the imitation policy it is built on (both
+agents seated twice per game, so setup and seat effects cancel within
+each game; negative favours MCTS):
+
+    MCTS(64)  vs imitation:  -0.125 rank-sum, 40 games   (se ~0.28, t ~0.4)
+    MCTS(128) vs imitation:  +0.330 rank-sum, 100 games  (se 0.281, t 1.18)
+
+Neither is significant, and the *sign flips the wrong way* as
+simulations increase: at 128 sims MCTS scores fewer VP (62.1 vs 64.2)
+and places worse. Against greedy, MCTS wins comfortably (+0.850), so the
+search is not broken -- it simply fails to add anything over the policy
+that supplies its priors.
+
+The master plan's Phase 6 verify clause is "each rung beats the
+previous in mirrored matches". **It is not met.** Recording that plainly
+rather than reporting the +0.850-vs-greedy number and moving on.
+
+Leading hypotheses, in the order worth testing:
+1. *Search amplifies value error.* The value head is trained on states
+   from human games; MCTS deliberately explores states humans never
+   reach, and then trusts the value head there. More simulations means
+   more weight on the least reliable estimates -- which matches the sign
+   flip between 64 and 128.
+2. *The tree is far too shallow to matter.* One Terra Mystica turn is
+   several decisions (fresh action, continuations, `done`), and the
+   branching factor is ~24. 128 simulations is roughly one turn of
+   lookahead spread across four players -- not enough to see a
+   strategic consequence, but enough to inherit evaluation noise.
+3. *Argmax brittleness, again.* The move is chosen by argmax visit
+   count, and D5.6 established that argmax over this policy loses to
+   sampling. Cheapest to test, so tested first.
+
+*Cost of stopping here:* Phase 6 ships a correct, tested search that is
+not yet an improvement. That is a real result about this value function,
+not a bug to hide -- and it makes the case for the self-play phase
+(which trains the value head on states the search actually visits)
+rather than undermining it.
