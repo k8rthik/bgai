@@ -362,3 +362,21 @@ def legal_moves_all(state: GameState) -> Mapping[str, tuple[ParsedCommand, ...]]
     return {
         name: legal_moves_for(state, name) for name, fs in state.factions.items() if not fs.dropped
     }
+
+
+def pending_answer_moves(state: GameState, faction: str) -> tuple[ParsedCommand, ...]:
+    """Public wrapper over :func:`_own_pending_answers` for simulation
+    drivers (``bgai.arena.sim``): every answer ``faction`` can give right
+    now to its own outstanding blocking pending decisions, and nothing
+    else -- no baseline converts, no main-track moves. Empty when the
+    faction owes no blocking answer.
+    """
+    return _own_pending_answers(state, faction, set())
+
+
+def has_blocking_pending(state: GameState, faction: str) -> bool:
+    """Whether ``faction`` currently owes an answer to a blocking pending
+    decision (:data:`_BLOCKING_PENDING_KINDS`) -- the condition a
+    simulation driver must clear before letting that faction's turn end.
+    """
+    return any(p.faction == faction and p.kind in _BLOCKING_PENDING_KINDS for p in state.pending)

@@ -197,7 +197,7 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--games", type=int, default=4)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--opponents", choices=("random", "heuristic"), default="heuristic")
+    parser.add_argument("--opponents", choices=("random", "greedy"), default="greedy")
     parser.add_argument("--rungs", default="1,2,3",
                         help="comma-separated subset of 1,2,3,4 (4 = compendium in prompt)")
     parser.add_argument("--out", type=Path, required=True)

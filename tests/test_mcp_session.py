@@ -57,7 +57,7 @@ def test_submit_unparseable_returns_error():
 
 def test_full_llm_game_via_session(tmp_path):
     result_path = tmp_path / "result.json"
-    session = _session(opponents="heuristic", result_path=str(result_path))
+    session = _session(opponents="greedy", result_path=str(result_path))
     session.start()
     for _ in range(2000):
         if session.state.phase is Phase.FINISHED:
@@ -105,7 +105,7 @@ def test_config_env_roundtrip(tmp_path, monkeypatch):
             {
                 "seed": 42,
                 "llm_faction_index": 2,
-                "opponents": "heuristic",
+                "opponents": "greedy",
                 "rungs": [1, 2],
                 "result_path": str(tmp_path / "r.json"),
                 "max_commands": 5000,
@@ -124,4 +124,4 @@ def test_config_defaults_without_env(monkeypatch):
     monkeypatch.delenv("BGAI_TM_SESSION", raising=False)
     config = load_config()
     assert config.rungs == (1, 2, 3)
-    assert config.opponents == "heuristic"
+    assert config.opponents == "greedy"

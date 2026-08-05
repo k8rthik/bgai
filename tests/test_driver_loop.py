@@ -7,17 +7,14 @@ from bgai.arena.driver import GameResult, run_game
 from bgai.arena.setup_factory import fresh_setup
 
 
-def _agents(setup, base_seed):
-    return {
-        f: RandomAgent(seed=base_seed + i, name=f"random{i}")
-        for i, f in enumerate(setup.factions)
-    }
+def _agents(setup):
+    return {f: RandomAgent(name=f"random{i}") for i, f in enumerate(setup.factions)}
 
 
 @pytest.mark.parametrize("seed", [0, 1, 2])
 def test_full_random_game_finishes(seed):
     setup = fresh_setup(seed=seed)
-    result = run_game(setup, _agents(setup, seed))
+    result = run_game(setup, _agents(setup), seed=seed)
     assert isinstance(result, GameResult)
     assert set(result.vp) == set(setup.factions)
     assert all(v >= 0 for v in result.vp.values())
@@ -28,8 +25,8 @@ def test_full_random_game_finishes(seed):
 
 def test_full_random_game_deterministic():
     setup = fresh_setup(seed=9)
-    r1 = run_game(setup, _agents(setup, 9))
-    r2 = run_game(setup, _agents(setup, 9))
+    r1 = run_game(setup, _agents(setup), seed=9)
+    r2 = run_game(setup, _agents(setup), seed=9)
     assert r1 == r2
 
 
@@ -37,7 +34,7 @@ def test_full_random_game_deterministic():
 @pytest.mark.parametrize("seed", range(20))
 def test_random_game_sweep(seed):
     setup = fresh_setup(seed=100 + seed)
-    result = run_game(setup, _agents(setup, seed))
+    result = run_game(setup, _agents(setup), seed=seed)
     assert sum(result.vp.values()) > 4 * 20  # everyone started at 20 VP
 
 

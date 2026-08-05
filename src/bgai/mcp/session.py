@@ -9,22 +9,23 @@ tool calls never raise out of the session.
 from __future__ import annotations
 
 import json
+import random
 from pathlib import Path
 
 from bgai.agents.base import Agent
-from bgai.agents.heuristic import HeuristicAgent
+from bgai.agents.greedy import GreedyAgent
 from bgai.agents.random_agent import RandomAgent
 from bgai.arena.driver import (
     ALWAYS_END_VERBS,
     MAIN_TRACK_VERBS,
     DriverError,
+    answer_moves,
     end_action,
     must_continue,
     new_game,
     next_actor,
     offered_moves,
     oldest_blocking_pending,
-    pending_answer_moves,
     play_until_decision,
     spade_holder,
 )
@@ -48,6 +49,7 @@ def _same_move(a: ParsedCommand, b: ParsedCommand) -> bool:
 class Session:
     def __init__(self, config: SessionConfig) -> None:
         self.config = config
+        self.rng = random.Random(config.seed * 7919 + 17)
         self.state: GameState | None = None
         self.events: list[str] = []
         self.turn_open_verb: str | None = None
@@ -76,11 +78,10 @@ class Session:
         for i, faction in enumerate(self.state.setup.factions):
             if faction in self.external:
                 continue
-            seed = self.config.seed * 31 + i
             if self.config.opponents == "random":
-                bots[faction] = RandomAgent(seed=seed, name=f"random{i}")
+                bots[faction] = RandomAgent(name=f"random{i}")
             else:
-                bots[faction] = HeuristicAgent(seed=seed, name=f"heuristic{i}")
+                bots[faction] = GreedyAgent(name=f"greedy{i}")
         return bots
 
     def current_actor(self) -> str | None:
@@ -110,7 +111,8 @@ class Session:
         events: list[str] = []
         try:
             self.state = play_until_decision(
-                self.state, self._bots(), self.external, events, self.config.max_commands
+                self.state, self._bots(), self.external, events, self.config.max_commands,
+                rng=self.rng,
             )
         except DriverError as exc:  # pragma: no cover - defensive
             events.append(f"-- driver error: {exc}")
@@ -175,7 +177,7 @@ class Session:
             return ()
         pending = oldest_blocking_pending(self.state)
         if pending is not None and pending.faction == actor:
-            return pending_answer_moves(self.state, actor, pending)
+            return answer_moves(self.state, actor)
         if spade_holder(self.state) == actor:
             return offered_moves(self.state, actor, turn_open=False)
         return offered_moves(self.state, actor, turn_open=self.turn_open_verb is not None)

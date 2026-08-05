@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from bgai.agents.base import progress_moves
-from bgai.arena.driver import new_game, next_actor, offered_moves
+from bgai.arena.driver import new_game, next_actor, offered_moves, progress_moves
 from bgai.arena.setup_factory import fresh_setup
 from bgai.data.ledger_parser import ParsedCommand
 from bgai.engine.tm.apply import apply
@@ -35,7 +34,11 @@ class ScriptedAgent:
         self._script = list(script)
 
     def choose(
-        self, state: GameState, faction: str, moves: tuple[ParsedCommand, ...]
+        self,
+        state: GameState,
+        faction: str,
+        moves: tuple[ParsedCommand, ...],
+        rng=None,
     ) -> ParsedCommand:
         if not self._script:
             raise AssertionError(f"{self.name}: script exhausted, offered {moves}")
