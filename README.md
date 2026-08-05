@@ -102,3 +102,89 @@ it found two offered-but-rejected move classes the corpus containment
 sweep cannot see (Giants non-home transforms, ACTN fold-in builds
 skipping the dwelling-cost check), both fixed and pinned in
 `tests/test_legal_soundness.py`.
+
+## Imitation (Phase 5)
+
+`src/bgai/training/` turns the corpus into a faction-conditioned
+policy/value net; `src/bgai/agents/imitation.py` wraps a trained
+checkpoint in the arena's `Agent` protocol.
+
+```
+uv run python -m bgai.training.dataset_build --out data/datasets/imitation
+uv run python -m bgai.training.train --shards data/datasets/imitation \
+    --out data/checkpoints/imitation_v1 --epochs 10
+```
+
+Extraction replays every clean game through the engine and captures each
+`Kind.DECISION` command with the legal candidate set at that state:
+**1,195,522 decisions** from 3,373 games (1.08M train / 117k val), split
+by season (>= 67 is validation, so no future game informs an earlier
+prediction) and weighted by division (Div 1 1.0 / Div 2 0.8 / Div 3 0.6).
+
+The net scores *candidates* rather than a fixed action space: the state
+embedding dots with each legal move's embedding, softmaxed over exactly
+the moves the engine offers, so legality is structural and an untrained
+net is still a legal player. See `docs/imitation-design.md`.
+
+Training runs on MPS/CUDA/CPU (auto-detected), ~2 min/epoch on an M3 Pro.
+Inference costs ~1 ms/decision, so arena games stay well under the <1s
+target.
+
+**Held-out accuracy** (10 epochs, seasons >= 67, 116,605 decisions):
+**55.7% top-1 / 81.2% top-3**, against a random-among-candidates floor of
+6.3% / 18.8% (the mean decision offers ~24 legal moves). The value head
+predicts each seat's final-VP share to within 0.017 absolute. Accuracy is
+even across factions -- every one of the 14 lands between 53.3%
+(Chaos Magicians) and 58.0% (Cultists), so no faction is silently
+unplayable. Per-verb it varies far more: `leech` 91%, `build` 62%,
+`upgrade` 37%, `send` 12% -- the model is much better at *whether* to act
+than at *where* and *how much*.
+
+**Phase 5 gate** (`tests/test_arena_verify.py`, slow): imitation beats
+both baselines over 100 mirrored games -- mean placement **1.08** vs
+greedy 1.33 and random 2.41, zero errors.
+
+One finding worth flagging: the net must **sample**, not argmax. Taking
+the most-likely move loses to the greedy heuristic (-0.15 mean rank);
+sampling at the trained distribution beats it (+0.17), and the trend is
+monotonic in temperature. High imitation accuracy does not imply playing
+strength -- see `docs/decisions.md` D5.6.
+
+## Search, self-play, and the LLM track (Phases 6–7)
+
+`src/bgai/agents/mcts.py` is a max^n MCTS: every node carries a value
+vector with one component per seat (a 4-player game is not zero-sum, so
+a scalar would be a lie), selection maximises the *acting* seat's own
+component, and leaves are evaluated by the imitation net's value head
+rather than by random rollouts. It runs on `arena/driver.py`'s
+immutable `SimState`, which exists so positions can be cloned and
+branched — see `docs/decisions.md` D6.1.
+
+**Honest status: search does not yet beat the policy it is built from.**
+Against greedy, MCTS wins comfortably (+0.85 mean rank). Against the
+imitation policy that supplies its priors, it is level at 64
+simulations and slightly *behind* at 128 (paired, 100 games, t = 1.18
+the wrong way). The master plan's "each rung beats the previous" gate is
+therefore **not met for Phase 6**, and `docs/decisions.md` D6.5 records
+the three leading hypotheses rather than the one flattering number.
+
+`src/bgai/training/selfplay.py` implements human-regularized self-play
+(policy toward the search distribution, value toward realised final VP
+shares, KL toward the frozen imitation policy — the Cicero/piKL anchor
+that keeps a 4-player economic game from drifting into conventions no
+human would punish). It is correct and unit-tested but **not run at
+scale**: one 4-seat self-play game costs ~14 s here, so 10^5 games is
+cluster work, exactly the MSI Agate request the master plan anticipates.
+
+`src/bgai/llm/` + `src/bgai/agents/llm_agent.py` implement ladder rungs
+L0–L4 (bare → knowledge → engine tools → corpus retrieval → propose /
+critique / pick with a persistent game plan) behind a provider-agnostic
+interface. All of it is mock-tested with no API key and no spend; **none
+of it is measured**, because no LLM credentials exist in this
+environment. See `docs/llm-track.md` for what each rung adds and why
+retrieval deliberately avoids the imitation net's embedding.
+
+Phase 8 (playing real humans) is prepared but deliberately not executed:
+it requires contacting terra.snellman.net's operator and creating an
+account on someone else's service. `docs/phase8-human-play.md` holds the
+plan and a drafted request for the maintainer to review and send.

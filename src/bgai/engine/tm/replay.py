@@ -76,6 +76,13 @@ from typing import Any
 import polars as pl
 
 from bgai.data.ledger_parser import Kind, ParsedCommand
+from typing import Callable
+
+# Phase 5 imitation capture (plan 2026-08-04-imitation-phase5, Task 2):
+# called with the PRE-apply state, acting faction, and command for every
+# Kind.DECISION command replayed. Purely observational -- replay behavior
+# is bit-identical with or without a hook installed.
+DecisionHook = Callable[["GameState", str, ParsedCommand], None]
 from bgai.engine.tm.apply import apply
 from bgai.engine.tm.round_flow import (
     advance_turn,
@@ -292,7 +299,12 @@ def _apply_pending_drops(state: GameState, row: int, dropped_at_row: Mapping[str
 
 
 def _apply_row_commands(
-    state: GameState, faction: str, cmds: tuple[ParsedCommand, ...], *, oracle_cult: str | None = None
+    state: GameState,
+    faction: str,
+    cmds: tuple[ParsedCommand, ...],
+    *,
+    oracle_cult: str | None = None,
+    on_decision: DecisionHook | None = None,
 ) -> GameState:
     """Apply every command of one ledger row via ``apply()``, calling
     ``advance_turn`` once per genuinely independent full action within the
@@ -331,6 +343,8 @@ def _apply_row_commands(
     open_action = False
     any_main_track = False
     for cmd in cmds:
+        if on_decision is not None and cmd.kind is Kind.DECISION:
+            on_decision(state, faction, cmd)
         if cmd.verb not in _MAIN_TRACK_VERBS:
             state = apply(state, faction, cmd, oracle_cult=oracle_cult)
             continue
@@ -578,7 +592,12 @@ def _advance_after_row(
 
 
 def replay_game(
-    game_id: str, moves_df: pl.DataFrame, deltas_df: pl.DataFrame, *, stop_after: int = 5
+    game_id: str,
+    moves_df: pl.DataFrame,
+    deltas_df: pl.DataFrame,
+    *,
+    stop_after: int = 5,
+    on_decision: DecisionHook | None = None,
 ) -> ReplayResult:
     """Replay one game's ledger through ``apply()``, cross-checking every
     row against the ``deltas.parquet`` oracle (module docstring).
@@ -671,7 +690,9 @@ def replay_game(
                     state, apply_faction, cmds, cult_income_done, row, income_rows
                 )
                 apply_cmds = _dedupe_income_commands(cmds)
-                state = _apply_row_commands(state, apply_faction, apply_cmds, oracle_cult=oracle_cult)
+                state = _apply_row_commands(
+                    state, apply_faction, apply_cmds, oracle_cult=oracle_cult, on_decision=on_decision
+                )
                 state, other_income_done, cult_income_done = _advance_after_row(
                     state, apply_faction, cmds, other_income_done, cult_income_done
                 )
