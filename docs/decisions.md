@@ -244,3 +244,26 @@ not yet an improvement. That is a real result about this value function,
 not a bug to hide -- and it makes the case for the self-play phase
 (which trains the value head on states the search actually visits)
 rather than undermining it.
+
+**D6.6 — MCTS samples its move too (temperature on visit counts).**
+Applying D5.6's finding to search, paired vs imitation, 100 games each:
+
+    MCTS(64), argmax visits:  -0.125 (40 games, underpowered)
+    MCTS(128), argmax visits: +0.330 +/- 0.281  (t +1.18, wrong way)
+    MCTS(64), T=1.0 sampling: -0.180 +/- 0.284  (t -0.63, right way)
+
+Sampling puts the sign back in search's favour and recovers the VP lead
+(63.7 vs 62.2), consistent with the argmax brittleness D5.6 found in the
+raw policy. It is still not statistically significant, so the default is
+set to sampling on the strength of *two* consistent findings rather than
+on this one underpowered comparison.
+
+*Power:* detecting an effect this small (~0.18 rank-sum, sd ~2.8) at
+t=2 needs roughly 1,000 paired games -- ~2 hours of local compute. A
+confirmatory run at that scale is the right way to settle it; anything
+smaller re-measures noise.
+
+*What this does not license:* claiming search works. Until a
+significant result exists, the honest summary is "search is at best a
+small gain over its own prior, and only when its move choice is
+sampled."
