@@ -405,3 +405,40 @@ nobody here wrote. `lvandeve/tmai`'s heuristic AI is the one the master
 plan names. "Beats greedy" is currently measured against a yardstick I
 wrote myself, which is exactly the kind of self-grading this calibration
 exists to distrust.
+
+**C2 — External baseline: tmai's `ai_lode` scores ~1.5x what our
+imitation net scores.**
+
+`tools/tmai_headless.js` runs lvandeve/tmai (an independent Terra
+Mystica implementation with a hand-written 2013 heuristic AI) headless
+in Node -- its game logic is DOM-free, so browser shims plus its own
+synchronous `gameLoopBlocking` are enough. 25 four-player all-AI games,
+deterministic seed, standard map, no expansions:
+
+    Div 1-3 humans     136.3 VP/player   winner 153.4   table 545.2
+    tmai ai_lode        98.9 VP/player   winner 115.5   table 395.5
+    our imitation net  ~65   VP/player                  table ~256
+    our greedy         ~65   VP/player
+    random             ~54   VP/player
+
+*Why this matters more than the arena numbers.* Every prior strength
+claim was measured against a greedy heuristic written in this repo --
+self-grading. An independent AI that does no learning, no search, and
+never saw the corpus scores **1.5x our net** and gets roughly
+three-quarters of the way to human level. Our net gets barely halfway,
+and sits closer to random (54) than to ai_lode (99).
+
+*Consequence.* "Beats greedy" was never evidence of much: greedy and the
+net score identically in absolute terms (~65), and the net wins only on
+relative placement inside an equally weak field.
+
+This also gives D6.5-D6.8 a simpler explanation than the value-head
+hypothesis: search over a policy this far below competent has little to
+work with, and self-play distilling that search made things worse. **The
+base agent is the bottleneck.** Work on the policy (bigger model,
+better features, richer targets) before more work on search.
+
+*Comparability caveat:* tmai uses its own engine and its own random
+setups (ours are corpus-sampled), and its scoring differs in details.
+Treat 98.9 as "roughly 100", not a precise figure. The gap is far too
+large to be an artifact of that.
