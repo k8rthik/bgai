@@ -69,3 +69,29 @@ turn rotation, leech seat order) is oracle-validated only at 4 players; the
 reference-rules implementations for 2-player, 3-player, and 5-player play are
 correct per specification but have never been replay-validated against real
 tournament data.
+
+## LLM agent track
+
+The LLM plays through an MCP server whose tools expose **facts only**
+(state, legality, arithmetic, guaranteed projections) — all judgment stays
+with the model. Design: `docs/superpowers/specs/2026-08-04-llm-tm-mcp-harness-design.md`.
+
+- **Interactive:** the repo's `.mcp.json` registers the `tm` server; tell
+  Claude Code "pilot a game" and it plays a seat against bot opponents.
+  Configure via a JSON file pointed at by `$BGAI_TM_SESSION`
+  (`src/bgai/mcp/config.py` documents the schema).
+- **Tool rungs** (per-session config, for ablations): 1 = state/legal/play,
+  2 = factual analysis (`preview_move`, `score_projection`), 3 = sandbox
+  branches where the LLM plays *all* seats for lookahead, 4 = the
+  corpus-statistics compendium in the prompt
+  (`docs/knowledge/tm-compendium/`, see `GENERATE.md` there).
+- **Bot arena** (baselines):
+  `uv run python -m bgai.arena --agents random,random,random,heuristic --games 8 --seed 1`
+- **Headless LLM arena** (spawns `claude -p` per game, aggregates win rate,
+  VP, $/game):
+  `uv run python scripts/arena_llm.py --games 4 --seed 100 --rungs 1,2,3 --out runs/r123/`
+
+The live-game driver (`src/bgai/arena/driver.py`) adapts the replay
+harness's row-grouping contract to games with no ledger: it generates
+income/cleanup/final-scoring bookkeeping and routes real decisions
+(turns, leech offers, forced spade transforms) to agents.
