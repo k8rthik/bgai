@@ -22,25 +22,25 @@ from bgai.training.model import ModelConfig, PolicyValueNet
 from bgai.training.vocab import ENCODING_VERSION, FACTION_INDEX
 
 
-DEFAULT_TEMPERATURE = 1.0
-"""Sample from the policy rather than taking its argmax.
+DEFAULT_TEMPERATURE = 0.0
+"""Take the policy's argmax.
 
-Measured, not assumed (80 mirrored games per setting vs the greedy
-baseline, seed 4242, checkpoint imitation_v1):
+This was 1.0 (sampling) from 2026-08-05 until the driver's free-action
+loop was fixed. The original measurement was real but its cause was
+misdiagnosed: the driver re-offered convert/burn after every one, and a
+deterministic argmax agent would re-pick the *same* convert forever,
+shredding its economy. Sampling escaped that loop by accident, so
+sampling looked better.
 
-    T=0.0  imitation 1.562 vs greedy 1.413   (-0.150)
-    T=0.3  imitation 1.531 vs greedy 1.381   (-0.150)
-    T=0.5  imitation 1.419 vs greedy 1.488   (+0.069)
-    T=0.7  imitation 1.394 vs greedy 1.525   (+0.131)
-    T=1.0  imitation 1.363 vs greedy 1.531   (+0.169)
+With FREE_ACTIONS_PER_TURN capped (see arena/driver.py), argmax wins
+overwhelmingly -- paired over 160 games:
 
-Greedy *beats* the argmax policy and loses to the sampled one, and the
-trend is monotonic in temperature. A behavior-cloned policy's argmax is
-brittle: it commits to the single most-imitated move in states the
-expert corpus never contains, and repeats that commitment every time the
-same state recurs. Sampling at the trained distribution keeps the
-diversity the human data actually had. T=1.0 is the honest default --
-it is the policy as trained, with no sharpening.
+    argmax vs sample: -1.938 +/- 0.169 mean rank (t = -11.44)
+    VP: 98.7 vs 81.2
+
+Lesson recorded in docs/decisions.md D5.6: a strong measurement can have
+the wrong explanation, and the fix belonged in the environment, not the
+agent.
 """
 
 
