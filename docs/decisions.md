@@ -294,3 +294,60 @@ value head.
 significant result exists, the honest summary is "search is at best a
 small gain over its own prior, and only when its move choice is
 sampled."
+
+**D6.8 — Self-play RAN (2,400 games, 789k records) and made the agent
+WORSE. The diagnosis is that self-play cannot bootstrap from a search
+with no edge.**
+
+Configuration: 6 iterations x 400 games, 16 simulations, lambda_kl 1.0,
+lr 5e-5, 9 parallel workers, ~2,600 games/hour. Training signals looked
+healthy throughout -- value loss improved monotonically (0.0013 ->
+0.0010), policy loss oscillated without diverging, KL stayed bounded
+(0.055 -> 0.13 -> 0.11). Nothing in the loss curves predicted the
+outcome, which is exactly why arena measurement is the gate.
+
+Measured, paired, vs the imitation net it started from:
+
+    self-play policy vs imitation:   +0.554 +/- 0.163  (t +3.40)  SIGNIFICANTLY WORSE
+    self-play MCTS vs its own policy: -0.104 +/- 0.171  (t -0.61)  still zero
+    VP: 61.1 vs 64.7
+
+Drift curve (each iteration checkpoint vs imitation, 120 games each):
+
+    iter 1: -0.075 +/- 0.250   (KL 0.055)  level
+    iter 3: +0.458 +/- 0.235   (KL 0.132)  worse
+    iter 6: +0.450 +/- 0.226   (KL 0.110)  worse, plateaued
+
+Degradation is *progressive and tracks KL drift* -- iteration 1 is
+harmless, damage appears as the policy leaves the human anchor, and both
+plateau together.
+
+*The diagnosis.* Self-play trains the policy toward the search's visit
+distribution. D6.7 established that this search is exactly as strong as
+the policy (-0.005 +/- 0.083 over 1,000 games). So the loop is
+distilling a teacher with **no edge over the student** -- every iteration
+is a lossy copy, and the KL anchor is the only thing keeping it from
+collapsing outright. That predicts precisely what was observed: damage
+proportional to distance from the anchor, plateauing when KL plateaus.
+
+Training the value head on 789k search-visited states also failed to
+make search pay (second row above). That was the leading hypothesis from
+D6.5 for *why* search adds nothing, and this is evidence against it at
+this scale.
+
+*What this changes.* The fix ordering is now settled, and it is not the
+one the master plan assumed:
+1. **Search must acquire an edge first** -- deeper search, a better
+   value target (e.g. bootstrapped n-step returns rather than final-VP
+   shares only), or a stronger evaluator. Until MCTS beats the policy,
+   self-play has nothing to teach with.
+2. **Only then** does self-play bootstrap, because only then is the
+   teacher stronger than the student.
+Raising lambda_kl would reduce the damage but cannot create an edge --
+at lambda -> infinity the policy simply stops changing.
+
+*What is kept:* the loop itself is correct, parallel, checkpointed, and
+cluster-portable (~2,600 games/hour on 9 local workers). The imitation
+checkpoint remains the strongest agent and is what `data/checkpoints/
+imitation/` still points at. The self-play run is preserved under
+`data/checkpoints/selfplay_v1/` as the negative result it is.
