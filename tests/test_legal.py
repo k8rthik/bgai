@@ -613,3 +613,36 @@ def test_giants_transform_moves_only_propose_home_color() -> None:
     moves = legal_moves_for(state, "giants")
     targets = {m.color for m in moves if m.verb == "transform"}
     assert targets == {"red"}
+
+
+def test_free_tf_build_moves_still_require_dwelling_cost() -> None:
+    """Regression (LLM-harness task 5): ``build_moves``'s FREE_TF branch
+    appended marker-priced builds without ``_can_afford_build`` -- ACTN's
+    marker makes the implicit *transform* free, but ``handle_build`` still
+    charges the dwelling's own cost (corpus: "nomads cannot afford 1 W"
+    EngineError on a generator-offered build).
+    """
+    from bgai.agents.base import progress_moves
+    from bgai.arena.driver import new_game, next_actor, offered_moves
+    from bgai.arena.setup_factory import fresh_setup
+    from bgai.engine.tm.round_flow import advance_turn
+
+    setup = fresh_setup(seed=0, factions=("nomads", "darklings", "engineers", "mermaids"))
+    state = new_game(setup)
+    while state.phase in (Phase.SETUP_DWELLINGS, Phase.SETUP_BONUS):
+        actor = next_actor(state)
+        state = apply(state, actor, progress_moves(offered_moves(state, actor, turn_open=False))[0])
+        state = advance_turn(state)
+    factions = dict(state.factions)
+    factions["nomads"] = replace(factions["nomads"], workers=0, coins=0)
+    state = replace(
+        state,
+        phase=Phase.ACTIONS,
+        factions=factions,
+        active_index=state.turn_order.index("nomads"),
+        pending=(PendingDecision(faction="nomads", kind="free_tf"),),
+    )
+
+    for move in legal_moves_for(state, "nomads"):
+        if move.verb == "build":
+            apply(state, "nomads", move)  # must not raise EngineError

@@ -136,8 +136,11 @@ def build_moves(state: GameState, faction: str, fs: FactionState) -> list[Parsed
         # transform when the target is directly (plain-board) adjacent to
         # an existing building -- actions_build.py's handle_build docstring,
         # corpus pattern "action ACTN. build F2" (task-13 report row 174).
+        # Only the transform is free: handle_build still charges the
+        # dwelling's own cost (LLM-harness task-5 regression).
         if free_tf and _directly_adjacent_plain(fs, hex_key):
-            moves.append(cmd("build", loc=hex_key))
+            if _can_afford_build(state, faction, fs, hex_key, d_track.cost):
+                moves.append(cmd("build", loc=hex_key))
             continue
         tf_cost = hooks_for(faction).spade_transform_cost(state, faction, hx.color, color)
         if tf_cost <= fs.spades_available and _can_afford_build(
