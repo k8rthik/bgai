@@ -217,6 +217,11 @@ def transform_moves(state: GameState, faction: str, fs: FactionState) -> list[Pa
         for target in COLOR_WHEEL:
             if target == hx.color:
                 continue
+            # actions_terraform.py rejects any requested color the faction's
+            # spade_transform_target hook redirects (Giants: home only), so
+            # only hook-stable targets are genuinely legal.
+            if hooks_for(faction).spade_transform_target(state, faction, hex_key, target) != target:
+                continue
             cost = hooks_for(faction).spade_transform_cost(state, faction, hx.color, target)
             if 0 < cost <= fs.spades_available:
                 moves.append(cmd("transform", loc=hex_key, color=target))

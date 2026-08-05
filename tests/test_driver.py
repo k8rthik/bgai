@@ -2,10 +2,11 @@
 
 import dataclasses
 
+from driver_helpers import fast_forward_setup
+
 from bgai.arena.driver import advance_bookkeeping, live_factions, new_game, next_actor
 from bgai.arena.setup_factory import fresh_setup
 from bgai.engine.tm.state import PendingDecision, Phase
-from driver_helpers import fast_forward_setup
 
 
 def test_new_game_starts_setup_dwellings_snake_order():
