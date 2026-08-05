@@ -184,3 +184,24 @@ the ordinary `choose(state, ...)`.
 a `SimState` would leak the driver into the LLM and heuristic agents.
 *Cost:* two entry points to keep in sync. The protocol stays one method
 for everyone who is not a searcher.
+
+**D5.8 — Ten epochs, last checkpoint, no best-checkpoint selection.**
+Val top-1 by epoch: 52.4, 53.8, 54.5, 55.0, 54.9, 55.2, 55.5, 55.4,
+55.8, 55.7. The curve is flat after ~epoch 6.
+*Decision:* ship the final epoch's checkpoint. It is 0.0005 below the
+best epoch — inside run-to-run noise, and not worth the complexity of
+early stopping at this stage.
+*Cost:* a future longer run (or a bigger model) should add best-on-val
+checkpointing; as written, a run that overfits late would ship the
+overfit weights. Flagged rather than fixed because nothing here overfits
+yet — train and val loss are still moving together.
+
+**D5.9 — Report mean placement, not TrueSkill, as the headline.**
+In the Phase 5 gate imitation shows mean rank 1.08 (best) but a *lower*
+TrueSkill conservative estimate than greedy.
+*Why:* the gate seats imitation twice and each baseline once. TrueSkill
+rates them as separate teams and the conservative sigma-merge keeps the
+less certain of the two seats, which penalizes the duplicated agent.
+Mean placement over all seats has no such artifact.
+*Cost:* TrueSkill stays in the report (it is the right tool for
+many-agent round-robins) but is not the number a gate asserts on.

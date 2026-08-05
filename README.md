@@ -129,3 +129,23 @@ net is still a legal player. See `docs/imitation-design.md`.
 Training runs on MPS/CUDA/CPU (auto-detected), ~2 min/epoch on an M3 Pro.
 Inference costs ~1 ms/decision, so arena games stay well under the <1s
 target.
+
+**Held-out accuracy** (10 epochs, seasons >= 67, 116,605 decisions):
+**55.7% top-1 / 81.2% top-3**, against a random-among-candidates floor of
+6.3% / 18.8% (the mean decision offers ~24 legal moves). The value head
+predicts each seat's final-VP share to within 0.017 absolute. Accuracy is
+even across factions -- every one of the 14 lands between 53.3%
+(Chaos Magicians) and 58.0% (Cultists), so no faction is silently
+unplayable. Per-verb it varies far more: `leech` 91%, `build` 62%,
+`upgrade` 37%, `send` 12% -- the model is much better at *whether* to act
+than at *where* and *how much*.
+
+**Phase 5 gate** (`tests/test_arena_verify.py`, slow): imitation beats
+both baselines over 100 mirrored games -- mean placement **1.08** vs
+greedy 1.33 and random 2.41, zero errors.
+
+One finding worth flagging: the net must **sample**, not argmax. Taking
+the most-likely move loses to the greedy heuristic (-0.15 mean rank);
+sampling at the trained distribution beats it (+0.17), and the trend is
+monotonic in temperature. High imitation accuracy does not imply playing
+strength -- see `docs/decisions.md` D5.6.
