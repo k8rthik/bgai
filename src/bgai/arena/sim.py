@@ -66,7 +66,9 @@ _NOOP_VERBS = frozenset({"wait", "done"})
 _FREE_VERBS = frozenset({"convert", "burn"})
 
 
-def _canonical(moves: tuple[ParsedCommand, ...] | list[ParsedCommand]) -> tuple[ParsedCommand, ...]:
+def canonical_moves(
+    moves: tuple[ParsedCommand, ...] | list[ParsedCommand],
+) -> tuple[ParsedCommand, ...]:
     """Deterministic offer ordering. Engine legal-move generation iterates
     sets in places (hex candidate sets and friends), so raw ordering
     varies with interpreter hash randomization -- sorting by every command
@@ -92,6 +94,11 @@ def _canonical(moves: tuple[ParsedCommand, ...] | list[ParsedCommand]) -> tuple[
             ),
         )
     )
+
+
+# Backwards-compatible module-internal alias (promoted to public in
+# Phase 5: the training pipeline indexes candidates in this exact order).
+_canonical = canonical_moves
 
 
 @dataclass(frozen=True)
