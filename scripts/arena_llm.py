@@ -72,7 +72,9 @@ def build_mcp_config(session_path: Path) -> dict:
         "mcpServers": {
             "tm": {
                 "command": "uv",
-                "args": ["run", "python", "-m", "bgai.mcp.server"],
+                "args": [
+                    "run", "--directory", str(REPO_ROOT), "python", "-m", "bgai.mcp.server",
+                ],
                 "env": {"BGAI_TM_SESSION": str(session_path)},
             }
         }
@@ -87,6 +89,10 @@ def spawn_game(game_dir: Path, prompt: str, args: argparse.Namespace) -> dict | 
         args.claude_bin, "-p", prompt,
         "--mcp-config", str(game_dir / "mcp.json"),
         "--allowedTools", "mcp__tm__*",
+        # Measurement integrity: the pilot may use ONLY the tm tools -- the
+        # rung-1 smoke run showed a pilot probing the repo's engine source
+        # with Bash/Write when left in the repo cwd with default tools.
+        "--disallowedTools", "Bash,Read,Write,Edit,Glob,Grep,WebFetch,WebSearch,Task,Agent",
         "--permission-mode", "default",  # a plan-mode user default would block the MCP tools
         "--max-turns", "600",
         "--output-format", "json",
@@ -96,17 +102,31 @@ def spawn_game(game_dir: Path, prompt: str, args: argparse.Namespace) -> dict | 
     try:
         proc = subprocess.run(
             command, capture_output=True, text=True, timeout=GAME_TIMEOUT_S,
-            cwd=REPO_ROOT,
+            cwd=game_dir,  # not the repo: the pilot gets no incidental repo access
         )
     except (subprocess.TimeoutExpired, OSError) as exc:
         (game_dir / "transcript.txt").write_text(f"spawn failed: {exc}")
         return None
     (game_dir / "transcript.txt").write_text(proc.stderr or "")
     (game_dir / "claude.json").write_text(proc.stdout or "")
+    return _result_record(proc.stdout)
+
+
+def _result_record(stdout: str) -> dict | None:
+    """The claude CLI's summary record: --output-format json emits either a
+    single object or (verbose variants) a list whose 'type'=='result'
+    element carries total_cost_usd/duration_ms."""
     try:
-        return json.loads(proc.stdout)
+        payload = json.loads(stdout)
     except (json.JSONDecodeError, TypeError):
         return None
+    if isinstance(payload, dict):
+        return payload
+    if isinstance(payload, list):
+        for item in reversed(payload):
+            if isinstance(item, dict) and item.get("type") == "result":
+                return item
+    return None
 
 
 def _run_one_game(g: int, args: argparse.Namespace, out: Path, prompt: str) -> dict:
