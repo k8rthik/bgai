@@ -351,3 +351,57 @@ cluster-portable (~2,600 games/hour on 9 local workers). The imitation
 checkpoint remains the strongest agent and is what `data/checkpoints/
 imitation/` still points at. The self-play run is preserved under
 `data/checkpoints/selfplay_v1/` as the negative result it is.
+
+---
+
+## Calibration
+
+**C1 — Absolute strength: the agents score less than half what the
+humans they imitate score.**
+
+Corpus (3,553 Div 1-3 games, from `games_meta.parquet`):
+
+    human VP per player: mean 136.3  median 137  p10 116  p90 157
+    human winning score: mean 153.4
+    human table total:   mean 545.2
+
+Our agents, same map and setups:
+
+    imitation ~65 VP    greedy ~65 VP    random ~54 VP
+    agent table total ~256 VP
+
+The imitation net sits **below the 10th percentile of human scores**,
+and its table totals are under half of a human table's. Some of the gap
+is structural -- a weak table produces less total VP because nobody
+develops an economy worth leeching from, so weakness compounds -- but
+that is the diagnosis, not a defence: these agents do not build enough.
+
+Note that greedy scores about the same ~65. The imitation net reliably
+*beats* greedy head to head (1.08 vs 1.33 mean placement) without
+extracting materially more value from the board; it is winning on
+relative placement inside a weak field.
+
+**Why 55.7% move-matching coexists with this.** The per-verb accuracy
+breakdown is the useful artifact: the net is strong where options are
+few and conventions clear (`leech` 91%, `gain_favor` 68%, `build` 62%)
+and weak exactly where Terra Mystica is won (`send` 12%, `dig` 29%,
+`transform` 35%, `upgrade` 37%). It has learned the game's *grammar* --
+what a plausible move looks like -- without its *strategy*. Move-match
+accuracy flatters it because easy decisions are numerous.
+
+**Honest label:** advanced beginner. Legal, superficially sensible play;
+far below the tournament players in its training data.
+
+**How this reframes Phase 6.** D6.5-D6.8 treated "search adds nothing" as
+a puzzle about the value head. A simpler reading is now available: when
+the base policy is this far from competent, one turn of lookahead over
+its own weak evaluations has very little to work with. Both readings
+predict the same fix ordering (make the base agent stronger first), so
+the plan does not change -- but the value head is no longer the only
+suspect.
+
+**What would replace inference with measurement:** an external baseline
+nobody here wrote. `lvandeve/tmai`'s heuristic AI is the one the master
+plan names. "Beats greedy" is currently measured against a yardstick I
+wrote myself, which is exactly the kind of self-grading this calibration
+exists to distrust.
