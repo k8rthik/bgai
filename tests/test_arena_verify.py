@@ -40,7 +40,7 @@ def test_greedy_beats_random_over_200_games() -> None:
     assert conservative(series.ratings["greedy"]) > conservative(series.ratings["random"])
 
 
-CHECKPOINT = Path("data/checkpoints/imitation_v1/checkpoint.pt")
+CHECKPOINT = Path("data/checkpoints/imitation/checkpoint.pt")
 
 
 @pytest.mark.slow
