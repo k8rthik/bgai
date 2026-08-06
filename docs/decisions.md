@@ -597,3 +597,44 @@ both on one enlarged corpus.
 with no edge over its student. If blending gives search a real edge,
 that precondition may now be satisfied -- so D6.8 should be rerun
 against a blended-value searcher before its conclusion is quoted again.
+
+**C6 — Depth is not innocent either: H1 and H2 both have support, and they
+may compose.** Diagnostic B, the other half of C5: same value head (w=0),
+same seed and setups across rungs, so only search depth varies. Paired vs
+the imitation policy, negative favours MCTS:
+
+    sims=  64   n=100   +0.000 +/- 0.126   t=+0.00   MCTS  93.6 VP   policy 92.8
+    sims= 256   n= 48   +0.062 +/- 0.217   t=+0.29   MCTS  96.2 VP   policy 94.4
+    sims=1024   n= 16   -0.500 +/- 0.428   t=-1.17   MCTS 102.6 VP   policy 92.2
+
+The first two rungs say what C4 and C5's control said: at shallow depth,
+search on this value head adds nothing. The 1024 rung does not. Its rank
+diff favours search and its VP gap (+10.4) is more than double the best
+the blend sweep produced (+4.1 at w=0.5) -- with no blending at all.
+
+*This corrects a conclusion I had already drawn.* After the 64 and 256
+rungs I recorded that depth alone buys nothing and read the ladder as
+evidence against H2. The 1024 rung is the wrong shape for that. The
+honest statement is that **both hypotheses have support**: the evaluator
+is blind off-distribution (C5), *and* 64 simulations is too shallow to
+see a strategic consequence (D6.5's hypothesis 2, now with a data point
+behind it).
+
+*Power, honestly.* n=16 at se 0.428 is the weakest cell in either
+diagnostic -- a true zero produces -0.500 or better about 12% of the
+time, so this is a lead, not a finding. It cost 199 s/game (22x the
+64-sim cost); a confirmatory run at n=100 is ~5.5 hours.
+
+*The experiment this implies, and nobody has run:* the interaction.
+Every cell so far varies one factor -- C5 blends at fixed shallow depth,
+C6 deepens at fixed blind value. If both effects are real they should
+compose, so 1024 sims at w=0.5 is the cell worth measuring next, against
+both the policy and against each single-factor arm. If it lands, Phase 6
+has its edge and D6.8's self-play precondition (a teacher stronger than
+its student) may finally be satisfied.
+
+*Caution for whoever runs it:* prefer VP-and-rank together over rank
+alone. Both diagnostics show cells where MCTS accumulates materially
+more VP while placing no better (256 sims: +1.8 VP, worse rank), which
+is the same "develops well, converts it badly" signature the per-verb
+accuracy gaps show. Placement is the objective; VP is the earlier signal.
