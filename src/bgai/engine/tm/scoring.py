@@ -318,6 +318,36 @@ def _apply_score_resources(fs: FactionState, faction: str) -> FactionState:
     return replace(fs, power=power, coins=coins, priests=0, workers=0, vp=fs.vp + vp_gained)
 
 
+def projected_vp(state: GameState) -> dict[str, int]:
+    """Per-faction VP **if the game ended right now**: current
+    ``fs.vp`` plus cult standings, network standings, and leftover-
+    resource conversion, computed exactly as ``final_scoring`` would
+    apply them -- but non-destructively, from any state (not only
+    ``Phase.FINISHED``). Cult/network standings and resource holdings
+    are always well-defined mid-game, so this is a projection, not a
+    replay: no ``Phase`` check, and nothing is written back to ``state``.
+
+    This is the numeric core the module docstring's ``final_scoring``
+    already computes, factored out so a non-terminal position can be
+    scored the same way -- used by MCTS leaf evaluation (``agents/
+    leaf_eval.py``) and MCP's ``score_projection`` tool alike. On an
+    actual ``Phase.FINISHED`` state (before ``final_scoring`` has run),
+    ``projected_vp(state)[f] == final_scoring(state).factions[f].vp``
+    for every faction -- exercised in ``tests/test_scoring.py``.
+    """
+    cult_scores = compute_cult_scoring(state)
+    network_scores = compute_network_scoring(state)
+    projected: dict[str, int] = {}
+    for faction, fs in state.factions.items():
+        vp = fs.vp
+        vp += sum(cult_scores[cult].get(faction, 0) for cult in CULTS)
+        vp += network_scores.get(faction, 0)
+        converted = _apply_score_resources(fs, faction)
+        vp += converted.vp - fs.vp
+        projected[faction] = vp
+    return projected
+
+
 def handle_score_vp(state: GameState, faction: str, cmd: ParsedCommand) -> GameState:
     """``+Nvp for REASON``: validation-anchor apply. Recomputes the named
     cult's (or network's) ranking from live state and asserts it matches

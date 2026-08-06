@@ -28,6 +28,7 @@ from bgai.engine.tm.scoring import (
     handle_score_resources,
     handle_score_vp,
     network_size,
+    projected_vp,
 )
 from bgai.engine.tm.setup import load_setup
 from bgai.engine.tm.state import FactionState, GameState, Phase, with_faction
@@ -474,6 +475,62 @@ def test_final_scoring_applies_cult_network_and_resource_vp_and_stays_finished()
     assert result.factions["engineers"].vp == before_engineers_vp + 18
     assert result.factions["engineers"].coins == 2
     assert result.factions["engineers"].workers == 0
+
+
+# --------------------------------------------------------------------------
+# projected_vp (D6.9: the non-destructive projection MCTS leaf blending
+# uses -- must be exact against final_scoring on a terminal state)
+# --------------------------------------------------------------------------
+
+
+def test_projected_vp_matches_final_scoring_on_a_terminal_state() -> None:
+    """The real testable property: on a ``Phase.FINISHED`` state that has
+    not yet had ``final_scoring`` applied, ``projected_vp`` must predict
+    exactly the VP ``final_scoring`` goes on to apply -- same cult/network/
+    resource-conversion state, same state.factions[f].vp baseline. Reuses
+    the same fixture as the final_scoring test above so the two are
+    checked against the identical state."""
+    a, _r, b = _river_gap()
+    state = _with_cults(
+        _finished(),
+        {
+            "nomads": {"FIRE": 5, "WATER": 0, "EARTH": 0, "AIR": 0},
+            "engineers": {"FIRE": 0, "WATER": 0, "EARTH": 0, "AIR": 0},
+            "mermaids": {"FIRE": 0, "WATER": 0, "EARTH": 0, "AIR": 0},
+            "darklings": {"FIRE": 0, "WATER": 0, "EARTH": 0, "AIR": 0},
+        },
+    )
+    state = _place(_place(state, "engineers", a), "engineers", b)
+    for faction in state.factions:
+        state = _with_faction_fields(
+            state, faction, power=Power(bowl1=0, bowl2=0, bowl3=0), coins=0, workers=0, priests=0
+        )
+    state = _with_faction_fields(state, "engineers", shipping=1, coins=1, workers=1)
+
+    projected = projected_vp(state)
+    scored = final_scoring(state)
+
+    for faction in state.factions:
+        assert projected[faction] == scored.factions[faction].vp, faction
+
+
+def test_projected_vp_does_not_mutate_state() -> None:
+    state = _finished()
+    before = state.factions["nomads"].vp
+    projected_vp(state)
+    assert state.factions["nomads"].vp == before
+
+
+def test_projected_vp_works_mid_game_without_phase_finished() -> None:
+    """Unlike final_scoring, projected_vp has no Phase.FINISHED gate --
+    it must be callable at any decision point, since MCTS calls it at
+    leaves throughout the tree, not only at the end of the game."""
+    state = _fresh()
+    assert state.phase != Phase.FINISHED
+    projected = projected_vp(state)
+    assert set(projected) == set(state.factions)
+    for faction, fs in state.factions.items():
+        assert projected[faction] >= fs.vp  # never subtracts VP already held
 
 
 # --------------------------------------------------------------------------

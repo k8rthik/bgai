@@ -7,6 +7,7 @@ import random
 import numpy as np
 import torch
 
+from bgai.agents.leaf_eval import computed_value
 from bgai.agents.mcts import MCTSAgent
 from bgai.arena.driver import decision, new_game
 from bgai.arena.sim import run_game
@@ -87,3 +88,37 @@ def test_default_temperature_is_argmax_over_visits() -> None:
         agent.choose_sim(sim, faction, offer, random.Random(i)).loc for i in range(5)
     }
     assert len(picks) == 1, "argmax over visits must be deterministic"
+
+
+def test_default_value_blend_w_is_zero_and_leaves_expand_unchanged() -> None:
+    """D6.9 diagnostic A must be default-off: nothing changes until a
+    sweep result justifies otherwise."""
+    import inspect
+
+    signature = inspect.signature(MCTSAgent.__init__)
+    assert signature.parameters["value_blend_w"].default == 0.0
+
+    sim = new_game(load_setup("4pLeague_S10_D1L1_G1"))
+    faction, offer = decision(sim)
+    unblended = _agent(simulations=4)
+    blended_off = _agent(simulations=4, value_blend_w=0.0)
+    _, v1 = unblended._expand(sim)
+    _, v2 = blended_off._expand(sim)
+    np.testing.assert_array_equal(v1, v2)
+
+
+def test_value_blend_w_one_replaces_the_leaf_value_with_the_engine_projection() -> None:
+    sim = new_game(load_setup("4pLeague_S10_D1L1_G1"))
+    agent = _agent(simulations=4, value_blend_w=1.0)
+    _, value = agent._expand(sim)
+    np.testing.assert_allclose(value, computed_value(sim.game))
+
+
+def test_value_blend_w_half_moves_the_leaf_value_toward_the_engine_projection() -> None:
+    sim = new_game(load_setup("4pLeague_S10_D1L1_G1"))
+    unblended = _agent(simulations=4, value_blend_w=0.0)
+    half = _agent(simulations=4, value_blend_w=0.5)
+    _, learned = unblended._expand(sim)
+    _, mixed = half._expand(sim)
+    expected = 0.5 * learned + 0.5 * computed_value(sim.game)
+    np.testing.assert_allclose(mixed, expected, rtol=1e-5)
