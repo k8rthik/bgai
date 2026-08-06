@@ -79,3 +79,27 @@ def test_rate_orders_players_by_observed_results() -> None:
     ranked = table.sort("conservative", descending=True)["player"].to_list()
     assert ranked[0] == "winner"
     assert table.filter(pl.col("player") == "winner")["games"].item() == 10
+
+
+def test_population_order_interleaves_strength_so_any_prefix_is_balanced() -> None:
+    """A 24h crawl gets interrupted; every prefix must still span the skill range."""
+    from bgai.data.crawl import population_order
+
+    seats = pl.DataFrame(
+        [
+            {"game_id": f"g{n:03d}", "base_map": BASE_MAP, "player_count": 4,
+             "options": [], "player": f"p{n:03d}", "place": 0, "last_update": "x"}
+            for n in range(100)
+        ]
+    )
+    # player p000 weakest .. p099 strongest, so game strength tracks its index
+    ratings = pl.DataFrame(
+        {"player": [f"p{n:03d}" for n in range(100)],
+         "conservative": [float(n) for n in range(100)]}
+    )
+    order = population_order(seats, ratings)
+    assert len(order) == 100 and len(set(order)) == 100
+
+    # the first 10 picks should touch every decile, not just the weakest games
+    first_ten = {int(g.removeprefix("g")) // 10 for g in order[:10]}
+    assert len(first_ten) == 10, f"prefix clustered in deciles {sorted(first_ten)}"
