@@ -542,3 +542,58 @@ distils a teacher with no edge") rests on data from a crippled
 generator. The *reasoning* still holds -- C4 confirms search has no edge
 over the policy even now -- but the experiment itself should be rerun
 before the number is quoted.
+
+**C5 — The value head, not the search, is Phase 6's bottleneck.**
+C4 left two candidates from D6.5 standing: the value head cannot rank
+off-distribution states (H1), and/or 64 simulations is too shallow to
+see a strategic consequence (H2). They had never been separated.
+
+Diagnostic A separates them without new data. `scoring.projected_vp`
+computes a per-faction VP projection from any state -- banked VP plus
+cult standings, network standings, and resource conversion, under the
+real final-scoring rules -- and is exact against `final_scoring` on
+terminal states by construction, so it stays correct in exactly the
+off-distribution positions the learned head has never seen.
+`agents/leaf_eval.blend` mixes it into MCTS's leaf evaluation as
+`(1-w)*learned + w*computed`. Paired vs the imitation policy, 64 sims,
+100 games per cell, mirrored seats (the D6.5-D6.7 protocol; negative
+favours MCTS):
+
+    w=0.00   +0.010 +/- 0.130   t=+0.08    MCTS 93.4 VP   policy 93.0
+    w=0.25   -0.140 +/- 0.140   t=-1.00    MCTS 93.6 VP   policy 91.9
+    w=0.50   -0.290 +/- 0.133   t=-2.18    MCTS 95.2 VP   policy 91.1
+    w=1.00   -0.130 +/- 0.125   t=-1.04    MCTS 94.2 VP   policy 93.4
+
+The w=0 control reproduces C4/D6.7's tight zero, so the harness is
+measuring the same thing. Search does not change between cells -- only
+the leaf evaluator does -- so **H1 is supported: the search was faithful
+all along and was amplifying an evaluator that goes blind off the human
+distribution.**
+
+The curve is an inverted U peaking at w=0.5, and that shape is itself
+informative. Pure computed value (w=1.0) beats the learned head alone
+but loses to the blend, so the learned head does carry real information
+-- position quality the projection cannot see -- it simply cannot be
+trusted alone where it has no support. Neither evaluator is sufficient;
+the blend is.
+
+*Power, honestly.* Only w=0.5 crosses t=2, and that is one cell of four
+at n=100 (se ~0.13). The monotone rise from the replicating control and
+the coherent inverted-U are what carry the argument, not any single
+cell. Treat the peak's magnitude as unconfirmed until a run at D6.7's
+scale (~500-1,000 paired games at w=0.5 vs w=0, se ~0.06-0.08) settles
+it. Default remains `value_blend_w=0.0`; nothing ships on a t=-2.18.
+
+*What this implies for data (open, not yet measured).* The crutch works
+because it is computed rather than learned. The corresponding repair is
+a value head whose training states cover where search actually goes --
+which is what broad-population games provide, since final VP share is an
+objectively correct label regardless of who played the game, while the
+same games are contaminated supervision for the *policy* head. That
+argues for splitting their training distributions rather than retraining
+both on one enlarged corpus.
+
+*And it re-opens D6.8.* Self-play failed because it distilled a teacher
+with no edge over its student. If blending gives search a real edge,
+that precondition may now be satisfied -- so D6.8 should be rerun
+against a blended-value searcher before its conclusion is quoted again.
