@@ -8,7 +8,7 @@ requirement 3: faction strength is never conflated with agent strength).
 
 from __future__ import annotations
 
-from typing import Iterable, Mapping
+from collections.abc import Iterable, Mapping
 
 import trueskill
 

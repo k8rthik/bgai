@@ -142,6 +142,9 @@ _BLOCKING_PENDING_KINDS = frozenset(
     {"leech", "cult_choice", "gain_favor", "gain_town", "convert_w_to_p"}
 )
 
+BLOCKING_PENDING_KINDS = _BLOCKING_PENDING_KINDS
+"""Public alias for arena/MCP decision routing (Design decision 1)."""
+
 
 # --------------------------------------------------------------------------
 # Blocking pending-decision answers
