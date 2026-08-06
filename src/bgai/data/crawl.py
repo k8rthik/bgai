@@ -21,6 +21,7 @@ import orjson
 import polars as pl
 from tenacity import retry, stop_after_attempt, wait_exponential
 
+from bgai.data.player_ratings import playable
 from bgai.data.tmtour import USER_AGENT
 
 VIEW_GAME_URL = "https://terra.snellman.net/app/view-game/"
@@ -74,13 +75,57 @@ def _record_error(raw_dir: Path, game_id: str, message: str) -> None:
     print(f"  ERROR {game_id}: {message}", flush=True)
 
 
+def population_order(population: pl.DataFrame, ratings: pl.DataFrame) -> list[str]:
+    """Stratified interleave of the whole playable population, best-balanced first.
+
+    A 24-hour crawl will be interrupted, so the ordering has to make every
+    *prefix* useful rather than back-loading one end of the skill range. Games
+    are scored by their table's mean player rating, split into deciles, then
+    emitted round-robin across deciles -- so stopping at any point leaves a
+    sample that still spans weak-to-strong play, which is what the value head's
+    coverage deficit (C5) actually needs.
+    """
+    seats = playable(population)
+    table = (
+        seats.join(ratings.select("player", "conservative"), on="player", how="left")
+        .with_columns(pl.col("conservative").fill_null(0.0))
+        .group_by("game_id")
+        .agg(pl.col("conservative").mean().alias("strength"))
+    )
+    ranked = table.sort(["strength", "game_id"]).with_row_index("rank")
+    decile = (pl.col("rank") * 10 // max(ranked.height, 1)).clip(0, 9)
+    buckets: dict[int, list[str]] = {d: [] for d in range(10)}
+    for game_id, d in ranked.with_columns(decile.alias("d")).select("game_id", "d").iter_rows():
+        buckets[int(d)].append(game_id)
+
+    ordered: list[str] = []
+    for index in range(max((len(b) for b in buckets.values()), default=0)):
+        for d in range(10):
+            if index < len(buckets[d]):
+                ordered.append(buckets[d][index])
+    return ordered
+
+
+def crawl_ids(game_ids: list[str], raw_dir: Path, sleep_seconds: float) -> None:
+    """Fetch an explicit id list at a fixed rate, skipping anything cached."""
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    todo = [g for g in game_ids if not cache_path(raw_dir, g).exists()]
+    print(f"target: {len(game_ids)} games, already cached: {len(game_ids) - len(todo)}, "
+          f"to fetch: {len(todo)} (~{len(todo) * sleep_seconds / 3600:.1f} h at "
+          f"{sleep_seconds}s/req)", flush=True)
+    _crawl_loop(todo, raw_dir, sleep_seconds)
+
+
 def crawl(catalogue_dir: Path, raw_dir: Path) -> None:
     games = crawl_order(pl.read_parquet(catalogue_dir / "games.parquet"))
     raw_dir.mkdir(parents=True, exist_ok=True)
     todo = [g for g in games["game_id"].to_list() if not cache_path(raw_dir, g).exists()]
     print(f"catalogue: {games.height} games, already cached: {games.height - len(todo)}, "
           f"to fetch: {len(todo)}", flush=True)
+    _crawl_loop(todo, raw_dir, INTER_REQUEST_SLEEP_SECONDS)
 
+
+def _crawl_loop(todo: list[str], raw_dir: Path, sleep_seconds: float) -> None:
     fetched = 0
     started = time.monotonic()
     with httpx.Client(
@@ -91,7 +136,7 @@ def crawl(catalogue_dir: Path, raw_dir: Path) -> None:
                 content = _fetch_game(client, game_id)
             except httpx.HTTPError as exc:
                 _record_error(raw_dir, game_id, f"http failure after retries: {exc}")
-                time.sleep(INTER_REQUEST_SLEEP_SECONDS)
+                time.sleep(sleep_seconds)
                 continue
             problem = _validate(content, game_id)
             if problem is None:
@@ -105,7 +150,7 @@ def crawl(catalogue_dir: Path, raw_dir: Path) -> None:
                 remaining = (len(todo) - fetched) / rate if rate else float("inf")
                 print(f"  {fetched}/{len(todo)} ({rate:.2f} games/s, "
                       f"~{remaining / 60:.0f} min left)", flush=True)
-            time.sleep(INTER_REQUEST_SLEEP_SECONDS)
+            time.sleep(sleep_seconds)
     print(f"done: fetched {fetched}, cache now "
           f"{len(list(raw_dir.glob('*.json.gz')))} games", flush=True)
 
@@ -118,11 +163,27 @@ def status(catalogue_dir: Path, raw_dir: Path) -> None:
     print(f"cached {cached}/{total} games ({cached / total:.1%}), errors logged: {n_errors}")
 
 
+def crawl_population(catalogue_dir: Path, raw_dir: Path, sleep_seconds: float) -> None:
+    """Crawl the whole playable population, stratified by table strength."""
+    population = pl.read_parquet(catalogue_dir / "population.parquet")
+    ratings = pl.read_parquet(catalogue_dir / "player_ratings.parquet")
+    crawl_ids(population_order(population, ratings), raw_dir, sleep_seconds)
+
+
 if __name__ == "__main__":
-    args = [a for a in sys.argv[1:] if a != "--status"]
-    catalogue_dir = Path(args[0]) if args else DEFAULT_CATALOGUE_DIR
-    raw_dir = Path(args[1]) if len(args) > 1 else DEFAULT_RAW_GAMES_DIR
-    if "--status" in sys.argv:
+    flags = {a for a in sys.argv[1:] if a.startswith("--")}
+    positional = [a for a in sys.argv[1:] if not a.startswith("--")]
+    catalogue_dir = Path(positional[0]) if positional else DEFAULT_CATALOGUE_DIR
+    raw_dir = Path(positional[1]) if len(positional) > 1 else DEFAULT_RAW_GAMES_DIR
+
+    sleep_seconds = INTER_REQUEST_SLEEP_SECONDS
+    for flag in flags:
+        if flag.startswith("--sleep="):
+            sleep_seconds = float(flag.removeprefix("--sleep="))
+
+    if "--status" in flags:
         status(catalogue_dir, raw_dir)
+    elif "--population" in flags:
+        crawl_population(catalogue_dir, raw_dir, sleep_seconds)
     else:
         crawl(catalogue_dir, raw_dir)

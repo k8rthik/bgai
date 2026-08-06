@@ -39,13 +39,17 @@ def playable(population: pl.DataFrame, player_count: int = 4) -> pl.DataFrame:
     scope = population.filter(
         (pl.col("base_map") == BASE_MAP) & (pl.col("player_count") == player_count)
     )
+    # join-then-match rather than list.eval: an options-less game types as
+    # List(Null), which .str.contains rejects outright.
     flagged = (
         scope.group_by("game_id")
         .agg(pl.col("options").first().alias("o"))
         .with_columns(
             pl.col("o")
-            .list.eval(pl.element().str.contains("fire-and-ice"))
-            .list.any()
+            .cast(pl.List(pl.String))
+            .list.join(",")
+            .fill_null("")
+            .str.contains("fire-and-ice")
             .alias("fire_and_ice")
         )
     )
