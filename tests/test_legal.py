@@ -539,3 +539,66 @@ def test_legal_moves_all_matches_legal_moves_for_every_live_faction() -> None:
     for faction, moves in result.items():
         assert moves == legal_moves_for(state, faction)
     assert result[active_faction(state)] == legal_moves(state)
+
+def test_giants_transform_moves_only_propose_home_color() -> None:
+    """Regression (LLM-harness task 4): ``transform_moves`` must route each
+    candidate target color through ``hooks_for(faction).spade_transform_target``
+    -- Giants transform straight to home terrain (red) only (``map.pm``
+    511-513/612-614), so offering ``transform X to black`` produced an
+    apply()-time EngineError ("giants must transform to red, not black")
+    on a move the generator itself had offered.
+    """
+    from bgai.arena.live_driver import new_game, next_actor, offered_moves, progress_moves
+    from bgai.arena.setup_factory import fresh_setup
+    from bgai.engine.tm.round_flow import advance_turn
+
+    setup = fresh_setup(seed=0, factions=("giants", "nomads", "engineers", "mermaids"))
+    state = new_game(setup)
+    while state.phase in (Phase.SETUP_DWELLINGS, Phase.SETUP_BONUS):
+        actor = next_actor(state)
+        state = apply(state, actor, progress_moves(offered_moves(state, actor, turn_open=False))[0])
+        state = advance_turn(state)
+    factions = dict(state.factions)
+    factions["giants"] = replace(factions["giants"], spades_available=2)
+    state = replace(
+        state,
+        phase=Phase.ACTIONS,
+        factions=factions,
+        active_index=state.turn_order.index("giants"),
+    )
+
+    moves = legal_moves_for(state, "giants")
+    targets = {m.color for m in moves if m.verb == "transform"}
+    assert targets == {"red"}
+
+
+def test_free_tf_build_moves_still_require_dwelling_cost() -> None:
+    """Regression (LLM-harness task 5): ``build_moves``'s FREE_TF branch
+    appended marker-priced builds without ``_can_afford_build`` -- ACTN's
+    marker makes the implicit *transform* free, but ``handle_build`` still
+    charges the dwelling's own cost (corpus: "nomads cannot afford 1 W"
+    EngineError on a generator-offered build).
+    """
+    from bgai.arena.live_driver import new_game, next_actor, offered_moves, progress_moves
+    from bgai.arena.setup_factory import fresh_setup
+    from bgai.engine.tm.round_flow import advance_turn
+
+    setup = fresh_setup(seed=0, factions=("nomads", "darklings", "engineers", "mermaids"))
+    state = new_game(setup)
+    while state.phase in (Phase.SETUP_DWELLINGS, Phase.SETUP_BONUS):
+        actor = next_actor(state)
+        state = apply(state, actor, progress_moves(offered_moves(state, actor, turn_open=False))[0])
+        state = advance_turn(state)
+    factions = dict(state.factions)
+    factions["nomads"] = replace(factions["nomads"], workers=0, coins=0)
+    state = replace(
+        state,
+        phase=Phase.ACTIONS,
+        factions=factions,
+        active_index=state.turn_order.index("nomads"),
+        pending=(PendingDecision(faction="nomads", kind="free_tf"),),
+    )
+
+    for move in legal_moves_for(state, "nomads"):
+        if move.verb == "build":
+            apply(state, "nomads", move)  # must not raise EngineError

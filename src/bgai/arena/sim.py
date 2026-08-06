@@ -14,8 +14,8 @@ setups): ~48 ms per headless 4p game -- ~20x under the master plan's
 from __future__ import annotations
 
 import random
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Mapping
 
 from bgai.agents.base import Agent
 from bgai.arena.driver import (

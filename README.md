@@ -101,7 +101,9 @@ Random-play arena fuzzing doubles as a `legal_moves` soundness check —
 it found two offered-but-rejected move classes the corpus containment
 sweep cannot see (Giants non-home transforms, ACTN fold-in builds
 skipping the dwelling-cost check), both fixed and pinned in
-`tests/test_legal_soundness.py`.
+`tests/test_legal_soundness.py`. (The LLM track's live driver, built in
+parallel, independently hit the same two — also pinned in
+`tests/test_legal.py`.)
 
 ## Imitation (Phase 5)
 
@@ -181,11 +183,6 @@ is strong where options are few and conventions clear (`leech` 91%,
 (`send` 12%, `dig` 29%, `transform` 35%, `upgrade` 37%). It learned the
 game's grammar, not its strategy.
 
-One finding worth flagging: the net must **sample**, not argmax. Taking
-the most-likely move loses to the greedy heuristic (-0.15 mean rank);
-sampling at the trained distribution beats it (+0.17), and the trend is
-monotonic in temperature. High imitation accuracy does not imply playing
-strength -- see `docs/decisions.md` D5.6.
 
 ## Search, self-play, and the LLM track (Phases 6–7)
 
@@ -242,6 +239,32 @@ interface. All of it is mock-tested with no API key and no spend; **none
 of it is measured**, because no LLM credentials exist in this
 environment. See `docs/llm-track.md` for what each rung adds and why
 retrieval deliberately avoids the imitation net's embedding.
+
+## LLM agent track
+
+The LLM plays through an MCP server whose tools expose **facts only**
+(state, legality, arithmetic, guaranteed projections) — all judgment stays
+with the model. Design: `docs/superpowers/specs/2026-08-04-llm-tm-mcp-harness-design.md`.
+
+- **Interactive:** the repo's `.mcp.json` registers the `tm` server; tell
+  Claude Code "pilot a game" and it plays a seat against bot opponents
+  (random or greedy). Configure via a JSON file pointed at by
+  `$BGAI_TM_SESSION` (`src/bgai/mcp/config.py` documents the schema).
+- **Tool rungs** (per-session config, for ablations): 1 = state/legal/play,
+  2 = factual analysis (`preview_move`, `score_projection`), 3 = sandbox
+  branches where the LLM plays *all* seats for lookahead, 4 = the
+  corpus-statistics compendium in the prompt
+  (`docs/knowledge/tm-compendium/`, see `GENERATE.md` there).
+- **Headless LLM arena** (spawns `claude -p` per game, aggregates win rate,
+  VP, $/game):
+  `uv run python scripts/arena_llm.py --games 4 --seed 100 --rungs 1,2,3 --out runs/r123/`
+
+The live-game driver (`src/bgai/arena/live_driver.py`) is the *external-seat*
+counterpart of `arena/sim.py`'s self-driving loop: same engine contract,
+but it stops at any external seat's decision so the MCP session (or a
+test) can supply the move, and resumes bots + bookkeeping afterwards.
+`arena/setup_factory.py` provides seeded synthetic setups for MCP
+determinism where `arena/setups.py` corpus-samples real ones.
 
 Phase 8 (playing real humans) is prepared but deliberately not executed:
 it requires contacting terra.snellman.net's operator and creating an
