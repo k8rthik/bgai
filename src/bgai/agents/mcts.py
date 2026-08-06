@@ -29,6 +29,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from bgai.agents.leaf_eval import blend
 from bgai.arena.driver import SimState, advance, decision
 from bgai.data.ledger_parser import ParsedCommand
 from bgai.engine.tm.apply import EngineError
@@ -72,6 +73,13 @@ class MCTSAgent:
     D6.6, which turned out to share a root cause with D5.6: the driver's
     uncapped free-action loop, not the selection rule. Fixed in
     arena/driver.py; see docs/decisions.md D5.6/D6.6.
+
+    ``value_blend_w`` (D6.9, diagnostic A) blends each leaf's learned
+    value with ``leaf_eval.computed_value``, an engine-computed VP-share
+    projection robust off-distribution by construction:
+    ``(1-w)*learned + w*computed``. Default 0.0 reproduces the learned
+    value head exactly -- unchanged behaviour until a sweep result
+    justifies otherwise; see docs/decisions.md D6.9.
     """
 
     def __init__(
@@ -84,12 +92,14 @@ class MCTSAgent:
         device: str = "cpu",
         net: PolicyValueNet | None = None,
         max_depth: int = 24,
+        value_blend_w: float = 0.0,
     ) -> None:
         self.name = name
         self.simulations = simulations
         self.c_puct = c_puct
         self.temperature = temperature
         self.max_depth = max_depth
+        self.value_blend_w = value_blend_w
         self.device = torch.device(device)
         if net is not None:
             self.net = net
@@ -154,7 +164,7 @@ class MCTSAgent:
             priors=priors,
             seat_of=self._seat_map(sim.game, faction),
         )
-        return node, self._rebase(value, node.seat_of, faction, sim.game)
+        return node, self._leaf_value(value, node.seat_of, faction, sim.game)
 
     def _terminal_value(self, sim: SimState) -> np.ndarray:
         """Final VP shares, in absolute seat order of the setup."""
@@ -177,6 +187,21 @@ class MCTSAgent:
         for name, rel in seat_of.items():
             out[seats.index(name)] = value_rel[rel]
         return out
+
+    def _leaf_value(
+        self,
+        value_rel: np.ndarray,
+        seat_of: dict[str, int],
+        faction: str,
+        game: GameState,
+    ) -> np.ndarray:
+        """Rebase a mover-relative net value to absolute seat order, then
+        blend in the engine-computed projection per ``value_blend_w``
+        (D6.9; a no-op at the default 0.0)."""
+        abs_value = self._rebase(value_rel, seat_of, faction, game)
+        if self.value_blend_w <= 0:
+            return abs_value
+        return blend(abs_value, game, self.value_blend_w)
 
     def _select(self, node: _Node) -> int:
         """PUCT over the acting seat's own value component."""
@@ -219,7 +244,7 @@ class MCTSAgent:
             depth += 1
             if depth >= self.max_depth:
                 _, value = self._evaluate(node.sim.game, node.faction, node.offer)
-                self._backup(path, self._rebase(value, node.seat_of, node.faction, node.sim.game))
+                self._backup(path, self._leaf_value(value, node.seat_of, node.faction, node.sim.game))
                 return
 
     def _backup(self, path: list[tuple[_Node, int]], value: np.ndarray) -> None:
