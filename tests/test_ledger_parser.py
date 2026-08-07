@@ -183,3 +183,21 @@ def test_parse_commands_collects_unknowns() -> None:
 )
 def test_broad_vocabulary_parses(text: str) -> None:
     assert parse_command(text) is not None
+
+
+def test_gain_favor_marker_discard_parses() -> None:
+    """Chaos Magicians' SA grants two favors; a discarded second right emits
+    "-GAIN_FAVOR" -- the same marker class as -FREE_D (corpus:
+    4pLeague_S19_D8L16_G6 row 307, "upgrade I5 to SA. +FAV8. -GAIN_FAVOR")."""
+    parsed = parse_command("-GAIN_FAVOR")
+    assert parsed is not None
+    assert parsed.verb == "lose_marker" and parsed.reason == "GAIN_FAVOR"
+
+
+def test_score_vp_reason_may_contain_hyphens() -> None:
+    """Fire & Ice final-scoring labels are hyphenated; \\w+ silently excluded
+    them, so the whole row failed to parse."""
+    parsed = parse_command("+12vp for connected-sa-sh-distance")
+    assert parsed is not None
+    assert parsed.verb == "score_vp" and parsed.n1 == 12
+    assert parsed.reason == "CONNECTED-SA-SH-DISTANCE"
