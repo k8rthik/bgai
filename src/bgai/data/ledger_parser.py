@@ -208,7 +208,7 @@ _RULES: list[tuple[re.Pattern, _Maker]] = [
         ),
     ),
     _rule(
-        r"^\+(\d+)vp\s+for\s+(\w+)$",
+        r"^\+(\d+)vp\s+for\s+([\w-]+)$",
         lambda m, raw: ParsedCommand(
             "score_vp", Kind.SCORING, raw, n1=int(m[1]), reason=m[2].upper()
         ),
@@ -224,7 +224,7 @@ _RULES: list[tuple[re.Pattern, _Maker]] = [
         ),
     ),
     _rule(
-        r"^-(FREE_D|FREE_TP|FREE_TF|BRIDGE)$",
+        r"^-(FREE_D|FREE_TP|FREE_TF|BRIDGE|GAIN_FAVOR)$",
         lambda m, raw: ParsedCommand(
             "lose_marker", Kind.BOOKKEEPING, raw, reason=m[1].upper()
         ),
