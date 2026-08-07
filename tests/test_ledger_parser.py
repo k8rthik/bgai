@@ -201,3 +201,24 @@ def test_score_vp_reason_may_contain_hyphens() -> None:
     assert parsed is not None
     assert parsed.verb == "score_vp" and parsed.n1 == 12
     assert parsed.reason == "CONNECTED-SA-SH-DISTANCE"
+
+
+def test_dig_accepts_the_on_preposition_location_form() -> None:
+    """Early-era logs write "dig 1 on d8" for what modern logs write as
+    "DIG 1 I8" -- the same optional location, not a compound command."""
+    parsed = parse_command("dig 1 on d8")
+    assert parsed is not None
+    assert parsed.verb == "dig" and parsed.n1 == 1 and parsed.loc == "D8"
+
+
+def test_advance_accepts_a_trailing_plus_count() -> None:
+    """"advance shipping+1": a TM advance is always exactly one level, so the
+    count is decoration -- handle_advance treats n1 as informational."""
+    parsed = parse_command("advance shipping+1")
+    assert parsed is not None
+    assert parsed.verb == "advance" and parsed.reason == "ship"
+
+
+def test_bare_advance_still_carries_no_level() -> None:
+    parsed = parse_command("advance ship")
+    assert parsed is not None and parsed.n1 is None
