@@ -2,8 +2,10 @@
 
 Fetches ``/app/view-game/?game=<id>`` for every catalogued qualifying game.
 That path is robots-disallowed, so this crawler is deliberately conservative:
-one request at a time, >= 1 s apart, an identifying User-Agent with contact
-info, and a resumable on-disk cache so nothing is ever fetched twice.
+one request at a time, never less than 1 s between request starts (paced
+start-to-start, so latency cannot make it drift either way), an identifying
+User-Agent with contact info, and a resumable on-disk cache so nothing is
+ever fetched twice.
 
 Run: ``python -m bgai.data.crawl [catalogue_dir] [raw_games_dir]``
 Progress/status: ``python -m bgai.data.crawl --status``
@@ -25,7 +27,8 @@ from bgai.data.player_ratings import playable
 from bgai.data.tmtour import USER_AGENT
 
 VIEW_GAME_URL = "https://terra.snellman.net/app/view-game/"
-INTER_REQUEST_SLEEP_SECONDS = 1.2
+MIN_REQUEST_INTERVAL_SECONDS = 1.0
+"""Minimum seconds between request *starts* -- i.e. a hard ceiling of 1 req/s."""
 REQUEST_TIMEOUT_SECONDS = 60.0
 PROGRESS_EVERY = 25
 
@@ -122,21 +125,33 @@ def crawl(catalogue_dir: Path, raw_dir: Path) -> None:
     todo = [g for g in games["game_id"].to_list() if not cache_path(raw_dir, g).exists()]
     print(f"catalogue: {games.height} games, already cached: {games.height - len(todo)}, "
           f"to fetch: {len(todo)}", flush=True)
-    _crawl_loop(todo, raw_dir, INTER_REQUEST_SLEEP_SECONDS)
+    _crawl_loop(todo, raw_dir, MIN_REQUEST_INTERVAL_SECONDS)
 
 
-def _crawl_loop(todo: list[str], raw_dir: Path, sleep_seconds: float) -> None:
+def _crawl_loop(todo: list[str], raw_dir: Path, min_interval_seconds: float) -> None:
+    """Fetch sequentially, pacing on the interval between request *starts*.
+
+    Sleeping a fixed amount *after* each response makes the real rate depend on
+    server latency -- it drifts slower when the site is slow, and would silently
+    speed past the limit if the site got fast. Pacing start-to-start pins the
+    rate at exactly ``1 / min_interval_seconds`` requests per second whatever
+    the latency does, which is the promise this crawler actually makes.
+    """
     fetched = 0
     started = time.monotonic()
+    next_allowed = time.monotonic()
     with httpx.Client(
         headers={"User-Agent": USER_AGENT}, timeout=REQUEST_TIMEOUT_SECONDS
     ) as client:
         for game_id in todo:
+            delay = next_allowed - time.monotonic()
+            if delay > 0:
+                time.sleep(delay)
+            next_allowed = time.monotonic() + min_interval_seconds
             try:
                 content = _fetch_game(client, game_id)
             except httpx.HTTPError as exc:
                 _record_error(raw_dir, game_id, f"http failure after retries: {exc}")
-                time.sleep(sleep_seconds)
                 continue
             problem = _validate(content, game_id)
             if problem is None:
@@ -150,7 +165,6 @@ def _crawl_loop(todo: list[str], raw_dir: Path, sleep_seconds: float) -> None:
                 remaining = (len(todo) - fetched) / rate if rate else float("inf")
                 print(f"  {fetched}/{len(todo)} ({rate:.2f} games/s, "
                       f"~{remaining / 60:.0f} min left)", flush=True)
-            time.sleep(sleep_seconds)
     print(f"done: fetched {fetched}, cache now "
           f"{len(list(raw_dir.glob('*.json.gz')))} games", flush=True)
 
@@ -176,7 +190,7 @@ if __name__ == "__main__":
     catalogue_dir = Path(positional[0]) if positional else DEFAULT_CATALOGUE_DIR
     raw_dir = Path(positional[1]) if len(positional) > 1 else DEFAULT_RAW_GAMES_DIR
 
-    sleep_seconds = INTER_REQUEST_SLEEP_SECONDS
+    sleep_seconds = MIN_REQUEST_INTERVAL_SECONDS
     for flag in flags:
         if flag.startswith("--sleep="):
             sleep_seconds = float(flag.removeprefix("--sleep="))

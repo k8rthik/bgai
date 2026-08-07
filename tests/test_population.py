@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import polars as pl
 
+from pathlib import Path
+
 from bgai.data.player_ratings import BASE_MAP, playable, rate
 from bgai.data.population import _game_rows
 
@@ -103,3 +105,57 @@ def test_population_order_interleaves_strength_so_any_prefix_is_balanced() -> No
     # the first 10 picks should touch every decile, not just the weakest games
     first_ten = {int(g.removeprefix("g")) // 10 for g in order[:10]}
     assert len(first_ten) == 10, f"prefix clustered in deciles {sorted(first_ten)}"
+
+
+def test_crawl_loop_paces_on_request_starts_not_response_ends(monkeypatch) -> None:
+    """The rate promise is >= 1 s between request *starts*, whatever latency does.
+
+    A fixed post-response sleep would let a fast server push the real rate past
+    the ceiling; pacing start-to-start must not.
+    """
+    import time as time_module
+
+    from bgai.data import crawl as crawl_module
+
+    clock = {"now": 0.0}
+    starts: list[float] = []
+
+    monkeypatch.setattr(crawl_module.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(
+        crawl_module.time, "sleep", lambda s: clock.__setitem__("now", clock["now"] + s)
+    )
+
+    def fake_fetch(_client, game_id):
+        starts.append(clock["now"])
+        clock["now"] += 0.05  # a very fast server: 50 ms responses
+        return b'{"ledger": [1], "finished": 1}'
+
+    monkeypatch.setattr(crawl_module, "_fetch_game", fake_fetch)
+    monkeypatch.setattr(crawl_module.httpx, "Client", lambda **_: _NullClient())
+    monkeypatch.setattr(crawl_module.gzip, "open", lambda *a, **k: _NullFile())
+
+    crawl_module._crawl_loop([f"g{i}" for i in range(5)], Path("/tmp"), 1.0)
+
+    gaps = [b - a for a, b in zip(starts, starts[1:], strict=False)]
+    assert gaps, "no requests issued"
+    assert all(gap >= 1.0 - 1e-9 for gap in gaps), f"rate ceiling breached: {gaps}"
+    assert time_module is not None  # keep the import meaningful for linters
+
+
+class _NullClient:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        return False
+
+
+class _NullFile:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        return False
+
+    def write(self, _data):
+        return None
