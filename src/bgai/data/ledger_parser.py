@@ -127,7 +127,8 @@ _RULES: list[tuple[re.Pattern, _Maker]] = [
         lambda m, raw: ParsedCommand("burn", Kind.DECISION, raw, n1=int(m[1])),
     ),
     _rule(
-        r"^dig\s+(\d+)(?:\s+([a-z]\d+))?$",  # rare "DIG 1 I8" carries a location
+        # rare early-era location forms: "DIG 1 I8" and "dig 1 on d8"
+        r"^dig\s+(\d+)(?:\s+(?:on\s+)?([a-z]\d+))?$",
         lambda m, raw: ParsedCommand(
             "dig", Kind.DECISION, raw,
             n1=int(m[1]), loc=m[2].upper() if m[2] else None,
@@ -155,7 +156,7 @@ _RULES: list[tuple[re.Pattern, _Maker]] = [
     ),
     _rule(
         # Optional explicit target level in early logs: "advance ship to 1".
-        r"^advance\s+(ship|shipping|dig|digging)(?:\s+(?:to\s+)?(\d+))?$",
+        r"^advance\s+(ship|shipping|dig|digging)(?:\s*(?:\+|to\s+)?\s*(\d+))?$",
         lambda m, raw: ParsedCommand(
             "advance", Kind.DECISION, raw,
             reason={"shipping": "ship", "digging": "dig"}.get(m[1].lower(), m[1].lower()),
