@@ -21,17 +21,108 @@ from bgai.arena.series import run_series
 
 _AGENT_FACTORIES = {"random": RandomAgent, "greedy": GreedyAgent}
 
+# net-backed agents are imported lazily: torch must not be a hard
+# dependency of the arena (see bgai.agents.__init__)
+_NET_AGENTS = frozenset({"imitation", "mcts"})
+
+
+def _coerce(value: str) -> object:
+    for cast in (int, float):
+        try:
+            return cast(value)
+        except ValueError:
+            continue
+    return value
+
+
+def parse_spec(spec: str) -> tuple[str, str, dict[str, object]]:
+    """``name[@label][:k=v,...]`` -> ``(name, label, options)``.
+
+    The label lets one agent type enter a series more than once -- two
+    MCTS agents on different checkpoints need distinct rating keys or the
+    series treats them as the same competitor.
+    """
+    head, _, tail = spec.strip().partition(":")
+    name, _, label = head.partition("@")
+    name, label = name.strip(), (label.strip() or name.strip())
+    if name not in _AGENT_FACTORIES and name not in _NET_AGENTS:
+        raise ValueError(
+            f"unknown agent {name!r} "
+            f"(available: {sorted(set(_AGENT_FACTORIES) | _NET_AGENTS)})"
+        )
+    options: dict[str, object] = {}
+    for chunk in filter(None, (c.strip() for c in tail.split(","))):
+        key, sep, value = chunk.partition("=")
+        if not sep:
+            raise ValueError(f"malformed option {chunk!r} in {spec!r} -- expected k=v")
+        options[key.strip()] = _coerce(value.strip())
+    return name, label, options
+
+
+def _build_net_agent(name: str, label: str, options: dict[str, object]) -> Agent:
+    from pathlib import Path as _Path
+
+    checkpoint = options.get("ckpt")
+    if checkpoint is None:
+        raise ValueError(f"{name!r} needs ckpt=<path> (agent {label!r})")
+    device = str(options.get("device", "cpu"))
+    if name == "imitation":
+        from bgai.agents.imitation import ImitationAgent
+
+        return ImitationAgent(
+            checkpoint_path=_Path(str(checkpoint)),
+            name=label,
+            temperature=float(options.get("temperature", 0.0)),
+            device=device,
+        )
+    from bgai.agents.mcts import MCTSAgent
+
+    return MCTSAgent(
+        checkpoint_path=_Path(str(checkpoint)),
+        name=label,
+        simulations=int(options.get("sims", 64)),
+        c_puct=float(options.get("c_puct", 1.5)),
+        temperature=float(options.get("temperature", 0.0)),
+        max_depth=int(options.get("max_depth", 24)),
+        value_blend_w=float(options.get("blend", 0.0)),
+        device=device,
+    )
+
+
+def _split_specs(spec: str) -> list[str]:
+    """Split on commas that separate agents, not the ones inside options.
+
+    ``greedy,mcts:ckpt=a.pt,sims=64`` is two agents, not three: a comma
+    after a ``k=v`` chunk continues that agent's option list.
+    """
+    specs: list[str] = []
+    for chunk in filter(None, (c.strip() for c in spec.split(","))):
+        # a continuation is a bare k=v; anything carrying ':' or '@' names
+        # a new agent, even though it also contains '='
+        is_option = "=" in chunk and ":" not in chunk and "@" not in chunk
+        if specs and is_option:
+            specs[-1] = f"{specs[-1]},{chunk}"
+        else:
+            specs.append(chunk)
+    return specs
+
 
 def _build_agents(spec: str) -> dict[str, Agent]:
     agents: dict[str, Agent] = {}
-    for name in spec.split(","):
-        name = name.strip()
-        factory = _AGENT_FACTORIES.get(name)
-        if factory is None:
-            raise SystemExit(
-                f"unknown agent {name!r} (available: {sorted(_AGENT_FACTORIES)})"
-            )
-        agents[name] = factory(name=name)
+    for one in _split_specs(spec):
+        try:
+            name, label, options = parse_spec(one)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
+        if label in agents:
+            raise SystemExit(f"duplicate agent label {label!r} -- use name@label")
+        if name in _NET_AGENTS:
+            try:
+                agents[label] = _build_net_agent(name, label, options)
+            except ValueError as exc:
+                raise SystemExit(str(exc)) from exc
+        else:
+            agents[label] = _AGENT_FACTORIES[name](name=label)
     if not agents:
         raise SystemExit("no agents given")
     return agents
