@@ -52,6 +52,12 @@ class TrainConfig:
     val loss. 0 disables early stopping."""
     shards_per_block: int = 4
     """Shards mixed together per sampling block; bounds resident memory."""
+    resume: Path | None = None
+    """Checkpoint to continue from (model + optimizer + step)."""
+    allow_dirty_out: bool = False
+    """Permit writing into a non-empty output directory. Off by default:
+    metrics.jsonl appends and checkpoints overwrite, so reusing a directory
+    silently mixes runs and destroys the previous one's weights."""
 
 
 def pick_device(requested: str = "auto") -> torch.device:
@@ -131,6 +137,14 @@ def train(cfg: TrainConfig) -> dict[str, float]:
     torch.manual_seed(cfg.seed)
     device = pick_device(cfg.device)
     cfg.out.mkdir(parents=True, exist_ok=True)
+    existing = [p.name for p in cfg.out.iterdir()]
+    if existing and not cfg.allow_dirty_out:
+        raise ValueError(
+            f"{cfg.out} is not empty ({', '.join(sorted(existing)[:5])}) -- "
+            f"metrics.jsonl appends and checkpoints overwrite, so this would "
+            f"mix runs and destroy the previous weights. Pick a fresh --out "
+            f"or pass --allow-dirty-out."
+        )
     metrics_path = cfg.out / "metrics.jsonl"
 
     train_ds = ImitationDataset(cfg.shards, "train", max_cached_shards=cfg.shards_per_block + 2)
@@ -155,34 +169,53 @@ def train(cfg: TrainConfig) -> dict[str, float]:
 
     net = PolicyValueNet(ModelConfig()).to(device)
     opt = torch.optim.AdamW(net.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
+
+    step = 0
+    if cfg.resume is not None:
+        state = torch.load(cfg.resume, map_location=device, weights_only=False)
+        if state.get("encoding_version") != ENCODING_VERSION:
+            raise ValueError(
+                f"checkpoint has encoding v{state.get('encoding_version')}, code is "
+                f"v{ENCODING_VERSION} -- weights are not compatible"
+            )
+        net.load_state_dict(state["model"])
+        opt.load_state_dict(state["optimizer"])
+        step = int(state.get("step", 0))
+        print(f"resumed from {cfg.resume} at step {step:,}", flush=True)
+
     print(
         f"device={device} train={len(train_ds)} val={len(val_ds)} "
         f"params={sum(p.numel() for p in net.parameters()):,}",
         flush=True,
     )
 
-    step = 0
     last: dict[str, float] = {}
     best_loss = float("inf")
     stale = 0
 
     def checkpoint(val: dict[str, float], epoch: int, t0: float) -> dict[str, float]:
-        """Validate-log-save. Returns the metrics row just written."""
+        """Validate-log-save. Returns the metrics row just written.
+
+        Writes ``last.pt`` every time and ``best.pt`` only on improvement:
+        saving one file unconditionally means the best weights are
+        overwritten by whatever happens to validate last, so an early stop
+        would keep the *worst* of its final validations.
+        """
         row = {"epoch": epoch, "step": step, "secs": time.perf_counter() - t0, **val}
         print(f"[val] {json.dumps(row)}", flush=True)
         with metrics_path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(row) + "\n")
-        torch.save(
-            {
-                "model": net.state_dict(),
-                "optimizer": opt.state_dict(),
-                "config": {**asdict(cfg), "shards": str(cfg.shards), "out": str(cfg.out)},
-                "encoding_version": ENCODING_VERSION,
-                "step": step,
-                "val": val,
-            },
-            cfg.out / "checkpoint.pt",
-        )
+        blob = {
+            "model": net.state_dict(),
+            "optimizer": opt.state_dict(),
+            "config": {**asdict(cfg), "shards": str(cfg.shards), "out": str(cfg.out)},
+            "encoding_version": ENCODING_VERSION,
+            "step": step,
+            "val": val,
+        }
+        torch.save(blob, cfg.out / "last.pt")
+        if val["loss"] < best_loss:
+            torch.save(blob, cfg.out / "best.pt")
         return row
 
     stop = False
@@ -227,6 +260,12 @@ def train(cfg: TrainConfig) -> dict[str, float]:
             last = checkpoint(evaluate(net, val_loader, device, cfg.value_weight), epoch, t0)
         if stop:
             break
+
+    # A step-interval schedule leaves the trailing partial interval
+    # unvalidated -- without this the final steps are trained and then
+    # discarded, and `last.pt` lags the model that actually exists.
+    if cfg.val_every_steps and last.get("step") != step:
+        last = checkpoint(evaluate(net, val_loader, device, cfg.value_weight), epoch, t0)
     return last
 
 
@@ -244,6 +283,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--early-stop-patience", type=int, default=0)
     parser.add_argument("--shards-per-block", type=int, default=4)
     parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument("--resume", type=Path, default=None)
+    parser.add_argument("--allow-dirty-out", action="store_true")
     args = parser.parse_args(argv)
     train(
         TrainConfig(
@@ -259,6 +300,8 @@ def main(argv: list[str] | None = None) -> None:
             early_stop_patience=args.early_stop_patience,
             shards_per_block=args.shards_per_block,
             num_workers=args.num_workers,
+            resume=args.resume,
+            allow_dirty_out=args.allow_dirty_out,
         )
     )
 
