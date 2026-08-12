@@ -14,6 +14,12 @@ from bgai.engine.tm.tiles import BONUS_TILES, FAVOR_TILES, POWER_ACTIONS, TOWN_T
 
 ENCODING_VERSION = 1
 
+SHARD_FORMAT = 2
+"""Shard *field layout*, versioned separately from the encoders. v2 added
+per-record ``period``/``weight`` so population games -- which carry no
+league season or division -- can be split and weighted. The loader refuses
+older shards rather than guessing their weights."""
+
 HEXES: tuple[str, ...] = tuple(sorted(base_board().hexes))
 HEX_INDEX: dict[str, int] = {h: i for i, h in enumerate(HEXES)}
 
