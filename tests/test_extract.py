@@ -37,9 +37,13 @@ def test_capture_hook_transparent_and_fires(dfs) -> None:
 
 def test_extract_game_chosen_index_invariant(dfs) -> None:
     from bgai.training.extract import extract_game
+    from bgai.training.provenance import GameProvenance
 
     moves_df, deltas_df = dfs
-    records, skipped = extract_game("4pLeague_S10_D1L1_G1", moves_df, deltas_df)
+    prov = GameProvenance(season=10, division=1, period=24_180, weight=1.0)
+    records, skipped = extract_game(
+        "4pLeague_S10_D1L1_G1", moves_df, deltas_df, provenance=prov
+    )
     assert skipped == 0
     assert len(records) > 80
     for rec in records[:200]:
@@ -47,6 +51,7 @@ def test_extract_game_chosen_index_invariant(dfs) -> None:
         assert rec.candidates.shape[0] >= 2
         assert rec.candidates.shape[1] == 12
         assert rec.season == 10 and rec.division == 1
+        assert rec.period == 24_180 and rec.weight == 1.0
         assert rec.final_vps.shape == (4,)
     # mover-relative final VPs: seat 0 of the first record is the game's
     # first setup mover; sum of any record's final_vps is the game total

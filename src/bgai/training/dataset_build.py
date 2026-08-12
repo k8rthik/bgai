@@ -22,16 +22,18 @@ import polars as pl
 
 from bgai.arena.setups import clean_game_ids
 from bgai.training.extract import DecisionRecord, extract_game
-from bgai.training.vocab import ENCODING_VERSION
-
-VAL_SEASON_MIN = 67
-"""Seasons >= this go to validation: a time-based split, so no future
-game informs a prediction about an earlier one (master plan Phase 5)."""
-
-DIVISION_WEIGHTS = {1: 1.0, 2: 0.8, 3: 0.6}
-"""Table-quality weighting (master plan: Div 1 > Div 2 > Div 3)."""
+from bgai.training.provenance import (
+    DIVISION_WEIGHTS,
+    VAL_SEASON_MIN,
+    build_provenance,
+    val_period_min,
+)
+from bgai.training.vocab import ENCODING_VERSION, SHARD_FORMAT
 
 GAMES_PER_SHARD = 200
+
+POPULATION_PATH = "data/catalogue/population.parquet"
+RATINGS_PATH = "data/catalogue/player_ratings.parquet"
 
 
 @dataclass(frozen=True)
@@ -55,6 +57,8 @@ def _pack(records: list[DecisionRecord]) -> dict[str, np.ndarray]:
         "final_vps": np.stack([r.final_vps for r in records]),
         "season": np.array([r.season for r in records], dtype=np.int16),
         "division": np.array([r.division for r in records], dtype=np.int8),
+        "period": np.array([r.period for r in records], dtype=np.int32),
+        "weight": np.array([r.weight for r in records], dtype=np.float32),
         "mover_faction": np.array([r.mover_faction_id for r in records], dtype=np.int8),
     }
 
@@ -78,6 +82,15 @@ def build(
     if limit is not None:
         game_ids = game_ids[:limit]
 
+    provenance = build_provenance(
+        game_ids,
+        pl.read_parquet(POPULATION_PATH),
+        pl.read_parquet(RATINGS_PATH),
+    )
+    uncatalogued = [g for g in game_ids if g not in provenance]
+    game_ids = [g for g in game_ids if g in provenance]
+    boundary = val_period_min(provenance)
+
     out_dir.mkdir(parents=True, exist_ok=True)
     shards: list[dict[str, object]] = []
     unmatched_total = 0
@@ -87,19 +100,23 @@ def build(
     for shard_index, start in enumerate(range(0, len(game_ids), GAMES_PER_SHARD)):
         batch = game_ids[start : start + GAMES_PER_SHARD]
         records: list[DecisionRecord] = []
+        n_val = 0
         for game_id in batch:
             try:
-                game_records, unmatched = extract_game(game_id, moves_df, deltas_df, meta_df)
+                game_records, unmatched = extract_game(
+                    game_id, moves_df, deltas_df, meta_df, provenance=provenance[game_id]
+                )
             except Exception as exc:  # a game that cannot replay is data noise, not fatal
                 failed.append(f"{game_id}: {type(exc).__name__}: {exc}")
                 continue
             unmatched_total += unmatched
             records.extend(game_records)
+            if provenance[game_id].is_val(boundary):
+                n_val += len(game_records)
         if not records:
             continue
         path = out_dir / f"shard_{shard_index:04d}.npz"
         np.savez_compressed(path, **_pack(records))
-        n_val = int(sum(1 for r in records if r.season >= VAL_SEASON_MIN))
         train_total += len(records) - n_val
         val_total += n_val
         shards.append({"file": path.name, "records": len(records), "games": len(batch)})
@@ -107,7 +124,9 @@ def build(
 
     manifest = {
         "encoding_version": ENCODING_VERSION,
+        "shard_format": SHARD_FORMAT,
         "val_season_min": VAL_SEASON_MIN,
+        "val_period_min": boundary,
         "division_weights": {str(k): v for k, v in DIVISION_WEIGHTS.items()},
         "games_per_shard": GAMES_PER_SHARD,
         "shards": shards,
@@ -115,6 +134,7 @@ def build(
         "train_records": train_total,
         "val_records": val_total,
         "unmatched_commands": unmatched_total,
+        "uncatalogued_games": uncatalogued,
         "failed_games": failed,
     }
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")

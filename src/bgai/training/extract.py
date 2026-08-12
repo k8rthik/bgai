@@ -13,7 +13,6 @@ the corpus containment sweep predicts 0).
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass
 
 import numpy as np
@@ -27,9 +26,8 @@ from bgai.engine.tm.state import GameState
 from bgai.arena.sim import canonical_moves
 from bgai.training.encode_move import encode_move
 from bgai.training.encode_state import encode_state
+from bgai.training.provenance import GameProvenance
 from bgai.training.vocab import FACTION_INDEX
-
-_GAME_ID_RE = re.compile(r"4pLeague_S(\d+)_D(\d)L\d+_G\d+$")
 
 
 @dataclass(frozen=True)
@@ -39,8 +37,10 @@ class DecisionRecord:
     candidates: np.ndarray  # (n_cand, MOVE_FIELDS) int16, canonical order
     chosen: int
     final_vps: np.ndarray  # (4,) int16, mover-relative seat order
-    season: int
-    division: int
+    season: int  # league season, or provenance.NO_SEASON
+    division: int  # league division, or provenance.NO_SEASON
+    period: int  # months since year 0 -- defined for every game
+    weight: float  # table-quality sample weight
     mover_faction_id: int
 
 
@@ -54,17 +54,19 @@ def extract_game(
     moves_df: pl.DataFrame,
     deltas_df: pl.DataFrame,
     meta_df: pl.DataFrame | None = None,
+    *,
+    provenance: GameProvenance,
 ) -> tuple[list[DecisionRecord], int]:
     """Returns (records, n_unmatched). Raises if the replay itself fails
     (clean games are expected to replay -- a failure here is a bug, not
     data noise).
+
+    ``provenance`` is supplied by the caller rather than parsed out of
+    ``game_id``: population ids carry no season or division, and inferring
+    one would mean training on a fabricated weight.
     """
     if meta_df is None:
         meta_df = pl.read_parquet("data/datasets/games_meta.parquet")
-    match = _GAME_ID_RE.match(game_id)
-    if match is None:
-        raise ValueError(f"unparseable game id {game_id!r}")
-    season, division = int(match.group(1)), int(match.group(2))
     vps = _final_vps_by_faction(game_id, meta_df)
 
     records: list[DecisionRecord] = []
@@ -91,8 +93,10 @@ def extract_game(
                 candidates=cand_arr,
                 chosen=chosen,
                 final_vps=np.array([vps[f] for f in order], dtype=np.int16),
-                season=season,
-                division=division,
+                season=provenance.season,
+                division=provenance.division,
+                period=provenance.period,
+                weight=provenance.weight,
                 mover_faction_id=FACTION_INDEX[faction],
             )
         )
