@@ -134,14 +134,28 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--agents", default="random,greedy", help="comma-separated names")
     parser.add_argument("--report", type=Path, default=None, help="HTML report path")
+    parser.add_argument(
+        "--workers", type=int, default=1, help="processes to shard tables across"
+    )
     args = parser.parse_args(argv)
 
     agents = _build_agents(args.agents)
     names = list(agents)
     base_seats = tuple(names[i % len(names)] for i in range(4))
-    series = run_series(
-        agents=agents, base_seats=base_seats, n_tables=args.tables, seed=args.seed
-    )
+    if args.workers > 1:
+        from bgai.arena.parallel import run_series_parallel
+
+        series = run_series_parallel(
+            spec=args.agents,
+            base_seats=base_seats,
+            n_tables=args.tables,
+            seed=args.seed,
+            workers=args.workers,
+        )
+    else:
+        series = run_series(
+            agents=agents, base_seats=base_seats, n_tables=args.tables, seed=args.seed
+        )
     if args.report is not None:
         write_report(series, args.report)
     summary = ", ".join(
