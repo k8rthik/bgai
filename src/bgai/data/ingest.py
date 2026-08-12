@@ -217,6 +217,28 @@ def _rewrite_quarantine(parts_dir: Path, failures: list[tuple[str, str]]) -> Non
     path.write_bytes(payload)
 
 
+def _merge_by_game(frames: list[pl.DataFrame]) -> pl.DataFrame:
+    """Concatenate ``frames``, keeping every row of a game from the first
+    frame that contains it.
+
+    Deduping must happen at the *game* level, not the row level:
+    ``moves``/``deltas`` carry thousands of rows per game, so a row-level
+    ``unique(subset=["game_id"])`` keeps one arbitrary row per game and
+    silently discards the rest of the corpus.
+    """
+    seen: set[str] = set()
+    kept: list[pl.DataFrame] = []
+    for frame in frames:
+        fresh = frame.filter(~pl.col("game_id").is_in(seen))
+        if fresh.height == 0:
+            continue
+        seen = seen | set(fresh["game_id"].unique().to_list())
+        kept.append(fresh)
+    if not kept:
+        return frames[0].clear() if frames else pl.DataFrame()
+    return pl.concat(kept, how="vertical_relaxed")
+
+
 def compact(parts_dir: Path = DEFAULT_PARTS_DIR, out_dir: Path = DEFAULT_OUT_DIR) -> None:
     """Merge parts *and* the existing canonical files into fresh canonical
     files. Existing consumers read ``moves.parquet``; until this runs, they
@@ -234,9 +256,13 @@ def compact(parts_dir: Path = DEFAULT_PARTS_DIR, out_dir: Path = DEFAULT_OUT_DIR
         canonical = out_dir / f"{name}.parquet"
         if canonical.exists():
             frames.insert(0, pl.read_parquet(canonical))
-        merged = pl.concat(frames, how="vertical_relaxed").unique(subset=["game_id"], keep="first")
+        merged = _merge_by_game(frames)
         merged.write_parquet(canonical)
-        print(f"  {canonical}: {merged['game_id'].n_unique()} games", flush=True)
+        print(
+            f"  {canonical}: {merged['game_id'].n_unique()} games, "
+            f"{merged.height} rows",
+            flush=True,
+        )
 
 
 def main(argv: list[str] | None = None) -> None:
