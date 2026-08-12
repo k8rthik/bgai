@@ -36,19 +36,29 @@ def _init_worker(spec: str, raw_dir: str) -> None:
     _WORKER_STATE["raw_dir"] = Path(raw_dir)
 
 
-def _run_tables(args: tuple[tuple[str, ...], int, Sequence[int]]) -> list[GameResult]:
+def _run_tables(
+    args: tuple[tuple[str, ...], int, Sequence[int]]
+) -> list[tuple[int, tuple[GameResult, ...]]]:
+    """Returns each table's games tagged with its index.
+
+    The tag is what lets the caller restore table order before rating;
+    without it the merged list is shard-major and TrueSkill -- which is
+    order-dependent -- produces a different ranking than a sequential run.
+    """
     base_seats, seed, tables = args
     agents = _WORKER_STATE["agents"]
-    return list(
-        run_series(
+    out: list[tuple[int, tuple[GameResult, ...]]] = []
+    for table in tables:
+        series = run_series(
             agents=agents,  # type: ignore[arg-type]
             base_seats=base_seats,
             n_tables=0,
             seed=seed,
             raw_dir=_WORKER_STATE["raw_dir"],  # type: ignore[arg-type]
-            table_indices=list(tables),
-        ).results
-    )
+            table_indices=[table],
+        )
+        out.append((table, series.results))
+    return out
 
 
 def _chunk(n_tables: int, workers: int) -> list[list[int]]:
@@ -77,9 +87,13 @@ def run_series_parallel(
     ) as pool:
         collected = pool.map(_run_tables, tasks)
 
-    # re-rate in table order: TrueSkill is order-dependent, so shard
-    # ratings cannot be averaged or summed
-    by_table: list[GameResult] = [g for shard in collected for g in shard]
+    # Restore table order before rating. TrueSkill is order-dependent, so
+    # rating the shard-major concatenation would rank agents differently
+    # from a sequential run over the same games.
+    tagged = sorted(
+        (entry for shard in collected for entry in shard), key=lambda e: e[0]
+    )
+    by_table: list[GameResult] = [g for _table, games in tagged for g in games]
     from bgai.arena.run import _build_agents
 
     ratings = new_ratings(_build_agents(spec))
