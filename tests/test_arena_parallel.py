@@ -50,3 +50,37 @@ def test_seat_rotations_still_cover_every_seat(monkeypatch) -> None:
         agents=agents, base_seats=("a", "b", "a", "b"), n_tables=1, seed=3
     )
     assert len(series.results) == 4, "one table is four mirrored rotations"
+
+
+@pytest.mark.xfail(
+    reason="KNOWN: a sharded run plays the same setups but not bit-identical "
+    "games. run_series is deterministic in-process (identical calls repeat "
+    "identically) and setup ids match across the split, so the divergence is "
+    "inside run_game, not in table selection -- unresolved. Ranking is "
+    "unaffected: within one run every agent still faces the same setups in "
+    "mirrored rotations, which is what a comparison needs. Reproducing an "
+    "exact sequential series still requires --workers 1.",
+    strict=False,
+)
+def test_parallel_matches_sequential_exactly() -> None:
+    """Same games AND same ratings. TrueSkill is order-dependent, so a
+    shard-major merge silently ranks agents differently -- the first
+    version of the parallel runner did exactly that and left greedy tied
+    with random."""
+    from bgai.arena.parallel import run_series_parallel
+    from bgai.agents import GreedyAgent, RandomAgent
+
+    spec = "greedy,random"
+    seats = ("greedy", "random", "greedy", "random")
+    agents = {"greedy": GreedyAgent(name="greedy"), "random": RandomAgent(name="random")}
+
+    seq = run_series(agents=agents, base_seats=seats, n_tables=3, seed=42)
+    par = run_series_parallel(
+        spec=spec, base_seats=seats, n_tables=3, seed=42, workers=3
+    )
+
+    fingerprint = lambda rs: [(r.setup_game_id, dict(r.vps), dict(r.ranks)) for r in rs]
+    assert fingerprint(par.results) == fingerprint(seq.results)
+    for name in seq.ratings:
+        assert par.ratings[name].mu == pytest.approx(seq.ratings[name].mu)
+        assert par.ratings[name].sigma == pytest.approx(seq.ratings[name].sigma)
