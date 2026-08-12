@@ -26,6 +26,7 @@ from torch.utils.data import DataLoader
 
 from bgai.training.dataset import ImitationDataset, collate
 from bgai.training.model import ModelConfig, PolicyValueNet
+from bgai.training.sampler import ShardBlockSampler
 from bgai.training.vocab import ENCODING_VERSION
 
 
@@ -43,6 +44,14 @@ class TrainConfig:
     num_workers: int = 0
     max_steps: int | None = None
     log_every: int = 50
+    val_every_steps: int | None = None
+    """Validate mid-epoch. At 39k steps/epoch on the population corpus,
+    once-per-epoch validation is far too coarse to stop on."""
+    early_stop_patience: int = 0
+    """Stop after this many consecutive validations with no improvement in
+    val loss. 0 disables early stopping."""
+    shards_per_block: int = 4
+    """Shards mixed together per sampling block; bounds resident memory."""
 
 
 def pick_device(requested: str = "auto") -> torch.device:
@@ -61,7 +70,13 @@ def _to_device(batch: dict[str, torch.Tensor], device: torch.device) -> dict[str
 
 def _losses(
     net: PolicyValueNet, batch: dict[str, torch.Tensor], value_weight: float
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Returns ``(total, policy, value, logits)``.
+
+    The value term is reported separately because the population corpus was
+    gathered specifically to fix the value head's coverage (C5) -- a
+    combined loss cannot answer whether that worked.
+    """
     logits, value = net(
         batch["hex_planes"],
         batch["globals"],
@@ -73,7 +88,7 @@ def _losses(
     weights = batch["weight"]
     policy_loss = (per_sample * weights).sum() / weights.sum().clamp(min=1e-6)
     value_loss = torch.nn.functional.mse_loss(value, batch["value"])
-    return policy_loss + value_weight * value_loss, policy_loss, logits
+    return policy_loss + value_weight * value_loss, policy_loss, value_loss, logits
 
 
 def _topk_correct(logits: torch.Tensor, chosen: torch.Tensor, k: int) -> int:
@@ -87,19 +102,29 @@ def evaluate(
 ) -> dict[str, float]:
     net.eval()
     n = top1 = top3 = 0
-    loss_sum = 0.0
+    loss_sum = policy_sum = value_sum = 0.0
     for batch in loader:
         batch = _to_device(batch, device)
-        loss, _, logits = _losses(net, batch, value_weight)
+        loss, policy_loss, value_loss, logits = _losses(net, batch, value_weight)
         bs = batch["chosen"].shape[0]
         n += bs
         loss_sum += loss.item() * bs
+        policy_sum += policy_loss.item() * bs
+        value_sum += value_loss.item() * bs
         top1 += _topk_correct(logits, batch["chosen"], 1)
         top3 += _topk_correct(logits, batch["chosen"], 3)
     net.train()
     if n == 0:
-        return {"loss": float("nan"), "top1": float("nan"), "top3": float("nan"), "n": 0}
-    return {"loss": loss_sum / n, "top1": top1 / n, "top3": top3 / n, "n": n}
+        nan = float("nan")
+        return {"loss": nan, "policy": nan, "value": nan, "top1": nan, "top3": nan, "n": 0}
+    return {
+        "loss": loss_sum / n,
+        "policy": policy_sum / n,
+        "value": value_sum / n,
+        "top1": top1 / n,
+        "top3": top3 / n,
+        "n": n,
+    }
 
 
 def train(cfg: TrainConfig) -> dict[str, float]:
@@ -108,12 +133,17 @@ def train(cfg: TrainConfig) -> dict[str, float]:
     cfg.out.mkdir(parents=True, exist_ok=True)
     metrics_path = cfg.out / "metrics.jsonl"
 
-    train_ds = ImitationDataset(cfg.shards, "train")
-    val_ds = ImitationDataset(cfg.shards, "val")
+    train_ds = ImitationDataset(cfg.shards, "train", max_cached_shards=cfg.shards_per_block + 2)
+    val_ds = ImitationDataset(cfg.shards, "val", max_cached_shards=cfg.shards_per_block + 2)
+    # block sampling rather than a global shuffle: see sampler module --
+    # a global shuffle would miss the shard cache on nearly every access
+    train_sampler = ShardBlockSampler(
+        train_ds.index, shards_per_block=cfg.shards_per_block, seed=cfg.seed
+    )
     train_loader = DataLoader(
         train_ds,
         batch_size=cfg.batch_size,
-        shuffle=True,
+        sampler=train_sampler,
         collate_fn=collate,
         num_workers=cfg.num_workers,
         drop_last=True,
@@ -133,30 +163,15 @@ def train(cfg: TrainConfig) -> dict[str, float]:
 
     step = 0
     last: dict[str, float] = {}
-    for epoch in range(cfg.epochs):
-        t0 = time.perf_counter()
-        for batch in train_loader:
-            batch = _to_device(batch, device)
-            loss, policy_loss, logits = _losses(net, batch, cfg.value_weight)
-            opt.zero_grad(set_to_none=True)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(net.parameters(), 5.0)
-            opt.step()
-            step += 1
-            if step % cfg.log_every == 0:
-                acc = _topk_correct(logits, batch["chosen"], 1) / batch["chosen"].shape[0]
-                print(
-                    f"epoch {epoch} step {step} loss {loss.item():.4f} "
-                    f"policy {policy_loss.item():.4f} batch_top1 {acc:.3f}",
-                    flush=True,
-                )
-            if cfg.max_steps is not None and step >= cfg.max_steps:
-                break
-        val = evaluate(net, val_loader, device, cfg.value_weight)
-        last = {"epoch": epoch, "step": step, "secs": time.perf_counter() - t0, **val}
-        print(f"[val] {json.dumps(last)}", flush=True)
+    best_loss = float("inf")
+    stale = 0
+
+    def checkpoint(val: dict[str, float], epoch: int, t0: float) -> dict[str, float]:
+        """Validate-log-save. Returns the metrics row just written."""
+        row = {"epoch": epoch, "step": step, "secs": time.perf_counter() - t0, **val}
+        print(f"[val] {json.dumps(row)}", flush=True)
         with metrics_path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(last) + "\n")
+            fh.write(json.dumps(row) + "\n")
         torch.save(
             {
                 "model": net.state_dict(),
@@ -168,7 +183,49 @@ def train(cfg: TrainConfig) -> dict[str, float]:
             },
             cfg.out / "checkpoint.pt",
         )
-        if cfg.max_steps is not None and step >= cfg.max_steps:
+        return row
+
+    stop = False
+    for epoch in range(cfg.epochs):
+        train_sampler.set_epoch(epoch)
+        t0 = time.perf_counter()
+        for batch in train_loader:
+            batch = _to_device(batch, device)
+            loss, policy_loss, value_loss, logits = _losses(net, batch, cfg.value_weight)
+            opt.zero_grad(set_to_none=True)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(net.parameters(), 5.0)
+            opt.step()
+            step += 1
+            if step % cfg.log_every == 0:
+                acc = _topk_correct(logits, batch["chosen"], 1) / batch["chosen"].shape[0]
+                print(
+                    f"epoch {epoch} step {step} loss {loss.item():.4f} "
+                    f"policy {policy_loss.item():.4f} value {value_loss.item():.4f} "
+                    f"batch_top1 {acc:.3f}",
+                    flush=True,
+                )
+            if cfg.val_every_steps and step % cfg.val_every_steps == 0:
+                last = checkpoint(evaluate(net, val_loader, device, cfg.value_weight), epoch, t0)
+                t0 = time.perf_counter()
+                if last["loss"] < best_loss - 1e-4:
+                    best_loss, stale = last["loss"], 0
+                else:
+                    stale += 1
+                    if cfg.early_stop_patience and stale >= cfg.early_stop_patience:
+                        print(
+                            f"early stop: {stale} validations without improvement "
+                            f"(best val loss {best_loss:.4f})",
+                            flush=True,
+                        )
+                        stop = True
+                        break
+            if cfg.max_steps is not None and step >= cfg.max_steps:
+                stop = True
+                break
+        if not cfg.val_every_steps:
+            last = checkpoint(evaluate(net, val_loader, device, cfg.value_weight), epoch, t0)
+        if stop:
             break
     return last
 
@@ -183,6 +240,10 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--device", default="auto")
     parser.add_argument("--max-steps", type=int, default=None)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--val-every-steps", type=int, default=None)
+    parser.add_argument("--early-stop-patience", type=int, default=0)
+    parser.add_argument("--shards-per-block", type=int, default=4)
+    parser.add_argument("--num-workers", type=int, default=0)
     args = parser.parse_args(argv)
     train(
         TrainConfig(
@@ -194,6 +255,10 @@ def main(argv: list[str] | None = None) -> None:
             device=args.device,
             max_steps=args.max_steps,
             seed=args.seed,
+            val_every_steps=args.val_every_steps,
+            early_stop_patience=args.early_stop_patience,
+            shards_per_block=args.shards_per_block,
+            num_workers=args.num_workers,
         )
     )
 
