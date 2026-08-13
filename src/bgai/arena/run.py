@@ -15,6 +15,7 @@ from pathlib import Path
 
 from bgai.agents import GreedyAgent, RandomAgent
 from bgai.agents.base import Agent
+from bgai.arena.outcomes import agent_outcomes
 from bgai.arena.ratings import conservative
 from bgai.arena.report import write_report
 from bgai.arena.series import run_series
@@ -158,14 +159,20 @@ def main(argv: list[str] | None = None) -> None:
         )
     if args.report is not None:
         write_report(series, args.report)
-    summary = ", ".join(
-        f"{name}: μ−3σ={conservative(series.ratings[name]):.2f}"
-        for name in sorted(series.ratings, key=lambda n: -conservative(series.ratings[n]))
-    )
-    print(
-        f"{len(series.results)} games, {series.n_errors} errors | {summary}"
-        + (f" | report: {args.report}" if args.report else "")
-    )
+    outcomes = agent_outcomes(series.results)
+    print(f"{len(series.results)} games, {series.n_errors} errors")
+    print(f"{'agent':<12}{'win%':>8}{'mean place':>12}{'mean VP':>10}{'μ−3σ':>9}{'seats':>8}")
+    for name in sorted(series.ratings, key=lambda n: -conservative(series.ratings[n])):
+        o = outcomes.get(name)
+        if o is None:
+            continue
+        print(
+            f"{name:<12}{o['win_rate'] * 100:>7.1f}%{o['mean_place']:>12.2f}"
+            f"{o['mean_vp']:>10.1f}{conservative(series.ratings[name]):>9.2f}"
+            f"{o['seat_games']:>8}"
+        )
+    if args.report:
+        print(f"report: {args.report}")
 
 
 if __name__ == "__main__":
