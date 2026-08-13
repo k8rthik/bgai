@@ -36,7 +36,11 @@ from bgai.engine.tm.apply import EngineError
 from bgai.engine.tm.state import GameState
 from bgai.training.encode_move import encode_move
 from bgai.training.encode_state import encode_state
-from bgai.training.model import ModelConfig, PolicyValueNet
+from bgai.training.model import (
+    ModelConfig,
+    PolicyValueNet,
+    model_config_from_checkpoint,
+)
 from bgai.training.vocab import ENCODING_VERSION, FACTION_INDEX
 
 
@@ -112,7 +116,7 @@ class MCTSAgent:
                     f"checkpoint encoding v{ckpt.get('encoding_version')} != code "
                     f"v{ENCODING_VERSION}"
                 )
-            self.net = PolicyValueNet(ModelConfig())
+            self.net = PolicyValueNet(model_config_from_checkpoint(ckpt))
             self.net.load_state_dict(ckpt["model"])
         self.net.to(self.device).eval()
 

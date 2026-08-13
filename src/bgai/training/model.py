@@ -115,3 +115,16 @@ class PolicyValueNet(nn.Module):
         if self.cfg.value_simplex:
             value = value.softmax(dim=-1)
         return logits, value
+
+
+def model_config_from_checkpoint(checkpoint: dict) -> ModelConfig:
+    """Rebuild the architecture a checkpoint was trained with.
+
+    Only ``value_simplex`` varies today, but reading it from the stored
+    config matters: loading simplex-trained weights into an unconstrained
+    head produces plausible-looking wrong values rather than an error,
+    and MCTS would weigh them against a c_puct tuned for share space.
+    Checkpoints predating the flag default to the old behaviour.
+    """
+    stored = (checkpoint or {}).get("config") or {}
+    return ModelConfig(value_simplex=bool(stored.get("value_simplex", False)))

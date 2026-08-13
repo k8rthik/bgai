@@ -49,3 +49,16 @@ def test_softmax_preserves_ordering() -> None:
     logits = torch.tensor([[2.0, -1.0, 0.5, 3.0], [0.0, 1.0, -2.0, 0.25]])
     shares = torch.softmax(logits, dim=-1)
     assert torch.equal(logits.argsort(dim=-1), shares.argsort(dim=-1))
+
+
+def test_config_is_recovered_from_a_checkpoint() -> None:
+    """Five call sites rebuild the net from a checkpoint. If any drops
+    value_simplex, it loads simplex-trained weights and runs them without
+    the softmax -- silently wrong values, not a crash."""
+    from bgai.training.model import model_config_from_checkpoint
+
+    assert model_config_from_checkpoint({"config": {"value_simplex": True}}).value_simplex
+    assert not model_config_from_checkpoint({"config": {"value_simplex": False}}).value_simplex
+    # checkpoints predating the flag must keep the old behaviour
+    assert not model_config_from_checkpoint({"config": {}}).value_simplex
+    assert not model_config_from_checkpoint({}).value_simplex
