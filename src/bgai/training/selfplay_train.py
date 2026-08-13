@@ -68,6 +68,7 @@ class SelfPlayTrainConfig:
     leaf_batch: int = 16
     temp_decisions: int = 30
     lambda_kl: float = 1.0
+    rank_weight: float = 1.0
     lr: float = 5e-5
     batch_size: int = 128
     epochs_per_iteration: int = 1
@@ -81,6 +82,7 @@ class SelfPlayTrainConfig:
             leaf_batch=self.leaf_batch,
             temp_decisions=self.temp_decisions,
             lambda_kl=self.lambda_kl,
+            rank_weight=self.rank_weight,
             lr=self.lr,
         )
 
@@ -179,7 +181,7 @@ def fine_tune(
         for start in range(0, len(order) - cfg.batch_size + 1, cfg.batch_size):
             batch_records = [records[i] for i in order[start : start + cfg.batch_size]]
             batch = _collate(batch_records, device)
-            loss, parts = regularized_loss(net, frozen, batch, cfg.lambda_kl)
+            loss, parts = regularized_loss(net, frozen, batch, cfg.lambda_kl, cfg.rank_weight)
             opt.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(net.parameters(), 5.0)
@@ -285,6 +287,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--leaf-batch", type=int, default=16)
     parser.add_argument("--temp-decisions", type=int, default=30)
     parser.add_argument("--lambda-kl", type=float, default=1.0)
+    parser.add_argument("--rank-weight", type=float, default=1.0)
     parser.add_argument("--lr", type=float, default=5e-5)
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args(argv)
@@ -302,6 +305,7 @@ def main(argv: list[str] | None = None) -> None:
             leaf_batch=args.leaf_batch,
             temp_decisions=args.temp_decisions,
             lambda_kl=args.lambda_kl,
+            rank_weight=args.rank_weight,
             lr=args.lr,
             seed=args.seed,
         )
