@@ -59,6 +59,9 @@ class TrainConfig:
     """Permit writing into a non-empty output directory. Off by default:
     metrics.jsonl appends and checkpoints overwrite, so reusing a directory
     silently mixes runs and destroys the previous one's weights."""
+    value_simplex: bool = False
+    """Softmax the value head over seats (see ModelConfig.value_simplex).
+    Stored in the checkpoint config so agents rebuild the same head."""
     weight_power: float = 1.0
     """Exponent applied to the per-record strength weight at load time.
     The baked-in weights span only 0.6-1.0 (1.67x), so training imitates
@@ -91,6 +94,9 @@ def _losses(
     net: PolicyValueNet,
     batch: dict[str, torch.Tensor],
     value_weight: float,
+    value_simplex: bool = False
+    """Softmax the value head over seats (see ModelConfig.value_simplex).
+    Stored in the checkpoint config so agents rebuild the same head."""
     weight_power: float = 1.0
     """Exponent applied to the per-record strength weight at load time.
     The baked-in weights span only 0.6-1.0 (1.67x), so training imitates
@@ -217,7 +223,7 @@ def train(cfg: TrainConfig) -> dict[str, float]:
         num_workers=cfg.num_workers,
     )
 
-    net = PolicyValueNet(ModelConfig()).to(device)
+    net = PolicyValueNet(ModelConfig(value_simplex=cfg.value_simplex)).to(device)
     opt = torch.optim.AdamW(net.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
 
     step = 0
@@ -348,6 +354,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--allow-dirty-out", action="store_true")
     parser.add_argument("--rank-weight", type=float, default=0.0)
     parser.add_argument("--weight-power", type=float, default=1.0)
+    parser.add_argument("--value-simplex", action="store_true")
     args = parser.parse_args(argv)
     train(
         TrainConfig(
@@ -367,6 +374,7 @@ def main(argv: list[str] | None = None) -> None:
             allow_dirty_out=args.allow_dirty_out,
             rank_weight=args.rank_weight,
             weight_power=args.weight_power,
+            value_simplex=args.value_simplex,
         )
     )
 

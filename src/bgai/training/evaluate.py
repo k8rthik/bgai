@@ -18,7 +18,11 @@ import torch
 from torch.utils.data import DataLoader
 
 from bgai.training.dataset import ImitationDataset, collate
-from bgai.training.model import ModelConfig, PolicyValueNet
+from bgai.training.model import (
+    ModelConfig,
+    PolicyValueNet,
+    model_config_from_checkpoint,
+)
 from bgai.training.train import pick_device
 from bgai.training.vocab import ENCODING_VERSION, FACTION_NAMES, VERBS
 
@@ -29,7 +33,7 @@ def _load(checkpoint: Path, device: torch.device) -> PolicyValueNet:
         raise ValueError(
             f"checkpoint encoding v{ckpt.get('encoding_version')} != code v{ENCODING_VERSION}"
         )
-    net = PolicyValueNet(ModelConfig())
+    net = PolicyValueNet(model_config_from_checkpoint(ckpt))
     net.load_state_dict(ckpt["model"])
     return net.to(device).eval()
 
