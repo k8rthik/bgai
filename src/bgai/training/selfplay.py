@@ -46,6 +46,7 @@ from bgai.engine.tm.setup import GameSetup
 from bgai.training.encode_move import encode_move
 from bgai.training.encode_state import encode_state
 from bgai.training.model import PolicyValueNet
+from bgai.training.rank_loss import pairwise_rank_loss
 from bgai.training.vocab import FACTION_INDEX
 
 
@@ -82,6 +83,14 @@ class SelfPlayConfig:
     (realised final shares) close to what best play would have produced."""
     max_decisions: int = 5000
     lambda_kl: float = 1.0
+    rank_weight: float = 1.0
+    """Weight on the pairwise ranking term over the value head. Not
+    optional in spirit: the first RL leg trained value on MSE alone and
+    measurably traded ordering for magnitude (held-out pairwise 0.753 ->
+    0.715, winner-top1 0.601 -> 0.534 while MSE improved 46x) -- and
+    search consumes orderings, so RL search LOST to pre-RL search 21.7%
+    to 30.8% even as the RL policy beat its predecessor. Same
+    dissociation rank_loss.py documents for the supervised phase."""
     lr: float = 1e-4
 
 
@@ -160,8 +169,9 @@ def regularized_loss(
     frozen: PolicyValueNet,
     batch: dict[str, torch.Tensor],
     lambda_kl: float,
+    rank_weight: float = 1.0,
 ) -> tuple[torch.Tensor, dict[str, float]]:
-    """Search-policy cross-entropy + value MSE + KL(new || human).
+    """Search-policy cross-entropy + value MSE + pairwise rank + KL(new || human).
 
     ``frozen`` is the imitation net, kept in eval mode and never updated
     -- it is the anchor, so it must not drift with the policy it is
@@ -192,10 +202,12 @@ def regularized_loss(
     ref_log_probs = F.log_softmax(ref_logits, dim=-1)
     kl_terms = (log_probs.exp() * (safe_log_probs - ref_log_probs.masked_fill(~mask, 0.0)))
     kl = kl_terms.masked_fill(~mask, 0.0).sum(dim=-1).mean()
-    loss = policy_loss + 0.5 * value_loss + lambda_kl * kl
+    rank = pairwise_rank_loss(value, batch["value"])
+    loss = policy_loss + 0.5 * value_loss + rank_weight * rank + lambda_kl * kl
     return loss, {
         "policy": float(policy_loss.item()),
         "value": float(value_loss.item()),
+        "rank": float(rank.item()),
         "kl": float(kl.item()),
         "total": float(loss.item()),
     }

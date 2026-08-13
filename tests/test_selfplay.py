@@ -141,8 +141,9 @@ def test_loss_components_are_all_reported() -> None:
         "visits": torch.rand(n, n_cand) + 0.1,
     }
     _, parts = regularized_loss(net, frozen, batch, lambda_kl=1.0)
-    assert set(parts) == {"policy", "value", "kl", "total"}
+    assert set(parts) == {"policy", "value", "rank", "kl", "total"}
     assert parts["kl"] >= -1e-6
+    assert parts["rank"] >= 0.0
 
 
 def test_losses_are_finite_with_padded_candidates() -> None:
