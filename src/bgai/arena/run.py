@@ -87,6 +87,7 @@ def _build_net_agent(name: str, label: str, options: dict[str, object]) -> Agent
         max_depth=int(options.get("max_depth", 24)),
         value_blend_w=float(options.get("blend", 0.0)),
         leaf_batch=int(options.get("batch", 0)),
+        top_k=int(options.get("top_k", 0)),
         device=device,
     )
 

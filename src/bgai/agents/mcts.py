@@ -58,6 +58,7 @@ class _Node:
     visits: np.ndarray | None = None
     action_value: np.ndarray | None = None  # (n_actions, 4) summed value vectors
     total_visits: int = 0
+    allowed: np.ndarray | None = None  # cached top-k prior indices
 
     def __post_init__(self) -> None:
         n = len(self.offer)
@@ -99,6 +100,7 @@ class MCTSAgent:
         max_depth: int = 24,
         value_blend_w: float = 0.0,
         leaf_batch: int = 0,
+        top_k: int = 0,
     ) -> None:
         self.name = name
         self.simulations = simulations
@@ -112,6 +114,10 @@ class MCTSAgent:
         otherwise runs once per simulation, at the cost of virtual-loss
         approximation: descents in the same batch cannot see each other's
         results."""
+        self.top_k = top_k
+        """Consider only this many highest-prior moves per node (0 = all).
+        Branching is 23 on average, so an unpruned tree at 512 sims is
+        about two levels deep; pruning spends the budget deeper instead."""
         self.device = torch.device(device)
         if net is not None:
             self.net = net
@@ -259,6 +265,22 @@ class MCTSAgent:
             return abs_value
         return blend(abs_value, game, self.value_blend_w)
 
+    def _allowed(self, node: _Node) -> np.ndarray | None:
+        """Indices selection may consider, or None when every move is open.
+
+        Mean branching is 23 (max 216), so 512 simulations spread over
+        every legal move leave the tree about two levels deep -- far short
+        of what a 6-round game needs. Restricting to the top ``top_k``
+        priors spends the same budget deeper. Safe only because the policy
+        is good enough to put the right move in that set: top1 is 58% and
+        top3 84%.
+        """
+        if not self.top_k or len(node.offer) <= self.top_k:
+            return None
+        if node.allowed is None:
+            node.allowed = np.argsort(-node.priors)[: self.top_k]
+        return node.allowed
+
     def _select(self, node: _Node) -> int:
         """PUCT over the acting seat's own value component."""
         seat = node.sim.game.setup.factions.index(node.faction)
@@ -273,7 +295,13 @@ class MCTSAgent:
         else:
             q[:] = 0.25
         u = self.c_puct * node.priors * math.sqrt(max(node.total_visits, 1)) / (1 + visits)
-        return int(np.argmax(q + u))
+        score = q + u
+        allowed = self._allowed(node)
+        if allowed is not None:
+            masked = np.full(len(node.offer), -np.inf, dtype=np.float32)
+            masked[allowed] = score[allowed]
+            score = masked
+        return int(np.argmax(score))
 
     def _simulate(self, root: _Node) -> None:
         path: list[tuple[_Node, int]] = []
