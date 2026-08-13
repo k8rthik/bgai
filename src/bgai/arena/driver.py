@@ -39,7 +39,7 @@ from bgai.engine.tm.round_flow import (
 )
 from bgai.engine.tm.scoring import final_scoring
 from bgai.engine.tm.setup import GameSetup
-from bgai.engine.tm.state import GameState, Phase, active_faction
+from bgai.engine.tm.state import GameState, Phase, active_faction, with_faction
 
 MAIN_TRACK_VERBS = frozenset(
     {
@@ -307,7 +307,22 @@ def _actions_offer(sim: SimState) -> tuple[str, tuple[ParsedCommand, ...]]:
 
 
 def _end_actions_turn(sim: SimState) -> SimState:
-    return replace(sim, game=advance_turn(sim.game))
+    """Rotate to the next turn, first killing any ACTC ticket held by a
+    faction that just passed.
+
+    ``round_flow._advance_actions``'s extra-action branch checks neither
+    ``passed`` nor ``dropped``, so a Chaos Magician who passes with a
+    banked double-turn action stays structurally active with (at most)
+    free conversions to offer -- the empty-offer state behind the
+    selfplay_deep iter-5 crash. ``live_driver.end_action`` has clamped
+    this since task 14; this is the same clamp for the sim driver.
+    """
+    game = sim.game
+    faction = active_faction(game)
+    fs = game.factions[faction]
+    if fs.passed and fs.extra_actions > 0:
+        game = with_faction(game, faction, replace(fs, extra_actions=0))
+    return replace(sim, game=advance_turn(game))
 
 
 def _settle(sim: SimState) -> SimState:
