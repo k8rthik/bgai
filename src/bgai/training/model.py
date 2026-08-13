@@ -37,6 +37,19 @@ class ModelConfig:
     faction_embed: int = 32
     field_embed: int = 24
     dropout: float = 0.1
+    value_simplex: bool = False
+    """Softmax the value head over the 4 seats.
+
+    The target is a share vector summing to 1, but the head is a bare
+    Linear(...,4): MSE was the only thing keeping its output near share
+    space, so adding the ranking loss inflated value MSE 128x. That also
+    breaks MCTS, whose _select falls back to q=0.25 and weighs c_puct
+    against Q assuming share-space magnitudes.
+
+    Softmax is monotone, so it bounds the scale without undoing the
+    ordering the ranking loss buys. Off by default: applying it to a net
+    trained without it would flatten near-uniform outputs, so it belongs
+    to runs trained (or fine-tuned) with it on."""
 
 
 class PolicyValueNet(nn.Module):
@@ -98,4 +111,7 @@ class PolicyValueNet(nn.Module):
         moves = self.move_embedding(candidates)
         logits = torch.einsum("be,bce->bc", state, moves) * self.logit_scale
         logits = logits.masked_fill(~cand_mask, float("-inf"))
-        return logits, self.value_head(state)
+        value = self.value_head(state)
+        if self.cfg.value_simplex:
+            value = value.softmax(dim=-1)
+        return logits, value
