@@ -127,7 +127,13 @@ from __future__ import annotations
 from dataclasses import replace
 
 from bgai.data.ledger_parser import ParsedCommand
-from bgai.engine.tm.apply import EngineError, pop_pending, push_pending, register_handler
+from bgai.engine.tm.apply import (
+    EngineError,
+    _find_pending_index,
+    pop_pending,
+    push_pending,
+    register_handler,
+)
 from bgai.engine.tm.connectivity import directly_adjacent
 from bgai.engine.tm.factions.hooks import HOOKS, FactionHooks, hooks_for
 from bgai.engine.tm.factions_data import FACTIONS
@@ -145,17 +151,26 @@ class _CultistsHooks(FactionHooks):
     offer of this build's batch just resolved" (``leech_effect["taken"]``,
     unconditional: pushes a ``cult_choice`` pending, resolved by a later
     explicit ``+CULT`` row). ``accepted=False`` ("the last offer of an
-    all-declined batch just resolved") is a no-op here: ``leech_effect
-    ["not_taken"]`` is granted directly off the ledger's own
-    ``"[all opponents declined power]"`` bracket row instead
-    (:func:`handle_cultist_leech_bonus`, module docstring) -- inferring it
-    from the resolving decline would land it one ledger row late.
+    all-declined batch just resolved") pushes a ``cultist_bonus_due``
+    pending when ``errata-cultist-power`` is on (2026-08-13 faction-audit
+    fix): in replay the ledger's own ``"[all opponents declined power]"``
+    bracket row consumes it (:func:`handle_cultist_leech_bonus`, which
+    also grants the +1 PW -- never a row early, exactly where the ledger
+    puts it); in engine-driven play the driver's forced-answer path
+    settles it with the same synthesized row, so the arena/self-play
+    Cultists finally receive the consolation power the rulebook grants.
+    Without the errata option the effect never existed on snellman, so
+    no pending is pushed and both paths stay silent.
     """
 
     def on_leech_resolved(self, state: GameState, faction: str, accepted: bool) -> GameState:
         if accepted:
             return push_pending(
                 state, PendingDecision(faction=faction, kind="cult_choice", amount=1)
+            )
+        if state.setup.options.errata_cultist_power:
+            return push_pending(
+                state, PendingDecision(faction=faction, kind="cultist_bonus_due", amount=1)
             )
         return state
 
@@ -558,7 +573,14 @@ def handle_cultist_leech_bonus(state: GameState, faction: str, cmd: ParsedComman
             fs = replace(fs, vp=fs.vp + amount)
         else:
             raise ValueError(f"unhandled leech_effect.not_taken key {key!r} for {faction}")
-    return with_faction(state, faction, fs)
+    new_state = with_faction(state, faction, fs)
+    # Consume the cultist_bonus_due pending pushed by the all-declined
+    # hook (2026-08-13 fix). Absent on ledgers predating the pending
+    # design -- popping is best-effort, granting is not.
+    idx = _find_pending_index(new_state, faction, "cultist_bonus_due")
+    if idx is not None:
+        new_state = pop_pending(new_state, idx)
+    return new_state
 
 
 register_handler("leech", handle_leech)

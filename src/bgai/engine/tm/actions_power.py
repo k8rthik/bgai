@@ -135,20 +135,17 @@ Ported from the reference implementation (jsnell/terra-mystica, MIT):
   ``action ACTS. Upgrade X to TP`` rows, which trigger ordinary leech
   exactly like a paid upgrade.
 - **ACTA (Auren)**: gain is ``{"CULT": 2, "CULTS_ON_SAME_TRACK": 1}``.
-  Every real corpus row spends the whole grant in one combined
-  ``+2<CULT>`` (e.g. ``action ACTA. +2FIRE``) -- ``apply.py``'s existing
-  ``handle_gain_cult`` already advances a track by ``cmd.n1`` steps
-  unconditionally, with no marker to satisfy and no turn-order gate (the
-  ``+2<CULT>`` row is the *same* faction, immediately after, in the same
-  ledger row -- ``active_faction`` never changes). So ACTA needs **no**
-  pending at all: this handler only pays (free), marks ``ACTA`` used, and
-  relies on the pre-existing ``gain_cult`` handler for the actual track
-  advance. ``CULT``/``CULTS_ON_SAME_TRACK`` are therefore documented no-ops
-  in ``_apply_action_gain`` -- ``command_adjust_resources``'s same-track
-  enforcement (``commands.pm`` 62-64) only matters for a *split* ``+1CULT.
-  +1CULT`` sequence, which the crawled corpus never uses for ACTA; BON2 and
-  FAV6's bare ``CULT: 1`` gains follow the identical "companion row already
-  exists, no pending needed" reasoning.
+  The ``CULT`` key pushes a ``cult_choice`` pending carrying the full
+  amount (2026-08-13 faction-audit fix). In replay, the corpus's
+  combined companion row (``action ACTA. +2FIRE``) consumes it via
+  ``handle_gain_cult``'s existing pending pop; in engine-driven play,
+  ``legal.py``'s ``_cult_choice_answers`` offers one ``gain_cult`` per
+  track with ``n1 = amount``, so the same-track rule is enforced
+  structurally (a single +2 pick, never a split ``+1/+1`` -- which the
+  crawled corpus also never uses). Before this fix the key was a
+  replay-only no-op, which silently made ACTA -- and BON2/FAV6's bare
+  ``CULT: 1`` specials -- grant nothing in arena/self-play/MCP games.
+  ``CULTS_ON_SAME_TRACK`` remains a rider no-op.
 - **ACTC (Chaos Magicians)**: gain is ``{"GAIN_ACTION": 2}``
   (``resources.pm`` line ~289, ``$faction->{allowed_actions} += $delta``).
   This module only records the grant onto the new
@@ -214,7 +211,7 @@ _MARKER_GAIN_KIND: dict[str, str] = {
 # along with ACTW's FREE_D; TF_NEED_HEX_ADJACENCY rides along with ACTN's
 # FREE_TF, enforced directly by actions_terraform.handle_transform).
 _NO_OP_GAIN_KEYS = frozenset(
-    {"CULT", "CULTS_ON_SAME_TRACK", "TELEPORT_NO_TF", "TF_NEED_HEX_ADJACENCY"}
+    {"CULTS_ON_SAME_TRACK", "TELEPORT_NO_TF", "TF_NEED_HEX_ADJACENCY"}
 )
 
 
@@ -310,6 +307,19 @@ def _apply_action_gain(
             fs = replace(fs, vp=fs.vp + amount * _current_score_tile_vp(state, "SPADE", "gain"))
         elif key == "GAIN_ACTION":
             fs = replace(fs, extra_actions=fs.extra_actions + amount)
+        elif key == "CULT":
+            # ACTA (+2, same track), BON2 (+1), FAV6 (+1). The track is
+            # the player's choice, so this becomes a cult_choice pending:
+            # legal.py answers it with one gain_cult per track carrying
+            # the FULL amount (same-track enforced structurally), and in
+            # replay the ledger's companion ``+N<CULT>`` row consumes the
+            # pending via handle_gain_cult's existing pop. Before the
+            # 2026-08-13 faction audit this key was a documented no-op --
+            # correct for replay, but in ENGINE-DRIVEN play (arena,
+            # self-play, MCP) it made all three actions grant nothing.
+            pendings.append(
+                PendingDecision(faction=faction, kind="cult_choice", amount=amount)
+            )
         elif key in _NO_OP_GAIN_KEYS:
             continue
         else:
