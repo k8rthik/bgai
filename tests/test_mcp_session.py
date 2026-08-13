@@ -125,3 +125,33 @@ def test_config_defaults_without_env(monkeypatch):
     config = load_config()
     assert config.rungs == (1, 2, 3)
     assert config.opponents == "greedy"
+
+
+def test_config_imitation_requires_checkpoint():
+    with pytest.raises(ValueError, match="opponent_ckpt"):
+        SessionConfig(opponents="imitation")
+    cfg = SessionConfig(opponents="imitation", opponent_ckpt="x.pt")
+    assert cfg.opponent_ckpt == "x.pt"
+
+
+def test_config_rejects_unknown_opponents():
+    with pytest.raises(ValueError, match="opponents"):
+        SessionConfig(opponents="mcts")
+
+
+_DEPRECATED_CKPT = "data/checkpoints/imitation/checkpoint.pt"
+
+
+@pytest.mark.skipif(
+    not __import__("pathlib").Path(_DEPRECATED_CKPT).exists(),
+    reason="historical checkpoint not present",
+)
+def test_session_with_imitation_opponents_reaches_llm_decision():
+    """A human/LLM seat vs three copies of a historical net: the session
+    must reach the external seat's first decision, driven by real
+    ImitationAgent moves (loaded once, shared across seats)."""
+    session = Session(SessionConfig(opponents="imitation", opponent_ckpt=_DEPRECATED_CKPT))
+    text = session.start()
+    assert "your" in text.lower() or session.offered()
+    bots = session._bots()
+    assert len({id(b) for b in bots.values()}) == 1, "net must be shared across seats"
