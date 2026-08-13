@@ -94,15 +94,6 @@ def _losses(
     net: PolicyValueNet,
     batch: dict[str, torch.Tensor],
     value_weight: float,
-    value_simplex: bool = False
-    """Softmax the value head over seats (see ModelConfig.value_simplex).
-    Stored in the checkpoint config so agents rebuild the same head."""
-    weight_power: float = 1.0
-    """Exponent applied to the per-record strength weight at load time.
-    The baked-in weights span only 0.6-1.0 (1.67x), so training imitates
-    the average population player rather than a strong one -- and the
-    agent measures at the 16th percentile of human play. Sharpening here
-    avoids rebuilding a 2.5 GB shard set to change the weighting."""
     rank_weight: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Returns ``(total, policy, value, logits)``.
