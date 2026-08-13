@@ -59,6 +59,12 @@ class TrainConfig:
     """Permit writing into a non-empty output directory. Off by default:
     metrics.jsonl appends and checkpoints overwrite, so reusing a directory
     silently mixes runs and destroys the previous one's weights."""
+    weight_power: float = 1.0
+    """Exponent applied to the per-record strength weight at load time.
+    The baked-in weights span only 0.6-1.0 (1.67x), so training imitates
+    the average population player rather than a strong one -- and the
+    agent measures at the 16th percentile of human play. Sharpening here
+    avoids rebuilding a 2.5 GB shard set to change the weighting."""
     rank_weight: float = 0.0
     """Weight on the pairwise ranking term over the value vector. MSE
     optimises the share's magnitude; MCTS only uses the ordering, and the
@@ -85,6 +91,12 @@ def _losses(
     net: PolicyValueNet,
     batch: dict[str, torch.Tensor],
     value_weight: float,
+    weight_power: float = 1.0
+    """Exponent applied to the per-record strength weight at load time.
+    The baked-in weights span only 0.6-1.0 (1.67x), so training imitates
+    the average population player rather than a strong one -- and the
+    agent measures at the 16th percentile of human play. Sharpening here
+    avoids rebuilding a 2.5 GB shard set to change the weighting."""
     rank_weight: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Returns ``(total, policy, value, logits)``.
@@ -182,7 +194,10 @@ def train(cfg: TrainConfig) -> dict[str, float]:
         )
     metrics_path = cfg.out / "metrics.jsonl"
 
-    train_ds = ImitationDataset(cfg.shards, "train", max_cached_shards=cfg.shards_per_block + 2)
+    train_ds = ImitationDataset(
+        cfg.shards, "train", max_cached_shards=cfg.shards_per_block + 2,
+        weight_power=cfg.weight_power,
+    )
     val_ds = ImitationDataset(cfg.shards, "val", max_cached_shards=cfg.shards_per_block + 2)
     # block sampling rather than a global shuffle: see sampler module --
     # a global shuffle would miss the shard cache on nearly every access
@@ -332,6 +347,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--resume", type=Path, default=None)
     parser.add_argument("--allow-dirty-out", action="store_true")
     parser.add_argument("--rank-weight", type=float, default=0.0)
+    parser.add_argument("--weight-power", type=float, default=1.0)
     args = parser.parse_args(argv)
     train(
         TrainConfig(
@@ -350,6 +366,7 @@ def main(argv: list[str] | None = None) -> None:
             resume=args.resume,
             allow_dirty_out=args.allow_dirty_out,
             rank_weight=args.rank_weight,
+            weight_power=args.weight_power,
         )
     )
 

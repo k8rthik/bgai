@@ -40,12 +40,19 @@ class ImitationDataset(Dataset):
     """
 
     def __init__(
-        self, shard_dir: Path, split: Split, max_cached_shards: int = DEFAULT_CACHED_SHARDS
+        self,
+        shard_dir: Path,
+        split: Split,
+        max_cached_shards: int = DEFAULT_CACHED_SHARDS,
+        weight_power: float = 1.0,
     ) -> None:
         self.shard_dir = Path(shard_dir)
         if max_cached_shards < 1:
             raise ValueError(f"max_cached_shards must be >= 1, got {max_cached_shards}")
         self.max_cached_shards = max_cached_shards
+        if weight_power <= 0:
+            raise ValueError(f"weight_power must be > 0, got {weight_power}")
+        self.weight_power = weight_power
         manifest = json.loads((self.shard_dir / "manifest.json").read_text())
         if manifest["encoding_version"] != ENCODING_VERSION:
             raise ValueError(
@@ -113,7 +120,7 @@ class ImitationDataset(Dataset):
             "candidates": torch.from_numpy(shard["cand_flat"][start:end].astype(np.int64)),
             "chosen": int(shard["chosen"][row]),
             "value": torch.from_numpy(share),
-            "weight": float(shard["weight"][row]),
+            "weight": float(shard["weight"][row]) ** self.weight_power,
             "faction": int(shard["mover_faction"][row]),
         }
 
