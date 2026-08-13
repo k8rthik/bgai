@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import math
 import random
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -34,7 +35,7 @@ from bgai.arena.driver import SimState, advance, decision
 from bgai.data.ledger_parser import ParsedCommand
 from bgai.engine.tm.apply import EngineError
 from bgai.engine.tm.state import GameState
-from bgai.training.encode_move import encode_move
+from bgai.training.encode_move import MOVE_FIELDS, encode_move
 from bgai.training.encode_state import encode_state
 from bgai.training.model import (
     ModelConfig,
@@ -141,6 +142,50 @@ class MCTSAgent:
             logits[0].softmax(dim=-1).cpu().numpy(),
             value[0].cpu().numpy(),
         )
+
+    @torch.no_grad()
+    def _evaluate_many(
+        self, items: Sequence[tuple[GameState, str, tuple[ParsedCommand, ...]]]
+    ) -> list[tuple[np.ndarray, np.ndarray]]:
+        """``_evaluate`` for several positions in one forward pass.
+
+        Search costs one pass per simulation, so a 512-sim move runs 512
+        sequential passes of a 3.8M-parameter net -- the reason a 120-game
+        512-sim series takes over an hour. Batching amortises that.
+
+        Candidate sets are ragged (mean 23, max 216), so rows are padded to
+        the batch maximum and masked. The mask matters: ``model.forward``
+        fills masked logits with -inf before the softmax, so padding
+        contributes no probability mass and each row's priors still sum
+        to 1 over its own candidates.
+        """
+        if not items:
+            return []
+        width = max(len(offer) for _, _, offer in items)
+        n = len(items)
+        hex_planes, globals_, factions = [], [], []
+        cand = np.zeros((n, width, MOVE_FIELDS), dtype=np.int64)
+        mask = np.zeros((n, width), dtype=bool)
+        for i, (game, faction, offer) in enumerate(items):
+            enc = encode_state(game, faction)
+            hex_planes.append(enc.hex_planes.astype(np.float32))
+            globals_.append(enc.globals.astype(np.float32))
+            factions.append(FACTION_INDEX[faction])
+            moves = np.stack([encode_move(m, game, faction) for m in offer])
+            cand[i, : len(offer)] = moves
+            mask[i, : len(offer)] = True
+        logits, value = self.net(
+            torch.from_numpy(np.stack(hex_planes)).to(self.device),
+            torch.from_numpy(np.stack(globals_)).to(self.device),
+            torch.tensor(factions, device=self.device),
+            torch.from_numpy(cand).to(self.device),
+            torch.from_numpy(mask).to(self.device),
+        )
+        priors = logits.softmax(dim=-1).cpu().numpy()
+        values = value.cpu().numpy()
+        return [
+            (priors[i, : len(items[i][2])], values[i]) for i in range(n)
+        ]
 
     def _seat_map(self, game: GameState, faction: str) -> dict[str, int]:
         """Absolute faction -> index into a value vector encoded from
