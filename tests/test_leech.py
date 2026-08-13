@@ -533,14 +533,14 @@ def test_apply_lets_cultists_answer_cult_choice_mid_batch_through_the_gate() -> 
 
 
 def test_cultists_all_decline_clears_the_watch_but_grants_nothing_from_decline_itself() -> None:
-    """Task-13 report follow-up (``4pLeague_S10_D1L1_G5`` row 208):
-    ``handle_decline`` no longer grants the ``not_taken`` power itself --
-    that now comes directly off the ledger's own
-    ``"[all opponents declined power]"`` bracket row
-    (``test_cultist_leech_bonus_grants_not_taken_power_directly`` below),
-    since inferring it from the resolving decline lands it one ledger row
-    late (``leech.py``'s module docstring). ``handle_decline`` still walks
-    the watch marker to zero and pops it either way."""
+    """Task-13 report follow-up (``4pLeague_S10_D1L1_G5`` row 208), amended
+    by the 2026-08-13 faction-audit fix: ``handle_decline`` still never
+    grants the ``not_taken`` power itself -- granting happens only in
+    ``handle_cultist_leech_bonus``, at exactly the ledger row where
+    snellman puts it. What the resolving decline now does (errata on) is
+    push the ``cultist_bonus_due`` pending that both replay's bracket row
+    and the driver's forced answer consume, so engine-driven play stops
+    silently skipping the bonus. Power itself must be untouched here."""
     s = _cultists_seeded()
     s = replace(
         s, setup=replace(s.setup, options=replace(s.setup.options, errata_cultist_power=True))
@@ -548,7 +548,9 @@ def test_cultists_all_decline_clears_the_watch_but_grants_nothing_from_decline_i
     s = queue_leech(s, "cultists", TARGET)
     before = s.factions["cultists"].power
     s2 = handle_decline(s, "darklings", _cmd("decline", n1=2, target="cultists"))
-    assert s2.pending == ()
+    assert s2.pending == (
+        PendingDecision(faction="cultists", kind="cultist_bonus_due", amount=1),
+    )
     assert s2.factions["cultists"].power == before
 
 
@@ -592,3 +594,58 @@ def test_non_cultists_builder_never_gets_a_watch_marker() -> None:
     s = _seeded()
     s = queue_leech(s, "engineers", TARGET)
     assert not any(p.kind == "cultist_leech_watch" for p in s.pending)
+
+
+# --------------------------------------------------------------------------
+# Cultists all-declined bonus (2026-08-13 faction-audit fix)
+# --------------------------------------------------------------------------
+
+
+def _with_errata(state: GameState) -> GameState:
+    return replace(
+        state,
+        setup=replace(state.setup, options=replace(state.setup.options, errata_cultist_power=True)),
+    )
+
+
+def test_cultists_all_declined_pushes_bonus_due_under_errata() -> None:
+    s = _with_errata(_cultists_seeded())
+    s = queue_leech(s, "cultists", TARGET)
+    before_bowl2 = s.factions["cultists"].power.bowl2
+    s2 = handle_decline(s, "darklings", _cmd("decline", target="cultists"))
+    due = [p for p in s2.pending if p.kind == "cultist_bonus_due"]
+    assert due == [PendingDecision(faction="cultists", kind="cultist_bonus_due", amount=1)]
+    # the forced answer (identical to the ledger's bracket row) grants +1 PW
+    s3 = handle_cultist_leech_bonus(s2, "cultists", _cmd("cultist_leech_bonus"))
+    assert s3.factions["cultists"].power.bowl2 == before_bowl2 + 1
+    assert not any(p.kind == "cultist_bonus_due" for p in s3.pending)
+
+
+def test_cultists_all_declined_without_errata_stays_silent() -> None:
+    """Pre-errata snellman gave nothing on an all-declined build; setups
+    sampled from such games must reproduce that."""
+    s = _cultists_seeded()
+    s = replace(
+        s, setup=replace(s.setup, options=replace(s.setup.options, errata_cultist_power=False))
+    )
+    s = queue_leech(s, "cultists", TARGET)
+    s2 = handle_decline(s, "darklings", _cmd("decline", target="cultists"))
+    assert not any(p.kind == "cultist_bonus_due" for p in s2.pending)
+
+
+def test_cultists_accept_never_pushes_bonus_due() -> None:
+    s = _with_errata(_cultists_seeded())
+    s = queue_leech(s, "cultists", TARGET)
+    s2 = handle_leech(s, "darklings", _cmd("leech", n1=2, target="cultists"))
+    kinds = {p.kind for p in s2.pending}
+    assert "cult_choice" in kinds and "cultist_bonus_due" not in kinds
+
+
+def test_bonus_due_forced_answer_is_offered_to_the_driver() -> None:
+    from bgai.engine.tm.legal import pending_answer_moves
+
+    s = _with_errata(_cultists_seeded())
+    s = queue_leech(s, "cultists", TARGET)
+    s2 = handle_decline(s, "darklings", _cmd("decline", target="cultists"))
+    answers = pending_answer_moves(s2, "cultists")
+    assert len(answers) == 1 and answers[0].verb == "cultist_leech_bonus"

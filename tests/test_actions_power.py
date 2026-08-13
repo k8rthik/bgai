@@ -22,7 +22,13 @@ from bgai.engine.tm.board import base_board
 from bgai.engine.tm.factions_data import FACTIONS
 from bgai.engine.tm.power import Power
 from bgai.engine.tm.setup import load_setup
-from bgai.engine.tm.state import FactionState, GameState, Phase, with_faction
+from bgai.engine.tm.state import (
+    FactionState,
+    GameState,
+    PendingDecision,
+    Phase,
+    with_faction,
+)
 
 GAME_ID = "4pLeague_S10_D1L1_G1"
 BOARD = base_board()
@@ -246,7 +252,11 @@ def test_acte_needs_no_stronghold_and_never_blocks() -> None:
 # --------------------------------------------------------------------------
 
 
-def test_acta_marks_used_and_costs_nothing_leaving_cult_gain_to_the_companion_row() -> None:
+def test_acta_pushes_a_two_step_cult_choice_the_companion_row_consumes() -> None:
+    """2026-08-13 faction-audit fix: ACTA's CULT gain is a cult_choice
+    pending (amount 2), so engine-driven play actually receives the
+    steps. In replay the ledger's companion ``+2<cult>`` row consumes
+    the pending via handle_gain_cult's existing pop."""
     s = _with_sh(_state(), "auren")
     before = s.factions["auren"]
     before_water = s.cults["auren"]["WATER"]
@@ -254,14 +264,37 @@ def test_acta_marks_used_and_costs_nothing_leaving_cult_gain_to_the_companion_ro
     fs = s2.factions["auren"]
     assert fs.coins == before.coins and fs.workers == before.workers
     assert "ACTA" in fs.actions_used
-    assert s2.pending == ()  # no marker -- the ledger's own "+2<cult>" row does the advance
-    # The companion `+2<cult>` row (same faction, same batch) applies through
-    # the pre-existing gain_cult handler with no gate to satisfy -- Auren
-    # isn't in this fixture's real turn_order, so make it the sole active
-    # faction to exercise this through the real apply() gate too.
+    assert s2.pending == (
+        PendingDecision(faction="auren", kind="cult_choice", amount=2),
+    )
     s2 = replace(s2, turn_order=("auren",), active_index=0)
     s3 = apply(s2, "auren", _cmd("gain_cult", cult="WATER", n1=2))
     assert s3.cults["auren"]["WATER"] == before_water + 2
+    assert s3.pending == ()  # the companion row consumed the pending
+
+
+def test_acta_cult_choice_offers_one_full_amount_pick_per_track() -> None:
+    """Same-track rule enforced structurally: the agent-facing answers
+    are four single picks of n1=2, never a split +1/+1."""
+    from bgai.engine.tm.legal import pending_answer_moves
+
+    s = _with_sh(_state(), "auren")
+    s2 = handle_action(s, "auren", _cmd("action", tile="ACTA"))
+    answers = pending_answer_moves(s2, "auren")
+    assert len(answers) == 4
+    assert all(m.verb == "gain_cult" and m.n1 == 2 for m in answers)
+    assert {m.cult for m in answers} == {"FIRE", "WATER", "EARTH", "AIR"}
+
+
+def test_bon2_special_action_pushes_a_single_step_cult_choice() -> None:
+    """BON2's bare CULT:1 rode the same no-op path as ACTA before the
+    audit fix; it must now push a one-step cult_choice."""
+    s = _state()
+    s = _rich(s, "nomads", bonus="BON2")
+    s2 = handle_action(s, "nomads", _cmd("action", tile="BON2"))
+    assert s2.pending == (
+        PendingDecision(faction="nomads", kind="cult_choice", amount=1),
+    )
 
 
 # --------------------------------------------------------------------------

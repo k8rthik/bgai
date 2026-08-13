@@ -139,7 +139,8 @@ from bgai.engine.tm.tiles import FAVOR_TILES, TOWN_TILES
 
 # See module docstring, Design decision 1.
 _BLOCKING_PENDING_KINDS = frozenset(
-    {"leech", "cult_choice", "gain_favor", "gain_town", "convert_w_to_p"}
+    {"leech", "cult_choice", "gain_favor", "gain_town", "convert_w_to_p",
+     "cultist_bonus_due"}
 )
 
 BLOCKING_PENDING_KINDS = _BLOCKING_PENDING_KINDS
@@ -216,6 +217,12 @@ def _pending_answers(
         return _gain_town_answers(state, pending)
     if pending.kind == "convert_w_to_p":
         return _convert_w_to_p_answers(state, faction, pending)
+    if pending.kind == "cultist_bonus_due":
+        # Single forced answer: the synthesized equivalent of the
+        # ledger's "[all opponents declined power]" bracket row. The
+        # driver auto-advances one-move offers, so engine play settles
+        # this without consulting an agent.
+        return (cmd("cultist_leech_bonus", kind=Kind.BOOKKEEPING),)
     return ()  # unreachable for kinds in _BLOCKING_PENDING_KINDS
 
 
