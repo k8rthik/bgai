@@ -43,7 +43,7 @@ import numpy as np
 import torch
 
 from bgai.training.encode_move import MOVE_FIELDS
-from bgai.training.model import ModelConfig, PolicyValueNet
+from bgai.training.model import PolicyValueNet, model_config_from_checkpoint
 from bgai.training.selfplay import SelfPlayConfig, SelfPlayRecord, play_game, regularized_loss
 from bgai.training.train import pick_device
 from bgai.training.vocab import ENCODING_VERSION
@@ -56,12 +56,27 @@ class SelfPlayTrainConfig:
     iterations: int = 4
     games_per_iteration: int = 240
     workers: int = 8
-    simulations: int = 16
+    simulations: int = 512
+    top_k: int = 8
+    max_depth: int = 48
+    leaf_batch: int = 16
+    temp_decisions: int = 30
     lambda_kl: float = 1.0
     lr: float = 5e-5
     batch_size: int = 128
     epochs_per_iteration: int = 1
     seed: int = 0
+
+    def selfplay(self) -> SelfPlayConfig:
+        return SelfPlayConfig(
+            simulations=self.simulations,
+            top_k=self.top_k,
+            max_depth=self.max_depth,
+            leaf_batch=self.leaf_batch,
+            temp_decisions=self.temp_decisions,
+            lambda_kl=self.lambda_kl,
+            lr=self.lr,
+        )
 
 
 # --------------------------------------------------------------------------
@@ -71,36 +86,39 @@ class SelfPlayTrainConfig:
 _WORKER: dict[str, object] = {}
 
 
-def _worker_init(checkpoint: str, simulations: int) -> None:
+def _worker_init(checkpoint: str, cfg: SelfPlayConfig) -> None:
     """One net per worker process, loaded once."""
-    import random as _random
-
     from bgai.agents.mcts import MCTSAgent
 
     torch.set_num_threads(1)  # workers must not fight over BLAS threads
-    _WORKER["agent"] = MCTSAgent(Path(checkpoint), simulations=simulations, device="cpu")
-    _WORKER["rng"] = _random.Random()
+    _WORKER["agent"] = MCTSAgent(
+        Path(checkpoint),
+        simulations=cfg.simulations,
+        max_depth=cfg.max_depth,
+        top_k=cfg.top_k,
+        leaf_batch=cfg.leaf_batch,
+        device="cpu",
+    )
+    _WORKER["cfg"] = cfg
 
 
-def _worker_game(args: tuple[int, int]) -> list[SelfPlayRecord]:
+def _worker_game(seed: int) -> list[SelfPlayRecord]:
     import random as _random
 
     from bgai.arena.setups import sample_setup
 
-    seed, simulations = args
     rng = _random.Random(seed)
     setup = sample_setup(rng)
-    cfg = SelfPlayConfig(simulations=simulations)
-    return play_game(_WORKER["agent"], setup, rng, cfg)  # type: ignore[arg-type]
+    return play_game(_WORKER["agent"], setup, rng, _WORKER["cfg"])  # type: ignore[arg-type]
 
 
 def generate_parallel(
-    checkpoint: Path, games: int, workers: int, simulations: int, seed: int
+    checkpoint: Path, games: int, workers: int, cfg: SelfPlayConfig, seed: int
 ) -> list[SelfPlayRecord]:
     ctx = get_context("spawn")
-    tasks = [(seed * 100_000 + i, simulations) for i in range(games)]
+    tasks = [seed * 100_000 + i for i in range(games)]
     with ctx.Pool(
-        processes=workers, initializer=_worker_init, initargs=(str(checkpoint), simulations)
+        processes=workers, initializer=_worker_init, initargs=(str(checkpoint), cfg)
     ) as pool:
         batches = pool.map(_worker_game, tasks, chunksize=1)
     return [record for batch in batches for record in batch]
@@ -172,26 +190,42 @@ def run(cfg: SelfPlayTrainConfig) -> None:
     if ckpt.get("encoding_version") != ENCODING_VERSION:
         raise ValueError("checkpoint encoding version mismatch")
 
-    net = PolicyValueNet(ModelConfig())
+    # The checkpoint knows its own architecture (value_simplex above all):
+    # loading simplex weights into a bare head silently mis-scales every
+    # value MCTS reads. Same reason every checkpoint written below must
+    # carry the flag forward -- workers rebuild agents from these files.
+    model_cfg = model_config_from_checkpoint(ckpt)
+    net = PolicyValueNet(model_cfg)
     net.load_state_dict(ckpt["model"])
     net.to(device)
-    frozen = PolicyValueNet(ModelConfig())
+    frozen = PolicyValueNet(model_cfg)
     frozen.load_state_dict(ckpt["model"])
     frozen.to(device).eval()
     for p in frozen.parameters():
         p.requires_grad_(False)
 
+    saved_config = {
+        **asdict(cfg),
+        "checkpoint": str(cfg.checkpoint),
+        "out": str(cfg.out),
+        "value_simplex": model_cfg.value_simplex,
+    }
     metrics_path = cfg.out / "metrics.jsonl"
     current = cfg.out / "current.pt"
     torch.save(
-        {"model": net.state_dict(), "encoding_version": ENCODING_VERSION, "iteration": 0},
+        {
+            "model": net.state_dict(),
+            "encoding_version": ENCODING_VERSION,
+            "iteration": 0,
+            "config": saved_config,
+        },
         current,
     )
 
     for iteration in range(1, cfg.iterations + 1):
         t0 = time.perf_counter()
         records = generate_parallel(
-            current, cfg.games_per_iteration, cfg.workers, cfg.simulations,
+            current, cfg.games_per_iteration, cfg.workers, cfg.selfplay(),
             cfg.seed + iteration,
         )
         gen_secs = time.perf_counter() - t0
@@ -202,20 +236,14 @@ def run(cfg: SelfPlayTrainConfig) -> None:
         parts = fine_tune(net, frozen, records, cfg, device)
         train_secs = time.perf_counter() - t1
 
-        torch.save(
-            {
-                "model": net.state_dict(),
-                "encoding_version": ENCODING_VERSION,
-                "iteration": iteration,
-                "config": {**asdict(cfg), "checkpoint": str(cfg.checkpoint), "out": str(cfg.out)},
-            },
-            current,
-        )
-        torch.save(
-            {"model": net.state_dict(), "encoding_version": ENCODING_VERSION,
-             "iteration": iteration},
-            cfg.out / f"iter_{iteration:02d}.pt",
-        )
+        payload = {
+            "model": net.state_dict(),
+            "encoding_version": ENCODING_VERSION,
+            "iteration": iteration,
+            "config": saved_config,
+        }
+        torch.save(payload, current)
+        torch.save(payload, cfg.out / f"iter_{iteration:02d}.pt")
         row = {
             "iteration": iteration,
             "games": cfg.games_per_iteration,
@@ -237,7 +265,11 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--iterations", type=int, default=4)
     parser.add_argument("--games-per-iteration", type=int, default=240)
     parser.add_argument("--workers", type=int, default=8)
-    parser.add_argument("--simulations", type=int, default=16)
+    parser.add_argument("--simulations", type=int, default=512)
+    parser.add_argument("--top-k", type=int, default=8)
+    parser.add_argument("--max-depth", type=int, default=48)
+    parser.add_argument("--leaf-batch", type=int, default=16)
+    parser.add_argument("--temp-decisions", type=int, default=30)
     parser.add_argument("--lambda-kl", type=float, default=1.0)
     parser.add_argument("--lr", type=float, default=5e-5)
     parser.add_argument("--seed", type=int, default=0)
@@ -250,6 +282,10 @@ def main(argv: list[str] | None = None) -> None:
             games_per_iteration=args.games_per_iteration,
             workers=args.workers,
             simulations=args.simulations,
+            top_k=args.top_k,
+            max_depth=args.max_depth,
+            leaf_batch=args.leaf_batch,
+            temp_decisions=args.temp_decisions,
             lambda_kl=args.lambda_kl,
             lr=args.lr,
             seed=args.seed,

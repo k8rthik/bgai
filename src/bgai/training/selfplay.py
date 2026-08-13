@@ -46,6 +46,7 @@ from bgai.engine.tm.setup import GameSetup
 from bgai.training.encode_move import encode_move
 from bgai.training.encode_state import encode_state
 from bgai.training.model import PolicyValueNet
+from bgai.training.vocab import FACTION_INDEX
 
 
 @dataclass(frozen=True)
@@ -63,8 +64,22 @@ class SelfPlayRecord:
 
 @dataclass(frozen=True)
 class SelfPlayConfig:
-    simulations: int = 64
+    """Search settings mirror the arena sweep's winning deep-search
+    config (top_k=8, max_depth=48; docs/decisions.md C6 and the Aug 13
+    sweep): the whole premise of self-play is distilling a searcher that
+    is *stronger* than the raw policy, and that margin was only ever
+    measured with pruning and depth extension on."""
+
+    simulations: int = 512
+    top_k: int = 8
+    max_depth: int = 48
+    leaf_batch: int = 16
     temperature: float = 1.0
+    temp_decisions: int = 30
+    """Sample moves ∝ visits for this many recorded decisions per game,
+    then switch to argmax (AlphaZero's temperature cutoff). Early
+    sampling diversifies openings; late argmax keeps the value target
+    (realised final shares) close to what best play would have produced."""
     max_decisions: int = 5000
     lambda_kl: float = 1.0
     lr: float = 1e-4
@@ -78,6 +93,7 @@ def play_game(
     sim = new_game(setup)
     records: list[SelfPlayRecord] = []
     seats = setup.factions
+    recorded = 0
     while (pending := decision(sim)) is not None:
         if sim.decisions >= cfg.max_decisions:
             break
@@ -85,9 +101,8 @@ def play_game(
         if len(offer) == 1:
             sim = advance(sim, offer[0])
             continue
-        root, _ = agent._expand(sim)
-        for _ in range(cfg.simulations):
-            agent._simulate(root)
+        root = agent.search(sim)
+        assert root is not None  # decision(sim) was non-None
         visits = root.visits.astype(np.float32)
         enc = encode_state(sim.game, faction)
         records.append(
@@ -96,16 +111,20 @@ def play_game(
                 globals=enc.globals,
                 candidates=np.stack([encode_move(m, sim.game, faction) for m in offer]),
                 visits=visits,
-                faction_id=root.seat_of[faction],
+                faction_id=FACTION_INDEX[faction],
                 seat=seats.index(faction),
             )
         )
+        recorded += 1
         total = visits.sum()
-        if total <= 0 or cfg.temperature <= 0:
+        explore = cfg.temperature > 0 and recorded <= cfg.temp_decisions
+        if total <= 0:
             choice = offer[int(np.argmax(root.priors))]
-        else:
+        elif explore:
             probs = visits / total
             choice = offer[int(rng.choices(range(len(offer)), weights=probs, k=1)[0])]
+        else:
+            choice = offer[int(np.argmax(visits))]
         sim = advance(sim, choice)
 
     vps = np.array([sim.game.factions[f].vp for f in seats], dtype=np.float32)
@@ -182,7 +201,14 @@ def generate(
     corpus-sampled, exactly as the arena does, so self-play stays on the
     distribution the agent is evaluated on."""
     cfg = cfg or SelfPlayConfig()
-    agent = MCTSAgent(checkpoint, simulations=cfg.simulations, device=device)
+    agent = MCTSAgent(
+        checkpoint,
+        simulations=cfg.simulations,
+        max_depth=cfg.max_depth,
+        top_k=cfg.top_k,
+        leaf_batch=cfg.leaf_batch,
+        device=device,
+    )
     rng = random.Random(seed)
     out: list[SelfPlayRecord] = []
     for _ in range(games):

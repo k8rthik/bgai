@@ -447,21 +447,35 @@ class MCTSAgent:
             "SimAgent when the agent exposes choose_sim."
         )
 
+    def search(self, sim: SimState) -> _Node | None:
+        """Expand the root and spend the full simulation budget on it,
+        honouring ``leaf_batch``/``top_k``/``max_depth`` as configured.
+
+        Returns the searched root (None when no decision is pending).
+        ``choose_sim`` argmaxes its visits; self-play reads the whole
+        visit distribution as a policy target.
+        """
+        root, _ = self._expand(sim)
+        if root is None:
+            return None
+        if self.leaf_batch > 1:
+            done = 0
+            while done < self.simulations:
+                step = min(self.leaf_batch, self.simulations - done)
+                self._simulate_batch(root, step)
+                done += step
+        else:
+            for _ in range(self.simulations):
+                self._simulate(root)
+        return root
+
     def choose_sim(
         self, sim: SimState, faction: str, offer: tuple[ParsedCommand, ...], rng: random.Random
     ) -> ParsedCommand:
         if len(offer) == 1:
             return offer[0]
-        root, _ = self._expand(sim)
+        root = self.search(sim)
         assert root is not None
-        if self.leaf_batch > 1:
-            done = 0
-            while done < self.simulations:
-                self._simulate_batch(root, min(self.leaf_batch, self.simulations - done))
-                done += min(self.leaf_batch, self.simulations - done)
-        else:
-            for _ in range(self.simulations):
-                self._simulate(root)
         if root.total_visits == 0:
             return offer[int(np.argmax(root.priors))]
         counts = root.visits.astype(np.float64)

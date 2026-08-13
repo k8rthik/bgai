@@ -38,6 +38,33 @@ def test_self_play_game_yields_usable_targets() -> None:
         assert np.isclose(r.final_shares.sum(), 1.0, atol=1e-5)
 
 
+def test_faction_id_is_the_faction_vocab_index() -> None:
+    """Regression: records used to store the mover-relative seat (always 0)
+    as ``faction_id``, so training conditioned every position on the same
+    faction embedding."""
+    from bgai.training.vocab import FACTION_INDEX
+
+    agent = MCTSAgent(net=_net(), simulations=2)
+    cfg = SelfPlayConfig(simulations=2)
+    setup = sample_setup(random.Random(5))
+    records = play_game(agent, setup, random.Random(5), cfg)
+    assert {r.faction_id for r in records} == {
+        FACTION_INDEX[f] for f in setup.factions
+    }
+
+
+def test_play_game_respects_the_agents_search_config() -> None:
+    """play_game must route through MCTSAgent.search so pruning/batching
+    apply; a batched agent must still produce visit targets."""
+    agent = MCTSAgent(net=_net(), simulations=4, leaf_batch=2, top_k=3, max_depth=8)
+    cfg = SelfPlayConfig(simulations=4)
+    records = play_game(agent, sample_setup(random.Random(2)), random.Random(2), cfg)
+    assert len(records) > 50
+    assert all(r.visits.sum() > 0 for r in records)
+    # top_k=3 pruning: no record spreads visits over more than 3 moves
+    assert max((r.visits > 0).sum() for r in records) <= 3
+
+
 def test_final_shares_are_mover_relative() -> None:
     """Seat 0 of a record's share vector must be that record's own mover."""
     agent = MCTSAgent(net=_net(), simulations=2)
