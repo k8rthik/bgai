@@ -50,3 +50,38 @@ def pairwise_rank_loss(predicted: torch.Tensor, target: torch.Tensor) -> torch.T
     per_row = per_pair.sum(dim=(1, 2)) / counts
     # rows that were entirely tied contribute 0, not NaN
     return per_row.mean()
+
+
+def ordering_stats(
+    predicted: torch.Tensor, target: torch.Tensor
+) -> dict[str, int]:
+    """Counts for the ordering accuracy MCTS actually consumes.
+
+    Returned as counts rather than rates so a caller can accumulate them
+    across batches and divide once. ``winner_correct`` is how often the
+    argmax seat matches; ``pairs_correct``/``pairs_total`` cover every
+    untied seat pair.
+
+    This exists because validation reported only MSE. With ``rank_weight``
+    on, MSE rises by design (the margin term widens correct gaps), so a
+    run selecting on loss alone stops while ordering is still improving
+    and saves the worse-ordering checkpoint -- exactly what the first
+    rank fine-tune did.
+    """
+    with torch.no_grad():
+        winner = int((predicted.argmax(dim=-1) == target.argmax(dim=-1)).sum())
+        pred_diff = predicted.unsqueeze(2) - predicted.unsqueeze(1)
+        true_diff = target.unsqueeze(2) - target.unsqueeze(1)
+        seats = predicted.shape[-1]
+        triu = torch.triu(
+            torch.ones(seats, seats, dtype=torch.bool, device=predicted.device),
+            diagonal=1,
+        )
+        mask = triu.unsqueeze(0) & (true_diff != 0)
+        agree = (torch.sign(pred_diff) == torch.sign(true_diff)) & mask
+        return {
+            "winner_correct": winner,
+            "pairs_correct": int(agree.sum()),
+            "pairs_total": int(mask.sum()),
+            "rows": int(predicted.shape[0]),
+        }
