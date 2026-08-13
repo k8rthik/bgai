@@ -98,6 +98,7 @@ class MCTSAgent:
         net: PolicyValueNet | None = None,
         max_depth: int = 24,
         value_blend_w: float = 0.0,
+        leaf_batch: int = 0,
     ) -> None:
         self.name = name
         self.simulations = simulations
@@ -105,6 +106,12 @@ class MCTSAgent:
         self.temperature = temperature
         self.max_depth = max_depth
         self.value_blend_w = value_blend_w
+        self.leaf_batch = leaf_batch
+        """Leaves evaluated per forward pass. 0/1 keeps the sequential
+        path exactly. Higher batches amortise the network call that
+        otherwise runs once per simulation, at the cost of virtual-loss
+        approximation: descents in the same batch cannot see each other's
+        results."""
         self.device = torch.device(device)
         if net is not None:
             self.net = net
@@ -302,6 +309,101 @@ class MCTSAgent:
             node.total_visits += 1
             node.action_value[action] += value
 
+    def _apply_virtual_loss(self, path: list[tuple[_Node, int]]) -> None:
+        """Count a visit with no value along the path being explored.
+
+        PUCT is deterministic, so without this every descent in a batch
+        follows the same optimal path to the same leaf and batching buys
+        nothing. Adding a visit but no value drops that edge's Q
+        (``action_value / visits``), so the next descent in the same batch
+        prefers a different move. Reverted before the real backup.
+        """
+        for node, action in path:
+            node.visits[action] += 1
+            node.total_visits += 1
+
+    def _revert_virtual_loss(self, path: list[tuple[_Node, int]]) -> None:
+        for node, action in path:
+            node.visits[action] -= 1
+            node.total_visits -= 1
+
+    def _descend_batch(
+        self, root: _Node, count: int
+    ) -> list[tuple[list[tuple[_Node, int]], _Node, int, SimState]]:
+        """Walk ``count`` paths to unexpanded leaves, holding virtual loss.
+
+        Paths that resolve without a network evaluation -- an engine
+        rejection, or hitting ``max_depth`` -- are backed up immediately
+        and not returned; only leaves needing a forward pass come back, so
+        the caller can evaluate them in one batch.
+        """
+        pending: list[tuple[list[tuple[_Node, int]], _Node, int, SimState]] = []
+        for _ in range(count):
+            path: list[tuple[_Node, int]] = []
+            node = root
+            depth = 0
+            while True:
+                action = self._select(node)
+                path.append((node, action))
+                self._apply_virtual_loss([(node, action)])
+                child = node.children.get(action)
+                if child is None:
+                    try:
+                        child_sim = advance(node.sim, node.offer[action])
+                    except EngineError:
+                        self._revert_virtual_loss(path)
+                        self._backup(path, np.zeros(4, dtype=np.float32))
+                        node.children[action] = None
+                        break
+                    pending.append((path, node, action, child_sim))
+                    break
+                node = child
+                depth += 1
+                if depth >= self.max_depth:
+                    _, value = self._evaluate(node.sim.game, node.faction, node.offer)
+                    self._revert_virtual_loss(path)
+                    self._backup(
+                        path, self._leaf_value(value, node.seat_of, node.faction, node.sim.game)
+                    )
+                    break
+        return pending
+
+    def _simulate_batch(self, root: _Node, count: int) -> None:
+        """One batched round: descend ``count`` paths, evaluate their
+        leaves together, then expand and back up."""
+        pending = self._descend_batch(root, count)
+        if not pending:
+            return
+        items = []
+        terminal: list[int] = []
+        for i, (_path, _parent, _action, sim) in enumerate(pending):
+            decided = decision(sim)
+            if decided is None:
+                terminal.append(i)
+            else:
+                faction, offer = decided
+                items.append((i, sim, faction, offer))
+
+        results = self._evaluate_many([(sim.game, f, o) for _i, sim, f, o in items])
+        for (i, sim, faction, offer), (priors, value_rel) in zip(items, results):
+            path, parent, action, _ = pending[i]
+            seat_of = self._seat_map(sim.game, faction)
+            node = _Node(
+                sim=sim,
+                faction=faction,
+                offer=offer,
+                priors=priors,
+                seat_of=seat_of,
+            )
+            parent.children[action] = node
+            self._revert_virtual_loss(path)
+            self._backup(path, self._leaf_value(value_rel, seat_of, faction, sim.game))
+        for i in terminal:
+            path, parent, action, sim = pending[i]
+            parent.children[action] = None
+            self._revert_virtual_loss(path)
+            self._backup(path, self._terminal_value(sim))
+
     # -- Agent protocol ---------------------------------------------------
 
     def choose(
@@ -324,8 +426,14 @@ class MCTSAgent:
             return offer[0]
         root, _ = self._expand(sim)
         assert root is not None
-        for _ in range(self.simulations):
-            self._simulate(root)
+        if self.leaf_batch > 1:
+            done = 0
+            while done < self.simulations:
+                self._simulate_batch(root, min(self.leaf_batch, self.simulations - done))
+                done += min(self.leaf_batch, self.simulations - done)
+        else:
+            for _ in range(self.simulations):
+                self._simulate(root)
         if root.total_visits == 0:
             return offer[int(np.argmax(root.priors))]
         counts = root.visits.astype(np.float64)
