@@ -80,9 +80,30 @@ class Session:
                 continue
             if self.config.opponents == "random":
                 bots[faction] = RandomAgent(name=f"random{i}")
+            elif self.config.opponents == "imitation":
+                bots[faction] = self._imitation_bot()
             else:
                 bots[faction] = GreedyAgent(name=f"greedy{i}")
         return bots
+
+    def _imitation_bot(self) -> Agent:
+        """One shared net for every bot seat, loaded once per session --
+        ``_bots`` runs on every advance, and reloading a 46MB checkpoint
+        each time would stall the interactive session it serves."""
+        cached = getattr(self, "_imitation_agent", None)
+        if cached is not None:
+            return cached
+        # Lazy import: torch must not be a hard dependency of the MCP
+        # server (mirrors bgai.agents.__init__ / arena.run).
+        from pathlib import Path as _Path
+
+        from bgai.agents.imitation import ImitationAgent
+
+        assert self.config.opponent_ckpt is not None  # validated by SessionConfig
+        self._imitation_agent = ImitationAgent(
+            checkpoint_path=_Path(self.config.opponent_ckpt), name="imitation"
+        )
+        return self._imitation_agent
 
     def current_actor(self) -> str | None:
         assert self.state is not None
