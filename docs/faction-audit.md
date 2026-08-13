@@ -53,7 +53,15 @@ nothing → the empty offer that crashed self-play iteration 5.
 same clamp. Defensive guards in MCTS/self-play (from `fafbb0c`) remain
 as backstops.
 
-### Gap 2 — Auren ACTA grants nothing in engine-driven play (OPEN)
+### Gap 2 — Auren ACTA grants nothing in engine-driven play (FIXED, `8be2cce`)
+
+Fixed as designed below — and the fix healed BON2 and FAV6 as well,
+which rode the identical no-op path. Validated by unit tests plus a
+320-game stratified corpus replay sample (319 clean; the single failure
+reproduces identically pre-fix and is an unrelated population-corpus
+edge).
+
+Original finding:
 
 The SH special action `ACTA` (+2 cult on one track) is *offered* to
 agents, and the engine accepts it, but both gain keys are replay-only
@@ -66,7 +74,15 @@ Cultists flow that already works in both replay and live play; must keep
 the 3,552-game replay validation green (companion rows must consume the
 pending, not double-grant).
 
-### Gap 3 — Cultists' all-declined bonus never fires in engine play (OPEN)
+### Gap 3 — Cultists' all-declined bonus never fires in engine play (FIXED, `8be2cce`)
+
+Fixed via a ``cultist_bonus_due`` pending pushed by the resolving
+decline (errata-gated): replay's bracket row and the live driver's
+forced-answer path consume it through the same granting handler. The
+cached-amount-vs-live-actual trigger divergence remains open (matches
+validated corpus behaviour; revisit only if replay evidence appears).
+
+Original finding:
 
 Rulebook: if every opponent refuses the power, Cultists gain exactly
 1 power (and nothing if no one *could* take). The engine implements this
