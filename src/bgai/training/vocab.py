@@ -33,6 +33,12 @@ VERBS: tuple[str, ...] = (
     "action", "advance", "bridge", "build", "burn", "connect", "convert",
     "decline", "dig", "done", "gain_cult", "gain_favor", "gain_town", "leech",
     "lose_marker", "lose_spade", "pass", "send", "transform", "upgrade", "wait",
+    # Appended 2026-08-13 (faction-audit fix 8be2cce): the Cultists
+    # all-declined bonus became a forced single-move offer in live play,
+    # so search now encodes it. APPEND-ONLY here -- earlier ids are load-
+    # bearing for every existing checkpoint and encoded dataset, and the
+    # verb-field embedding (size 32) has room without any weight change.
+    "cultist_leech_bonus",
 )
 VERB_INDEX: dict[str, int] = {v: i for i, v in enumerate(VERBS)}
 
