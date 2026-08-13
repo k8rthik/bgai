@@ -70,3 +70,14 @@ def test_verbs_cover_every_generated_candidate_verb() -> None:
         generated |= set(re.findall(r'cmd\("([a-z_]+)"', path.read_text()))
     missing = sorted(generated - set(VERB_INDEX))
     assert missing == [], missing
+
+
+def test_every_blocking_pending_answer_verb_is_encodable() -> None:
+    """Regression (leg-2 crash): any verb the driver can OFFER an agent
+    must be in VERBS -- search encodes every offer's candidates,
+    including forced single-move answers like cultist_leech_bonus."""
+    from bgai.training.encode_move import encode_move
+    from bgai.training.vocab import VERB_INDEX
+
+    for verb in ("cultist_leech_bonus", "gain_cult", "gain_favor", "gain_town", "leech"):
+        assert verb in VERB_INDEX, verb
