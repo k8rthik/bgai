@@ -78,3 +78,44 @@ def test_priors_stay_normalised_per_position(agent: MCTSAgent) -> None:
 
 def test_empty_batch_is_allowed(agent: MCTSAgent) -> None:
     assert agent._evaluate_many([]) == []
+
+
+def test_batch_of_one_matches_sequential_search(agent: MCTSAgent) -> None:
+    """Batching changes *when* leaves are evaluated, not what search does.
+    At batch=1 there is no virtual-loss divergence, so the chosen move
+    must be identical to the sequential path."""
+    import random
+
+    setup = load_setup("4pLeague_S10_D1L1_G1")
+    sim = new_game(setup)
+    faction, offer = decision(sim)
+
+    agent.leaf_batch = 1
+    a = agent.choose_sim(sim, faction, offer, random.Random(0))
+    agent.leaf_batch = 0  # sequential
+    b = agent.choose_sim(sim, faction, offer, random.Random(0))
+    assert a == b
+
+
+def test_virtual_loss_makes_concurrent_descents_diverge(agent: MCTSAgent) -> None:
+    """Without it, every descent follows the same PUCT-optimal path to the
+    same leaf and batching buys nothing."""
+    setup = load_setup("4pLeague_S10_D1L1_G1")
+    sim = new_game(setup)
+    faction, offer = decision(sim)
+    root, _ = agent._expand(sim)
+
+    pending = agent._descend_batch(root, 6)
+    actions = [action for _path, _node, action, _sim in pending]
+    assert len(set(actions)) > 1, "virtual loss must spread descents across moves"
+
+
+def test_batched_search_returns_a_legal_move(agent: MCTSAgent) -> None:
+    import random
+
+    setup = load_setup("4pLeague_S10_D1L1_G1")
+    sim = new_game(setup)
+    faction, offer = decision(sim)
+    agent.leaf_batch = 8
+    move = agent.choose_sim(sim, faction, offer, random.Random(1))
+    assert move in offer
