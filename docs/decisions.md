@@ -638,3 +638,42 @@ alone. Both diagnostics show cells where MCTS accumulates materially
 more VP while placing no better (256 sims: +1.8 VP, worse rank), which
 is the same "develops well, converts it badly" signature the per-verb
 accuracy gaps show. Placement is the objective; VP is the earlier signal.
+
+**C7 — Search finally has its edge: pruned, deepened, batched MCTS beats
+its own policy 35.8% to 15.0% (2026-08-13).** The composition C6 asked
+for was run — but the winning combination was not blending, it was
+spending the budget deeper via **prior pruning**: `top_k=8` (policy
+top3 is 84%, so the right move is almost always in the set),
+`max_depth=48`, batched leaf evaluation with virtual loss, 512
+simulations, on the pop_simplex net (rank loss + simplex value head,
+trained on the broad-population value split). Head-to-head vs the raw
+policy: 35.8% vs 15.0% win rate, 106.4 vs 96.6 VP, mean place 1.15 vs
+1.81 (n=120, 0 errors; `data/h2h_depth.log`). Rank and VP move
+*together* this time — the "develops well, converts badly" signature is
+gone. Against the human distribution the agent stands at the 22.4th
+percentile (from 12.9th).
+
+*The one-variable sweep around that config* (96 games, 4-seat, all four
+agents at 512/k8/d48 unless varied): more_sims=1024 won at 34.4%
+vs base 25.0%, while deeper (d96, 21.9%) and narrow (k4, 21.9%) both
+*lost* ground (`data/sweep_deep.log`). At n=96 the 1024 result is ~2σ —
+directional, not settled — but the shape is consistent: k8/d48 is a
+sweet spot, and additional budget should buy *simulations*, not depth
+or narrowness.
+
+**D6.10 — Self-play generation must search exactly like the arena does
+(2026-08-13).** D6.8's failure was distilling a teacher with no edge;
+C7 supplies the edge, so self-play is re-armed — but `selfplay.py`
+predated pruning/batching and looped over `_simulate` directly, i.e. it
+would have generated with precisely the shallow searcher D6.8 proved
+worthless. `MCTSAgent.search()` is now the single entry point for
+spending a simulation budget (arena `choose_sim` and self-play
+`play_game` both call it), and `SelfPlayConfig` carries the C7 search
+knobs. Two latent bugs fixed on the way: records stored the
+mover-relative seat (always 0) as `faction_id`, so fine-tuning would
+have conditioned every position on one faction embedding; and the
+trainer rebuilt nets with a default `ModelConfig()`, which loads
+simplex-trained weights into an unconstrained value head without error.
+An AlphaZero-style temperature cutoff (`temp_decisions=30`) samples
+openings ∝ visits and argmaxes after, so late-game value targets track
+best play.
