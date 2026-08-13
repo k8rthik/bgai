@@ -26,6 +26,7 @@ from torch.utils.data import DataLoader
 
 from bgai.training.dataset import ImitationDataset, collate
 from bgai.training.model import ModelConfig, PolicyValueNet
+from bgai.training.rank_loss import pairwise_rank_loss
 from bgai.training.sampler import ShardBlockSampler
 from bgai.training.vocab import ENCODING_VERSION
 
@@ -58,6 +59,12 @@ class TrainConfig:
     """Permit writing into a non-empty output directory. Off by default:
     metrics.jsonl appends and checkpoints overwrite, so reusing a directory
     silently mixes runs and destroys the previous one's weights."""
+    rank_weight: float = 0.0
+    """Weight on the pairwise ranking term over the value vector. MSE
+    optimises the share's magnitude; MCTS only uses the ordering, and the
+    two diverge (share-MSE 0.00065 with 30% of pairs ordered backwards).
+    Reported val loss deliberately excludes this term so it stays
+    comparable across runs with different rank weights."""
 
 
 def pick_device(requested: str = "auto") -> torch.device:
@@ -75,13 +82,22 @@ def _to_device(batch: dict[str, torch.Tensor], device: torch.device) -> dict[str
 
 
 def _losses(
-    net: PolicyValueNet, batch: dict[str, torch.Tensor], value_weight: float
+    net: PolicyValueNet,
+    batch: dict[str, torch.Tensor],
+    value_weight: float,
+    rank_weight: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Returns ``(total, policy, value, logits)``.
 
     The value term is reported separately because the population corpus was
     gathered specifically to fix the value head's coverage (C5) -- a
     combined loss cannot answer whether that worked.
+
+    ``rank_weight`` adds a pairwise ranking term over the seat vector.
+    MSE on VP share optimises magnitude, but MCTS only uses the value to
+    order positions, and the two come apart: share-MSE 0.00065 coexists
+    with 30% of seat pairs ordered backwards. Default 0.0 keeps existing
+    runs bit-identical.
     """
     logits, value = net(
         batch["hex_planes"],
@@ -94,7 +110,10 @@ def _losses(
     weights = batch["weight"]
     policy_loss = (per_sample * weights).sum() / weights.sum().clamp(min=1e-6)
     value_loss = torch.nn.functional.mse_loss(value, batch["value"])
-    return policy_loss + value_weight * value_loss, policy_loss, value_loss, logits
+    total = policy_loss + value_weight * value_loss
+    if rank_weight:
+        total = total + rank_weight * pairwise_rank_loss(value, batch["value"])
+    return total, policy_loss, value_loss, logits
 
 
 def _topk_correct(logits: torch.Tensor, chosen: torch.Tensor, k: int) -> int:
@@ -224,7 +243,9 @@ def train(cfg: TrainConfig) -> dict[str, float]:
         t0 = time.perf_counter()
         for batch in train_loader:
             batch = _to_device(batch, device)
-            loss, policy_loss, value_loss, logits = _losses(net, batch, cfg.value_weight)
+            loss, policy_loss, value_loss, logits = _losses(
+                net, batch, cfg.value_weight, cfg.rank_weight
+            )
             opt.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(net.parameters(), 5.0)
@@ -285,6 +306,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--resume", type=Path, default=None)
     parser.add_argument("--allow-dirty-out", action="store_true")
+    parser.add_argument("--rank-weight", type=float, default=0.0)
     args = parser.parse_args(argv)
     train(
         TrainConfig(
@@ -302,6 +324,7 @@ def main(argv: list[str] | None = None) -> None:
             num_workers=args.num_workers,
             resume=args.resume,
             allow_dirty_out=args.allow_dirty_out,
+            rank_weight=args.rank_weight,
         )
     )
 
