@@ -79,3 +79,39 @@ def test_income_is_granted_exactly_once_per_round() -> None:
         _, offer = pending
         sim = advance(sim, offer[rng.randrange(len(offer))])
     assert seen_rounds == [1, 2, 3, 4, 5, 6]
+
+
+def test_pass_with_banked_extra_actions_does_not_strand_the_faction() -> None:
+    """Regression for the selfplay_deep iter-5 empty-offer crash: a
+    faction that passes while holding ACTC extra actions must lose the
+    ticket with the pass (live_driver has clamped this since task 14).
+    Without the clamp, round_flow._advance_actions keeps the *passed*
+    faction active -- its extra-action branch checks neither ``passed``
+    nor ``dropped`` -- and the offer degenerates to conversions or
+    nothing, violating decision()'s never-empty contract."""
+    from dataclasses import replace
+
+    from bgai.engine.tm.state import with_faction
+
+    sim = new_game(_setup())
+    while (pending := decision(sim)) is not None and sim.game.phase != Phase.ACTIONS:
+        sim = advance(sim, pending[1][0])
+    assert sim.game.phase == Phase.ACTIONS
+    faction, offer = decision(sim)
+
+    # synthesize the ACTC state: the active faction banks two extra
+    # actions (no need for a real Chaos Magician stronghold -- the
+    # driver-level bug is faction-agnostic), then passes
+    game = with_faction(
+        sim.game, faction, replace(sim.game.factions[faction], extra_actions=2)
+    )
+    sim = replace(sim, game=game)
+    pass_move = next(m for m in offer if m.verb == "pass")
+    after = advance(sim, pass_move)
+
+    assert after.game.factions[faction].extra_actions == 0, "ticket must die with the pass"
+    nxt = decision(after)
+    assert nxt is not None
+    next_faction, next_offer = nxt
+    assert next_offer, "decision() must never return an empty offer"
+    assert next_faction != faction, "a passed faction must not stay active"
