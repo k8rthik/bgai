@@ -26,7 +26,7 @@ from torch.utils.data import DataLoader
 
 from bgai.training.dataset import ImitationDataset, collate
 from bgai.training.model import ModelConfig, PolicyValueNet
-from bgai.training.rank_loss import pairwise_rank_loss
+from bgai.training.rank_loss import ordering_stats, pairwise_rank_loss
 from bgai.training.sampler import ShardBlockSampler
 from bgai.training.vocab import ENCODING_VERSION
 
@@ -128,6 +128,7 @@ def evaluate(
     net.eval()
     n = top1 = top3 = 0
     loss_sum = policy_sum = value_sum = 0.0
+    winner = pairs_ok = pairs_tot = 0
     for batch in loader:
         batch = _to_device(batch, device)
         loss, policy_loss, value_loss, logits = _losses(net, batch, value_weight)
@@ -138,16 +139,31 @@ def evaluate(
         value_sum += value_loss.item() * bs
         top1 += _topk_correct(logits, batch["chosen"], 1)
         top3 += _topk_correct(logits, batch["chosen"], 3)
+        # ordering is what MCTS consumes; MSE alone cannot see it, and
+        # rises by design once rank_weight is on
+        _, value = net(
+            batch["hex_planes"], batch["globals"], batch["faction"],
+            batch["candidates"], batch["cand_mask"],
+        )
+        stats = ordering_stats(value, batch["value"])
+        winner += stats["winner_correct"]
+        pairs_ok += stats["pairs_correct"]
+        pairs_tot += stats["pairs_total"]
     net.train()
     if n == 0:
         nan = float("nan")
-        return {"loss": nan, "policy": nan, "value": nan, "top1": nan, "top3": nan, "n": 0}
+        return {
+            "loss": nan, "policy": nan, "value": nan, "top1": nan, "top3": nan,
+            "winner_top1": nan, "pairwise": nan, "n": 0,
+        }
     return {
         "loss": loss_sum / n,
         "policy": policy_sum / n,
         "value": value_sum / n,
         "top1": top1 / n,
         "top3": top3 / n,
+        "winner_top1": winner / n,
+        "pairwise": pairs_ok / max(pairs_tot, 1),
         "n": n,
     }
 
@@ -209,8 +225,16 @@ def train(cfg: TrainConfig) -> dict[str, float]:
     )
 
     last: dict[str, float] = {}
-    best_loss = float("inf")
+    best_score = float("inf")
     stale = 0
+
+    def selection_score(val: dict[str, float]) -> float:
+        """Lower is better. With rank_weight on, val loss rises by design
+        (the margin term widens correct gaps and so inflates value MSE),
+        so selecting and stopping on it halts a run while the thing it
+        optimises -- seat ordering -- is still improving. Select on
+        ordering in that case."""
+        return -val["pairwise"] if cfg.rank_weight else val["loss"]
 
     def checkpoint(val: dict[str, float], epoch: int, t0: float) -> dict[str, float]:
         """Validate-log-save. Returns the metrics row just written.
@@ -233,7 +257,7 @@ def train(cfg: TrainConfig) -> dict[str, float]:
             "val": val,
         }
         torch.save(blob, cfg.out / "last.pt")
-        if val["loss"] < best_loss:
+        if selection_score(val) < best_score:
             torch.save(blob, cfg.out / "best.pt")
         return row
 
@@ -262,14 +286,15 @@ def train(cfg: TrainConfig) -> dict[str, float]:
             if cfg.val_every_steps and step % cfg.val_every_steps == 0:
                 last = checkpoint(evaluate(net, val_loader, device, cfg.value_weight), epoch, t0)
                 t0 = time.perf_counter()
-                if last["loss"] < best_loss - 1e-4:
-                    best_loss, stale = last["loss"], 0
+                if selection_score(last) < best_score - 1e-4:
+                    best_score, stale = selection_score(last), 0
                 else:
                     stale += 1
                     if cfg.early_stop_patience and stale >= cfg.early_stop_patience:
                         print(
                             f"early stop: {stale} validations without improvement "
-                            f"(best val loss {best_loss:.4f})",
+                            f"(best score {best_score:.4f}, "
+                            f"{'pairwise' if cfg.rank_weight else 'loss'})",
                             flush=True,
                         )
                         stop = True

@@ -65,3 +65,19 @@ def test_batches_average_independently() -> None:
     first = pairwise_rank_loss(pred[:1], target[:1])
     second = pairwise_rank_loss(pred[1:], target[1:])
     assert torch.allclose(both, (first + second) / 2, atol=1e-5)
+
+
+def test_value_ordering_metrics() -> None:
+    """evaluate() must report ordering, not just MSE. With rank_weight on,
+    MSE rises by design -- so a run that selects on loss alone stops early
+    and saves the worse-ordering checkpoint, which is what happened on the
+    first rank fine-tune."""
+    from bgai.training.rank_loss import ordering_stats
+
+    pred = torch.tensor([[4.0, 3.0, 2.0, 1.0], [1.0, 2.0, 3.0, 4.0]])
+    target = torch.tensor([[0.4, 0.3, 0.2, 0.1], [0.4, 0.3, 0.2, 0.1]])
+    stats = ordering_stats(pred, target)
+    assert stats["winner_correct"] == 1  # first row only
+    assert stats["pairs_total"] == 12    # 6 unordered pairs per row
+    assert stats["pairs_correct"] == 6   # first row all right, second all wrong
+    assert stats["rows"] == 2
