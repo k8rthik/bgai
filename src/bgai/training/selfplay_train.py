@@ -245,6 +245,12 @@ def run(cfg: SelfPlayTrainConfig) -> None:
         if len(records) < cfg.batch_size:
             raise RuntimeError(f"iteration {iteration} produced only {len(records)} records")
 
+        # Persist the generation before training on it: generation costs
+        # ~26 min/iteration, training ~10 s, so cached records make every
+        # training-side hyperparameter (rank_weight, lambda_kl, lr,
+        # epochs) sweepable offline without regenerating a single game.
+        torch.save(records, cfg.out / f"records_{iteration:02d}.pt")
+
         t1 = time.perf_counter()
         parts = fine_tune(net, frozen, records, cfg, device)
         train_secs = time.perf_counter() - t1
