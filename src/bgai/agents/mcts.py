@@ -30,7 +30,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from bgai.agents.leaf_eval import blend
+from bgai.agents.leaf_eval import blend, computed_value
 from bgai.arena.driver import SimState, advance, decision
 from bgai.data.ledger_parser import ParsedCommand
 from bgai.engine.tm.apply import EngineError
@@ -218,6 +218,13 @@ class MCTSAgent:
         if pending is None:
             return None, self._terminal_value(sim)
         faction, offer = pending
+        if not offer:
+            # Engine edge (selfplay_deep iter-5 crash): a pending decision
+            # with zero legal moves -- seen in rare search lines, suspected
+            # ACTC double-turn corner. The position can't be searched or
+            # net-evaluated (no candidates), so value it with the engine's
+            # own VP projection and stop descending.
+            return None, computed_value(sim.game)
         priors, value = self._evaluate(sim.game, faction, offer)
         node = _Node(
             sim=sim,
@@ -404,10 +411,14 @@ class MCTSAgent:
             return
         items = []
         terminal: list[int] = []
+        stuck: list[int] = []
         for i, (_path, _parent, _action, sim) in enumerate(pending):
             decided = decision(sim)
             if decided is None:
                 terminal.append(i)
+            elif not decided[1]:
+                # zero-move decision: same engine edge _expand guards
+                stuck.append(i)
             else:
                 faction, offer = decided
                 items.append((i, sim, faction, offer))
@@ -431,6 +442,11 @@ class MCTSAgent:
             parent.children[action] = None
             self._revert_virtual_loss(path)
             self._backup(path, self._terminal_value(sim))
+        for i in stuck:
+            path, parent, action, sim = pending[i]
+            parent.children[action] = None
+            self._revert_virtual_loss(path)
+            self._backup(path, computed_value(sim.game))
 
     # -- Agent protocol ---------------------------------------------------
 

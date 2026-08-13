@@ -98,11 +98,22 @@ def play_game(
         if sim.decisions >= cfg.max_decisions:
             break
         faction, offer = pending
+        if not offer:
+            # Engine edge: a pending decision with zero legal moves (the
+            # iter-5 crash; suspected ACTC double-turn corner). The game
+            # cannot proceed, and a truncated game would put wrong
+            # final-share labels on every record -- drop it loudly.
+            print(
+                f"WARN: dropping self-play game {setup.game_id}: "
+                f"zero-move decision for {faction} at decision {sim.decisions}",
+                flush=True,
+            )
+            return []
         if len(offer) == 1:
             sim = advance(sim, offer[0])
             continue
         root = agent.search(sim)
-        assert root is not None  # decision(sim) was non-None
+        assert root is not None  # decision(sim) was non-None with a real offer
         visits = root.visits.astype(np.float32)
         enc = encode_state(sim.game, faction)
         records.append(

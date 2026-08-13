@@ -53,6 +53,12 @@ from bgai.training.vocab import ENCODING_VERSION
 class SelfPlayTrainConfig:
     checkpoint: Path
     out: Path
+    anchor: Path | None = None
+    """Checkpoint for the frozen KL anchor. Defaults to ``checkpoint``,
+    which is correct for a fresh run; a RESTART from a mid-run
+    ``current.pt`` must pass the original human-imitation checkpoint
+    here, or the piKL leash silently re-anchors to the drifted policy
+    it exists to restrain."""
     iterations: int = 4
     games_per_iteration: int = 240
     workers: int = 8
@@ -198,8 +204,13 @@ def run(cfg: SelfPlayTrainConfig) -> None:
     net = PolicyValueNet(model_cfg)
     net.load_state_dict(ckpt["model"])
     net.to(device)
-    frozen = PolicyValueNet(model_cfg)
-    frozen.load_state_dict(ckpt["model"])
+    anchor_ckpt = ckpt
+    if cfg.anchor is not None:
+        anchor_ckpt = torch.load(cfg.anchor, map_location=device, weights_only=False)
+        if anchor_ckpt.get("encoding_version") != ENCODING_VERSION:
+            raise ValueError("anchor checkpoint encoding version mismatch")
+    frozen = PolicyValueNet(model_config_from_checkpoint(anchor_ckpt))
+    frozen.load_state_dict(anchor_ckpt["model"])
     frozen.to(device).eval()
     for p in frozen.parameters():
         p.requires_grad_(False)
@@ -261,6 +272,9 @@ def run(cfg: SelfPlayTrainConfig) -> None:
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Human-regularized self-play training.")
     parser.add_argument("--checkpoint", type=Path, required=True)
+    parser.add_argument("--anchor", type=Path, default=None,
+                        help="frozen KL anchor (defaults to --checkpoint; a restart "
+                        "from current.pt must pass the original imitation ckpt)")
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--iterations", type=int, default=4)
     parser.add_argument("--games-per-iteration", type=int, default=240)
@@ -277,6 +291,7 @@ def main(argv: list[str] | None = None) -> None:
     run(
         SelfPlayTrainConfig(
             checkpoint=args.checkpoint,
+            anchor=args.anchor,
             out=args.out,
             iterations=args.iterations,
             games_per_iteration=args.games_per_iteration,

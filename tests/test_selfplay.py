@@ -170,3 +170,36 @@ def test_losses_are_finite_with_padded_candidates() -> None:
     loss.backward()
     grads = [p.grad for p in net.parameters() if p.grad is not None]
     assert grads and all(torch.isfinite(g).all() for g in grads)
+
+
+def test_zero_move_decision_drops_the_game(monkeypatch) -> None:
+    """Regression for the selfplay_deep iter-5 crash: a pending decision
+    with an empty offer must drop the game loudly, not crash the worker
+    or record truncated-outcome labels."""
+    import bgai.training.selfplay as sp
+
+    agent = MCTSAgent(net=_net(), simulations=2)
+    cfg = SelfPlayConfig(simulations=2)
+    monkeypatch.setattr(sp, "decision", lambda sim: ("witches", ()))
+    records = play_game(agent, sample_setup(random.Random(1)), random.Random(1), cfg)
+    assert records == []
+
+
+def test_search_values_a_stuck_leaf_instead_of_crashing(monkeypatch) -> None:
+    """MCTSAgent._expand on a zero-move decision returns the engine
+    projection as the leaf value (both sequential and batched paths route
+    through it or the batch-stage guard)."""
+    import bgai.agents.mcts as mcts_mod
+    from bgai.arena.driver import new_game
+    from bgai.arena.setups import sample_setup as _ss
+
+    agent = MCTSAgent(net=_net(), simulations=2)
+    sim = new_game(_ss(random.Random(1)))
+    real_decision = mcts_mod.decision(sim)
+    assert real_decision is not None
+    faction = real_decision[0]
+    monkeypatch.setattr(mcts_mod, "decision", lambda s: (faction, ()))
+    node, value = agent._expand(sim)
+    assert node is None
+    assert value is not None and value.shape == (4,)
+    assert np.isclose(value.sum(), 1.0, atol=1e-5)  # projection is a share vector
