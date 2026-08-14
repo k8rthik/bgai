@@ -118,6 +118,16 @@ class MCTSAgent:
         """Consider only this many highest-prior moves per node (0 = all).
         Branching is 23 on average, so an unpruned tree at 512 sims is
         about two levels deep; pruning spends the budget deeper instead."""
+        self._reuse_root: _Node | None = None
+        """Tree reuse (opt-in via note_advance): the subtree under the
+        played move carries its visits into the next decision instead of
+        being discarded, and ``search`` tops the budget up to
+        ``simulations`` total root visits. Only a driver that reports
+        EVERY advance (self-play's play_game) can use this -- an arena
+        agent sees only its own seats' decisions, so unreported opponent
+        moves would silently desynchronize the tree. The (game_id,
+        decisions, faction, offer) match in ``search`` is the safety net:
+        any mismatch falls back to a fresh expansion."""
         self.device = torch.device(device)
         if net is not None:
             self.net = net
@@ -463,26 +473,70 @@ class MCTSAgent:
             "SimAgent when the agent exposes choose_sim."
         )
 
+    def reset_tree(self) -> None:
+        """Drop any retained subtree (call at game boundaries)."""
+        self._reuse_root = None
+
+    def note_advance(self, choice: ParsedCommand) -> None:
+        """Walk the retained tree down the edge actually played.
+
+        Call once per driver ``advance`` -- searched decisions and forced
+        single-move steps alike. A missing/unexpanded child (or no
+        retained tree) resets reuse; the next ``search`` starts fresh.
+        """
+        root = self._reuse_root
+        self._reuse_root = None
+        if root is None:
+            return
+        try:
+            index = root.offer.index(choice)
+        except ValueError:
+            return
+        child = root.children.get(index)
+        if isinstance(child, _Node):
+            self._reuse_root = child
+
+    def _reusable(self, sim: SimState) -> _Node | None:
+        node = self._reuse_root
+        if node is None:
+            return None
+        if node.sim.decisions != sim.decisions:
+            return None
+        if node.sim.game.setup.game_id != sim.game.setup.game_id:
+            return None
+        pending = decision(sim)
+        if pending is None or pending[0] != node.faction or pending[1] != node.offer:
+            return None
+        return node
+
     def search(self, sim: SimState) -> _Node | None:
-        """Expand the root and spend the full simulation budget on it,
+        """Expand the root and spend the simulation budget on it,
         honouring ``leaf_batch``/``top_k``/``max_depth`` as configured.
+
+        With a retained subtree matching ``sim`` (see ``note_advance``),
+        its visits carry over and the budget tops up to ``simulations``
+        total root visits -- same strength target, fewer fresh descents.
 
         Returns the searched root (None when no decision is pending).
         ``choose_sim`` argmaxes its visits; self-play reads the whole
         visit distribution as a policy target.
         """
-        root, _ = self._expand(sim)
+        root = self._reusable(sim)
+        if root is None:
+            root, _ = self._expand(sim)
         if root is None:
             return None
+        remaining = max(0, self.simulations - root.total_visits)
         if self.leaf_batch > 1:
             done = 0
-            while done < self.simulations:
-                step = min(self.leaf_batch, self.simulations - done)
+            while done < remaining:
+                step = min(self.leaf_batch, remaining - done)
                 self._simulate_batch(root, step)
                 done += step
         else:
-            for _ in range(self.simulations):
+            for _ in range(remaining):
                 self._simulate(root)
+        self._reuse_root = root
         return root
 
     def choose_sim(
