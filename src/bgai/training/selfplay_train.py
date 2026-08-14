@@ -67,6 +67,7 @@ class SelfPlayTrainConfig:
     max_depth: int = 48
     leaf_batch: int = 16
     temp_decisions: int = 30
+    fast_prior: float = 0.95
     lambda_kl: float = 1.0
     rank_weight: float = 1.0
     winner_pair_weight: float = 3.0
@@ -83,6 +84,7 @@ class SelfPlayTrainConfig:
             max_depth=self.max_depth,
             leaf_batch=self.leaf_batch,
             temp_decisions=self.temp_decisions,
+            fast_prior=self.fast_prior,
             lambda_kl=self.lambda_kl,
             rank_weight=self.rank_weight,
             winner_pair_weight=self.winner_pair_weight,
@@ -299,6 +301,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--max-depth", type=int, default=48)
     parser.add_argument("--leaf-batch", type=int, default=16)
     parser.add_argument("--temp-decisions", type=int, default=30)
+    parser.add_argument("--fast-prior", type=float, default=0.95,
+                        help="skip search when the policy is at least this sure (1.0 disables)")
     parser.add_argument("--lambda-kl", type=float, default=1.0)
     parser.add_argument("--rank-weight", type=float, default=1.0)
     parser.add_argument("--winner-pair-weight", type=float, default=3.0)
@@ -319,6 +323,7 @@ def main(argv: list[str] | None = None) -> None:
             max_depth=args.max_depth,
             leaf_batch=args.leaf_batch,
             temp_decisions=args.temp_decisions,
+            fast_prior=args.fast_prior,
             lambda_kl=args.lambda_kl,
             rank_weight=args.rank_weight,
             winner_pair_weight=args.winner_pair_weight,

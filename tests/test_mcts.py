@@ -122,3 +122,82 @@ def test_value_blend_w_half_moves_the_leaf_value_toward_the_engine_projection() 
     _, mixed = half._expand(sim)
     expected = 0.5 * learned + 0.5 * computed_value(sim.game)
     np.testing.assert_allclose(mixed, expected, rtol=1e-5)
+
+
+# --------------------------------------------------------------------------
+# Tree reuse between moves (leg-4 speedup)
+# --------------------------------------------------------------------------
+
+
+def _reuse_agent():
+    import torch
+
+    from bgai.training.model import ModelConfig, PolicyValueNet
+
+    torch.manual_seed(0)
+    net = PolicyValueNet(ModelConfig(hidden=64, embed=32, move_hidden=32, dropout=0.0))
+    return MCTSAgent(net=net, simulations=24, leaf_batch=4, top_k=4, max_depth=8)
+
+
+def test_note_advance_reuses_the_played_subtree() -> None:
+    import random as _random
+
+    from bgai.arena.driver import advance, new_game
+    from bgai.arena.setups import sample_setup
+
+    agent = _reuse_agent()
+    sim = new_game(sample_setup(_random.Random(4)))
+    # walk to the first multi-move decision
+    while True:
+        pending = decision(sim)
+        assert pending is not None
+        _f, offer = pending
+        if len(offer) > 1:
+            break
+        sim = advance(sim, offer[0])
+
+    root = agent.search(sim)
+    assert root is not None and root.total_visits >= 24
+    # pick an action whose child was actually expanded during search
+    expanded = next(
+        (i for i, c in root.children.items() if c is not None), None
+    )
+    assert expanded is not None, "24 sims must expand at least one child"
+    choice = root.offer[expanded]
+    child = root.children[expanded]
+
+    agent.note_advance(choice)
+    sim2 = advance(sim, choice)
+    root2 = agent.search(sim2)
+    assert root2 is not None
+    if agent._reusable(sim2) is None and root2 is not child:
+        # the driver may have auto-settled through forced steps past the
+        # child; reuse legitimately resets then. Only assert when the
+        # child state IS the next decision point.
+        assert child.sim.decisions != sim2.decisions
+    else:
+        assert root2 is child, "matching subtree must be reused, not rebuilt"
+        assert root2.total_visits >= 24, "budget tops up to the full target"
+
+
+def test_search_never_reuses_across_games() -> None:
+    import random as _random
+
+    from bgai.arena.driver import new_game
+    from bgai.arena.setups import sample_setup
+
+    agent = _reuse_agent()
+    sim_a = new_game(sample_setup(_random.Random(4)))
+    from bgai.arena.driver import advance as _adv
+
+    while True:
+        pending = decision(sim_a)
+        assert pending is not None
+        if len(pending[1]) > 1:
+            break
+        sim_a = _adv(sim_a, pending[1][0])
+    root_a = agent.search(sim_a)
+    assert root_a is not None
+
+    agent.reset_tree()
+    assert agent._reuse_root is None

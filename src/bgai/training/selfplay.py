@@ -82,6 +82,13 @@ class SelfPlayConfig:
     sampling diversifies openings; late argmax keeps the value target
     (realised final shares) close to what best play would have produced."""
     max_decisions: int = 5000
+    fast_prior: float = 0.95
+    """Play a move WITHOUT search when the raw policy already puts at
+    least this much probability on it (1.0 disables). Costs one forward
+    pass instead of a full simulation budget; many of TM's ~200
+    decisions per game are near-forced bookkeeping whose visit targets
+    carry no training signal anyway. No record is written for fast
+    moves -- a target that just echoes a 0.95 prior teaches nothing."""
     lambda_kl: float = 1.0
     rank_weight: float = 1.0
     """Weight on the pairwise ranking term over the value head. Not
@@ -111,6 +118,7 @@ def play_game(
     """One self-play game; returns every decision with its search
     distribution and the game's realised final VP shares."""
     sim = new_game(setup)
+    agent.reset_tree()  # games are independent; never reuse across them
     records: list[SelfPlayRecord] = []
     seats = setup.factions
     recorded = 0
@@ -130,8 +138,17 @@ def play_game(
             )
             return []
         if len(offer) == 1:
+            agent.note_advance(offer[0])
             sim = advance(sim, offer[0])
             continue
+        if cfg.fast_prior < 1.0:
+            priors, _ = agent._evaluate(sim.game, faction, offer)
+            top = int(np.argmax(priors))
+            if float(priors[top]) >= cfg.fast_prior:
+                choice = offer[top]
+                agent.note_advance(choice)
+                sim = advance(sim, choice)
+                continue
         root = agent.search(sim)
         assert root is not None  # decision(sim) was non-None with a real offer
         visits = root.visits.astype(np.float32)
@@ -156,6 +173,7 @@ def play_game(
             choice = offer[int(rng.choices(range(len(offer)), weights=probs, k=1)[0])]
         else:
             choice = offer[int(np.argmax(visits))]
+        agent.note_advance(choice)
         sim = advance(sim, choice)
 
     vps = np.array([sim.game.factions[f].vp for f in seats], dtype=np.float32)
