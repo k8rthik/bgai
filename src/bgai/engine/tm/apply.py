@@ -43,6 +43,26 @@ class EngineError(Exception):
         self.faction = faction
         self.cmd = cmd
 
+    def __reduce__(self):
+        # Default exception pickling re-calls __init__ with args alone,
+        # which this keyword-only signature rejects -- and a worker
+        # exception that cannot UNPICKLE kills the parent pool's results
+        # thread with an unrelated TypeError (2026-08-14 self-play crash).
+        # The formatted message already carries the context; the state is
+        # deliberately dropped rather than shipped across the process
+        # boundary.
+        return (_engine_error_from_message, (str(self),))
+
+
+def _engine_error_from_message(message: str) -> "EngineError":
+    err = EngineError.__new__(EngineError)
+    Exception.__init__(err, message)
+    err.game_round = None
+    err.phase = None
+    err.faction = None
+    err.cmd = None
+    return err
+
 
 Handler = Callable[[GameState, str, ParsedCommand], GameState]
 
