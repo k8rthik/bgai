@@ -10,6 +10,7 @@ Phase 5 training distribution.
 
 from __future__ import annotations
 
+import json
 import random
 from dataclasses import replace
 from functools import lru_cache
@@ -21,6 +22,13 @@ from bgai.engine.tm.setup import GameSetup, load_setup
 
 _DEFAULT_RAW_DIR = Path("data/raw/games")
 _DEFAULT_MOVES = Path("data/datasets/moves.parquet")
+_CLEAN_IDS_CACHE = Path("data/datasets/clean_setup_ids.json")
+
+
+def _moves_stamp(moves_path: Path = _DEFAULT_MOVES) -> list[int]:
+    """Identity of the parsed corpus the cleaned-id list derives from."""
+    st = moves_path.stat()
+    return [int(st.st_mtime), st.st_size]
 
 
 @lru_cache(maxsize=1)
@@ -46,6 +54,21 @@ def clean_game_ids(raw_dir: Path = _DEFAULT_RAW_DIR) -> tuple[str, ...]:
     games) are the two exclusion classes; games present on disk but not
     yet in ``moves.parquet`` are a third (see ``parsed_corpus_ids``).
     """
+    # Disk cache (default corpus only): the cleaned list is a pure
+    # function of the parsed corpus, but computing it gzip+JSON-decodes
+    # all ~76k raw games (~4 min) -- and every fresh self-play worker in
+    # every iteration's Pool paid that, ~30% of generation wall time
+    # (2026-08-14 profile). Stamped against moves.parquet, the corpus
+    # definition, so a recompact invalidates it.
+    use_disk = raw_dir == _DEFAULT_RAW_DIR and _DEFAULT_MOVES.exists()
+    if use_disk and _CLEAN_IDS_CACHE.exists():
+        try:
+            data = json.loads(_CLEAN_IDS_CACHE.read_text())
+            if data.get("stamp") == _moves_stamp():
+                return tuple(data["ids"])
+        except (ValueError, OSError):
+            pass  # unreadable cache -> recompute below
+
     parsed = parsed_corpus_ids()
     ids: list[str] = []
     for path in sorted(raw_dir.glob("*.json.gz")):
@@ -59,6 +82,9 @@ def clean_game_ids(raw_dir: Path = _DEFAULT_RAW_DIR) -> tuple[str, ...]:
         if setup.dropped_at_row:
             continue
         ids.append(game_id)
+
+    if use_disk:
+        _CLEAN_IDS_CACHE.write_text(json.dumps({"stamp": _moves_stamp(), "ids": ids}))
     return tuple(ids)
 
 
