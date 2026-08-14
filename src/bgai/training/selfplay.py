@@ -41,6 +41,7 @@ import torch.nn.functional as F
 
 from bgai.agents.mcts import MCTSAgent
 from bgai.arena.driver import advance, decision, new_game
+from bgai.engine.tm.apply import EngineError
 from bgai.arena.setups import sample_setup
 from bgai.engine.tm.setup import GameSetup
 from bgai.training.encode_move import encode_move
@@ -122,6 +123,30 @@ def play_game(
     records: list[SelfPlayRecord] = []
     seats = setup.factions
     recorded = 0
+    try:
+        return _play_game_inner(agent, setup, rng, cfg, sim, records, seats, recorded)
+    except EngineError as exc:
+        # The arena treats engine rejections as recorded, non-fatal fuzz
+        # findings (sim.run_game); self-play must not be stricter -- one
+        # rare rejection previously killed the whole worker pool. The
+        # partial game's records carry no final shares, so drop them.
+        print(
+            f"WARN: dropping self-play game {setup.game_id}: engine rejection: {exc}",
+            flush=True,
+        )
+        return []
+
+
+def _play_game_inner(
+    agent: MCTSAgent,
+    setup: GameSetup,
+    rng: random.Random,
+    cfg: SelfPlayConfig,
+    sim,
+    records: list[SelfPlayRecord],
+    seats,
+    recorded: int,
+) -> list[SelfPlayRecord]:
     while (pending := decision(sim)) is not None:
         if sim.decisions >= cfg.max_decisions:
             break
