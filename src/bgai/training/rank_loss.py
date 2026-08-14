@@ -21,12 +21,21 @@ from __future__ import annotations
 import torch
 
 
-def pairwise_rank_loss(predicted: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+def pairwise_rank_loss(
+    predicted: torch.Tensor, target: torch.Tensor, winner_pair_weight: float = 1.0
+) -> torch.Tensor:
     """Mean pairwise logistic ranking loss.
 
     ``predicted``/``target`` are ``(batch, seats)``. Returns a scalar
     averaged over rows, with each row averaged over its own unmasked
     pairs, so rows with many ties do not quietly dominate the batch.
+
+    ``winner_pair_weight`` > 1 up-weights every pair involving the row's
+    true top seat: TM games are decided at the top of the table (a
+    120-118 finish and a 118-120 finish are nearly identical in share
+    space and opposite in outcome), so ordering credit is concentrated
+    where placement is actually contested. Weighted normalization keeps
+    the loss scale comparable across weights.
     """
     # (batch, seats, seats) differences: [.., i, j] = value_i - value_j
     pred_diff = predicted.unsqueeze(2) - predicted.unsqueeze(1)
@@ -44,9 +53,17 @@ def pairwise_rank_loss(predicted: torch.Tensor, target: torch.Tensor) -> torch.T
     # which is 0 for a confidently correct gap and grows linearly when wrong
     sign = torch.sign(true_diff)
     per_pair = torch.nn.functional.softplus(-sign * pred_diff)
-    per_pair = per_pair * mask
 
-    counts = mask.sum(dim=(1, 2)).clamp(min=1)
+    weights = mask.to(predicted.dtype)
+    if winner_pair_weight != 1.0:
+        is_winner = torch.nn.functional.one_hot(target.argmax(dim=-1), seats).bool()
+        pair_has_winner = is_winner.unsqueeze(2) | is_winner.unsqueeze(1)
+        weights = weights * torch.where(
+            pair_has_winner, predicted.new_tensor(winner_pair_weight), predicted.new_tensor(1.0)
+        )
+    per_pair = per_pair * weights
+
+    counts = weights.sum(dim=(1, 2)).clamp(min=1e-6)
     per_row = per_pair.sum(dim=(1, 2)) / counts
     # rows that were entirely tied contribute 0, not NaN
     return per_row.mean()

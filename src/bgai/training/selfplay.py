@@ -91,6 +91,17 @@ class SelfPlayConfig:
     search consumes orderings, so RL search LOST to pre-RL search 21.7%
     to 30.8% even as the RL policy beat its predecessor. Same
     dissociation rank_loss.py documents for the supervised phase."""
+    winner_pair_weight: float = 3.0
+    """Rank-loss pairs involving the game's true winner count this many
+    times more. TM strategy plateaus around "fine, 120 VP" play; wins
+    come from min-maxed 140+ games, so ordering pressure belongs at the
+    top of the table where placement is contested, not spread evenly
+    over 3rd-vs-4th."""
+    win_weight: float = 0.5
+    """Weight on the winner-identification cross-entropy: the (simplex)
+    value distribution must put mass on the seat that actually won.
+    Trains "who wins this game" as an objective in its own right rather
+    than a byproduct of share accuracy."""
     lr: float = 1e-4
 
 
@@ -170,8 +181,11 @@ def regularized_loss(
     batch: dict[str, torch.Tensor],
     lambda_kl: float,
     rank_weight: float = 1.0,
+    winner_pair_weight: float = 1.0,
+    win_weight: float = 0.0,
 ) -> tuple[torch.Tensor, dict[str, float]]:
-    """Search-policy cross-entropy + value MSE + pairwise rank + KL(new || human).
+    """Search-policy cross-entropy + value MSE + winner-weighted pairwise
+    rank + winner-identification CE + KL(new || human).
 
     ``frozen`` is the imitation net, kept in eval mode and never updated
     -- it is the anchor, so it must not drift with the policy it is
@@ -202,12 +216,26 @@ def regularized_loss(
     ref_log_probs = F.log_softmax(ref_logits, dim=-1)
     kl_terms = (log_probs.exp() * (safe_log_probs - ref_log_probs.masked_fill(~mask, 0.0)))
     kl = kl_terms.masked_fill(~mask, 0.0).sum(dim=-1).mean()
-    rank = pairwise_rank_loss(value, batch["value"])
-    loss = policy_loss + 0.5 * value_loss + rank_weight * rank + lambda_kl * kl
+    rank = pairwise_rank_loss(value, batch["value"], winner_pair_weight)
+    winner = batch["value"].argmax(dim=-1)
+    # With value_simplex the head's output IS a distribution over seats;
+    # a bare-linear head gets softmaxed here for the same CE semantics.
+    value_probs = value if net.cfg.value_simplex else value.softmax(dim=-1)
+    win_ce = -(
+        value_probs.gather(-1, winner.unsqueeze(-1)).clamp_min(1e-8).log().squeeze(-1)
+    ).mean()
+    loss = (
+        policy_loss
+        + 0.5 * value_loss
+        + rank_weight * rank
+        + win_weight * win_ce
+        + lambda_kl * kl
+    )
     return loss, {
         "policy": float(policy_loss.item()),
         "value": float(value_loss.item()),
         "rank": float(rank.item()),
+        "win": float(win_ce.item()),
         "kl": float(kl.item()),
         "total": float(loss.item()),
     }

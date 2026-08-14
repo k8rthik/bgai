@@ -69,6 +69,8 @@ class SelfPlayTrainConfig:
     temp_decisions: int = 30
     lambda_kl: float = 1.0
     rank_weight: float = 1.0
+    winner_pair_weight: float = 3.0
+    win_weight: float = 0.5
     lr: float = 5e-5
     batch_size: int = 128
     epochs_per_iteration: int = 1
@@ -83,6 +85,8 @@ class SelfPlayTrainConfig:
             temp_decisions=self.temp_decisions,
             lambda_kl=self.lambda_kl,
             rank_weight=self.rank_weight,
+            winner_pair_weight=self.winner_pair_weight,
+            win_weight=self.win_weight,
             lr=self.lr,
         )
 
@@ -181,7 +185,10 @@ def fine_tune(
         for start in range(0, len(order) - cfg.batch_size + 1, cfg.batch_size):
             batch_records = [records[i] for i in order[start : start + cfg.batch_size]]
             batch = _collate(batch_records, device)
-            loss, parts = regularized_loss(net, frozen, batch, cfg.lambda_kl, cfg.rank_weight)
+            loss, parts = regularized_loss(
+                net, frozen, batch, cfg.lambda_kl, cfg.rank_weight,
+                cfg.winner_pair_weight, cfg.win_weight,
+            )
             opt.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(net.parameters(), 5.0)
@@ -294,6 +301,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--temp-decisions", type=int, default=30)
     parser.add_argument("--lambda-kl", type=float, default=1.0)
     parser.add_argument("--rank-weight", type=float, default=1.0)
+    parser.add_argument("--winner-pair-weight", type=float, default=3.0)
+    parser.add_argument("--win-weight", type=float, default=0.5)
     parser.add_argument("--lr", type=float, default=5e-5)
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args(argv)
@@ -312,6 +321,8 @@ def main(argv: list[str] | None = None) -> None:
             temp_decisions=args.temp_decisions,
             lambda_kl=args.lambda_kl,
             rank_weight=args.rank_weight,
+            winner_pair_weight=args.winner_pair_weight,
+            win_weight=args.win_weight,
             lr=args.lr,
             seed=args.seed,
         )

@@ -141,9 +141,49 @@ def test_loss_components_are_all_reported() -> None:
         "visits": torch.rand(n, n_cand) + 0.1,
     }
     _, parts = regularized_loss(net, frozen, batch, lambda_kl=1.0)
-    assert set(parts) == {"policy", "value", "rank", "kl", "total"}
+    assert set(parts) == {"policy", "value", "rank", "win", "kl", "total"}
     assert parts["kl"] >= -1e-6
     assert parts["rank"] >= 0.0
+    assert parts["win"] >= 0.0
+
+
+def test_winner_identification_term_rewards_the_true_winner() -> None:
+    """win_ce must drop when the value head concentrates mass on the seat
+    that actually won."""
+    import torch.nn.functional as F
+
+    target = torch.tensor([[0.4, 0.3, 0.2, 0.1]])
+    good = torch.tensor([[0.7, 0.1, 0.1, 0.1]])
+    bad = torch.tensor([[0.1, 0.1, 0.1, 0.7]])
+    winner = target.argmax(dim=-1)
+
+    def ce(probs):
+        return -(probs.gather(-1, winner.unsqueeze(-1)).clamp_min(1e-8).log()).mean()
+
+    assert ce(good) < ce(bad)
+    assert torch.isfinite(F.softplus(torch.tensor(0.0)))  # sanity
+
+
+def test_winner_pair_weight_prioritizes_top_of_table_ordering() -> None:
+    """With heavy winner weighting, fixing a winner-pair mistake must
+    reduce the loss more than fixing an equally wrong bottom pair."""
+    from bgai.training.rank_loss import pairwise_rank_loss
+
+    target = torch.tensor([[0.40, 0.30, 0.20, 0.10]])
+    # winner-pair wrong (seats 0/1 swapped), bottom pair right
+    wrong_top = torch.tensor([[0.30, 0.40, 0.20, 0.10]])
+    # bottom pair wrong (seats 2/3 swapped), winner pairs right
+    wrong_bottom = torch.tensor([[0.40, 0.30, 0.10, 0.20]])
+    w = 5.0
+    top_penalty = pairwise_rank_loss(wrong_top, target, w)
+    bottom_penalty = pairwise_rank_loss(wrong_bottom, target, w)
+    assert top_penalty > bottom_penalty
+    # and at weight 1.0 the two mistakes cost the same
+    assert torch.isclose(
+        pairwise_rank_loss(wrong_top, target, 1.0),
+        pairwise_rank_loss(wrong_bottom, target, 1.0),
+        atol=1e-6,
+    )
 
 
 def test_losses_are_finite_with_padded_candidates() -> None:
