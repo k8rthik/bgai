@@ -677,3 +677,15 @@ simplex-trained weights into an unconstrained value head without error.
 An AlphaZero-style temperature cutoff (`temp_decisions=30`) samples
 openings ∝ visits and argmaxes after, so late-game value targets track
 best play.
+
+**C8 — The external yardstick has been passed (2026-08-14).** Fresh
+20-game ai_lode batch (`tools/tmai_headless.js`, `data/ailode_fresh.log`):
+97.1 VP/player, winner mean 119.3 — consistent with C2's 98.9/115.5. Our
+deep-search agents now average ~103-105 VP/player on their own all-MCTS
+tables (sweep_deep, h2h_leg2_search), versus ~65 when C2 was measured on
+2026-08-06. Same caveat as C2 in reverse: cross-table absolute VP, not a
+head-to-head — but by the only external yardstick this project has, the
+learned agent has moved from "closer to random (54) than to ai_lode (99)"
+to ahead of ai_lode, in eight days. The remaining calibration that
+matters is the human distribution (median 123 VP; we stood at the 22.4th
+percentile pre-RL — re-measure after leg 3).
