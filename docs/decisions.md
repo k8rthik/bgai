@@ -689,3 +689,21 @@ learned agent has moved from "closer to random (54) than to ai_lode (99)"
 to ahead of ai_lode, in eight days. The remaining calibration that
 matters is the human distribution (median 123 VP; we stood at the 22.4th
 percentile pre-RL — re-measure after leg 3).
+
+**C9 — The flywheel compounds; the winner-priority objective works
+(2026-08-14).** Three self-play legs, each h2h-verified against its
+predecessor at the deep-search config (512/k8/d48, n=120 each):
+
+    leg2 (rank term)          beats pre-RL search  32.5% / 18.3%
+    leg3 (+winner-priority)   beats leg2           30.8% / 20.8%   109.5 VP
+
+Leg 3 trained with winner_pair_weight=3 and win_weight=0.5 (the user's
+prioritize-first-place directive): rank pairs involving the true winner
+count 3x and the simplex value head trains winner-identification CE
+directly. Held-out HUMAN-state ordering read flat vs leg 2 (0.722/0.562
+vs 0.726/0.567) while the h2h moved a full generation -- confirming
+(again, after the leg-2 flip) that the self-play distribution is where
+search strength lives and the human-val probe is only a mismatched
+proxy. Speed: leg-3's finale ran at 505-685 games/hour (2.6-3.1x leg 1)
+via the cached setup ids, 10 workers, tree reuse, and the fast-prior
+path.
