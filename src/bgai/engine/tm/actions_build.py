@@ -537,15 +537,16 @@ def handle_build(state: GameState, faction: str, cmd: ParsedCommand) -> GameStat
         # mirrors, and `_directly_adjacent_to_own_building`'s docstring
         # for why it's duplicated here rather than imported).
         free_tf_index = _find_pending_optional(state, faction, "free_tf")
+        if free_tf_index is not None and not _directly_adjacent_to_own_building(
+            state, faction, hex_key
+        ):
+            # Sandstorm marker is a resource, not an obligation
+            # (2026-08-14 fix, self-play fuzz finding: legal_moves offers
+            # ordinary paid transform-builds while the marker is held;
+            # hard-erroring here rejected them). Fall back to the paid
+            # implicit transform, marker kept.
+            free_tf_index = None
         if free_tf_index is not None:
-            if not _directly_adjacent_to_own_building(state, faction, hex_key):
-                raise EngineError(
-                    f"{hex_key} is not directly adjacent to a {faction} building "
-                    "(ACTN requires direct hex adjacency)",
-                    state=state,
-                    faction=faction,
-                    cmd=cmd,
-                )
             cost = 0
         else:
             cost = hooks_for(faction).spade_transform_cost(state, faction, hex_state.color, color)
