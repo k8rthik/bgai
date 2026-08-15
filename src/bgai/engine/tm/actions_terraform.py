@@ -375,16 +375,19 @@ def handle_transform(state: GameState, faction: str, cmd: ParsedCommand) -> Game
 
     free_tf_index = _find_pending_optional(state, faction, "free_tf")
 
-    if free_tf_index is not None:
-        if not _directly_adjacent_to_own_building(state, faction, hex_key):
-            raise EngineError(
-                f"{hex_key} is not directly adjacent to a {faction} building "
-                "(ACTN requires direct hex adjacency)",
-                state=state,
-                faction=faction,
-                cmd=cmd,
-            )
-    elif hex_key not in reachable(state, faction):
+    # The Sandstorm marker is a RESOURCE, not an obligation (2026-08-14
+    # fix, self-play fuzz finding): a transform the marker cannot cover
+    # (not directly adjacent, or not to home color -- checked below)
+    # falls back to the ordinary paid path with the marker kept, exactly
+    # as the legal generator already offers. Hard-erroring here made
+    # apply() disagree with legal_moves for any faction holding an
+    # unspent ACTN. No corpus row exercises the mismatch (replay was
+    # green throughout), so replay outcomes are unchanged.
+    if free_tf_index is not None and not _directly_adjacent_to_own_building(
+        state, faction, hex_key
+    ):
+        free_tf_index = None
+    if free_tf_index is None and hex_key not in reachable(state, faction):
         raise EngineError(
             f"{hex_key} is not reachable by {faction}", state=state, faction=faction, cmd=cmd
         )
@@ -414,15 +417,12 @@ def handle_transform(state: GameState, faction: str, cmd: ParsedCommand) -> Game
             f"{hex_key} is already {effective_color}", state=state, faction=faction, cmd=cmd
         )
 
+    if free_tf_index is not None and effective_color != home_color:
+        # Marker only covers transforms to home color; paid path instead
+        # (marker kept). Adjacent-to-own-building implies reachable, so
+        # the reachability gate above stays satisfied.
+        free_tf_index = None
     if free_tf_index is not None:
-        if effective_color != home_color:
-            raise EngineError(
-                f"{faction} must transform to home color {home_color} using ACTN, "
-                f"not {effective_color}",
-                state=state,
-                faction=faction,
-                cmd=cmd,
-            )
         cost = 0
     else:
         cost = hooks_for(faction).spade_transform_cost(

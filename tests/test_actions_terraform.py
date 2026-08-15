@@ -486,3 +486,35 @@ def test_giants_corpus_transforms_never_target_non_home_color() -> None:
     )
     assert colors.height > 0
     assert set(colors["color"].to_list()) == {"red"}
+
+
+def test_sandstorm_marker_is_a_resource_not_an_obligation() -> None:
+    """2026-08-14 self-play fuzz finding: holding an unspent ACTN marker
+    must not forbid ordinary paid transforms elsewhere -- apply() now
+    falls back to the paid path (marker kept) when the marker doesn't
+    fit, matching what legal_moves offers."""
+    from bgai.engine.tm.apply import push_pending
+    from bgai.engine.tm.state import PendingDecision
+
+    s = _state()
+    # shipping widens reach well past direct adjacency, guaranteeing a
+    # reachable transform target the marker cannot cover
+    s = _rich(s, "nomads", spades_available=3, workers=9, coins=9, shipping=3)
+    s = push_pending(s, PendingDecision(faction="nomads", kind="free_tf", amount=1))
+
+    # The marker only covers transforms TO HOME COLOR. Request a
+    # non-home target on an adjacent wrong-color hex: the marker cannot
+    # cover it, so apply must take the paid path and keep the marker
+    # (previously: hard EngineError, disagreeing with the legal
+    # generator's offer).
+    s = _place(s, "nomads", ANCHOR)
+    hex_color = s.hexes[TARGET].color
+    target = next(
+        c for c in ("red", "blue", "black", "brown", "gray", "green")
+        if c not in (hex_color, "yellow")
+    )
+    before_spades = s.factions["nomads"].spades_available
+    s2 = handle_transform(s, "nomads", _cmd("transform", loc=TARGET, color=target))
+    assert s2.factions["nomads"].spades_available < before_spades, "paid path used"
+    assert any(p.kind == "free_tf" for p in s2.pending), "marker survives"
+    assert s2.hexes[TARGET].color == target
