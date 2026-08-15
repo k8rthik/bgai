@@ -88,6 +88,7 @@ def _build_net_agent(name: str, label: str, options: dict[str, object]) -> Agent
         value_blend_w=float(options.get("blend", 0.0)),
         leaf_batch=int(options.get("batch", 0)),
         top_k=int(options.get("top_k", 0)),
+        late_sims=int(options.get("late", 0)),
         device=device,
     )
 

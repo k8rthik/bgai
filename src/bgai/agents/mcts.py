@@ -101,6 +101,7 @@ class MCTSAgent:
         value_blend_w: float = 0.0,
         leaf_batch: int = 0,
         top_k: int = 0,
+        late_sims: int = 0,
     ) -> None:
         self.name = name
         self.simulations = simulations
@@ -118,6 +119,13 @@ class MCTSAgent:
         """Consider only this many highest-prior moves per node (0 = all).
         Branching is 23 on average, so an unpruned tree at 512 sims is
         about two levels deep; pruning spends the budget deeper instead."""
+        self.late_sims = late_sims
+        """Simulation budget for rounds 5-6 (0 = use ``simulations``
+        throughout). Every diagnostic since C1 shows the same signature:
+        the agent develops well and converts badly, and conversion
+        happens in the endgame -- where the tree is also smallest, so
+        deep budgets go furthest. Lean-early/deep-late spends the same
+        average compute where the measured weakness lives."""
         self._reuse_root: _Node | None = None
         """Tree reuse (opt-in via note_advance): the subtree under the
         played move carries its visits into the next decision instead of
@@ -526,7 +534,12 @@ class MCTSAgent:
             root, _ = self._expand(sim)
         if root is None:
             return None
-        remaining = max(0, self.simulations - root.total_visits)
+        budget = (
+            self.late_sims
+            if self.late_sims and sim.game.round >= 5
+            else self.simulations
+        )
+        remaining = max(0, budget - root.total_visits)
         if self.leaf_batch > 1:
             done = 0
             while done < remaining:
