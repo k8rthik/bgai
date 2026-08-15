@@ -707,3 +707,15 @@ search strength lives and the human-val probe is only a mismatched
 proxy. Speed: leg-3's finale ran at 505-685 games/hour (2.6-3.1x leg 1)
 via the cached setup ids, 10 workers, tree reuse, and the fast-prior
 path.
+
+**C10 — Two nulls that sharpen the diagnosis (2026-08-15).** Leg 4
+(1024-sim targets, win_weight 0.25, window-2 replay buffer) ties leg 3
+h2h (25.8%/27.5% win, better placement 1.41/1.54): the local flywheel's
+per-leg gains have gone huge -> solid -> nil at ~750 games/leg. And the
+round-scaled budget experiment (512 early/2048 late vs flat 1024, same
+net, budget-matched) is a dead tie 25.0/25.0 -- the endgame conversion
+weakness is NOT a search-depth problem. Together: local scale is spent,
+and the remaining gap to the human median (~15 VP from the 23.7th
+percentile) lives in evaluator knowledge, not thinking time. The levers
+that remain are structural: cluster-scale games (10^5), value-head
+training coverage, and win-prob-maximizing selection.
