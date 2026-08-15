@@ -244,6 +244,7 @@ def run(cfg: SelfPlayTrainConfig) -> None:
         current,
     )
 
+    prev_records: list[SelfPlayRecord] = []
     for iteration in range(1, cfg.iterations + 1):
         t0 = time.perf_counter()
         records = generate_parallel(
@@ -261,7 +262,13 @@ def run(cfg: SelfPlayTrainConfig) -> None:
         torch.save(records, cfg.out / f"records_{iteration:02d}.pt")
 
         t1 = time.perf_counter()
-        parts = fine_tune(net, frozen, records, cfg, device)
+        # Window-2 replay buffer: train on this iteration's games plus the
+        # previous iteration's. The leg-4 offline sweep found a single
+        # consolidation epoch over AGGREGATED records beat sequential
+        # fresh-only training on every ordering metric -- sequential
+        # training half-forgets each batch as the next arrives.
+        parts = fine_tune(net, frozen, records + prev_records, cfg, device)
+        prev_records = records
         train_secs = time.perf_counter() - t1
 
         payload = {
