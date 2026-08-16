@@ -719,3 +719,19 @@ and the remaining gap to the human median (~15 VP from the 23.7th
 percentile) lives in evaluator knowledge, not thinking time. The levers
 that remain are structural: cluster-scale games (10^5), value-head
 training coverage, and win-prob-maximizing selection.
+
+**C11 — The gap has a face: cult-hoarding myopia (2026-08-15).** Town
+audit, agent (838 towns, 200 games) vs rating-banded corpus (610k
+towns): the agent takes cult town tiles (TW5/TW6) 55% of the time vs
+28% for top-5% humans, despite an already-elite endgame cult score, and
+under-picks economy tiles (TW1/TW2/TW8) ~2x while founding 1.28
+towns/founding-seat vs 2.3. Expected VP-per-pick is identical (6.73 vs
+6.75) -- the error is invisible to VP-greedy metrics; it is a portfolio
+error. Combined with C10's decomposition (towns -19, conversions -11 vs
+elite; everything else at/above elite), one diagnosis covers all
+findings: the evaluator prices immediate legible gains (cult positions
+are literal state features) and cannot price compounding economy.
+Human seat effect: seat1 29.3%/seat3 21.7% win over 76k games (se
+0.16pp) -- mirrored eval design retroactively essential; agent inherits
+the seat-1 edge but not the seat-3 penalty (n=200, needs the
+agent-games parquet store to settle).
