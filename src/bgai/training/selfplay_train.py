@@ -72,6 +72,7 @@ class SelfPlayTrainConfig:
     rank_weight: float = 1.0
     winner_pair_weight: float = 3.0
     win_weight: float = 0.5
+    aux_weight: float = 0.5
     lr: float = 5e-5
     batch_size: int = 128
     epochs_per_iteration: int = 1
@@ -168,6 +169,18 @@ def _collate(records: list[SelfPlayRecord], device: torch.device) -> dict[str, t
         "value": torch.stack(
             [torch.from_numpy(np.asarray(r.final_shares, dtype=np.float32)) for r in records]
         ).to(device),
+        **(
+            {
+                "aux_target": torch.stack(
+                    [
+                        torch.from_numpy(np.asarray(r.aux_target, dtype=np.float32))
+                        for r in records
+                    ]
+                ).to(device)
+            }
+            if all(r.aux_target is not None for r in records)
+            else {}
+        ),
     }
 
 
@@ -189,7 +202,7 @@ def fine_tune(
             batch = _collate(batch_records, device)
             loss, parts = regularized_loss(
                 net, frozen, batch, cfg.lambda_kl, cfg.rank_weight,
-                cfg.winner_pair_weight, cfg.win_weight,
+                cfg.winner_pair_weight, cfg.win_weight, cfg.aux_weight,
             )
             opt.zero_grad(set_to_none=True)
             loss.backward()
@@ -211,9 +224,19 @@ def run(cfg: SelfPlayTrainConfig) -> None:
     # loading simplex weights into a bare head silently mis-scales every
     # value MCTS reads. Same reason every checkpoint written below must
     # carry the flag forward -- workers rebuild agents from these files.
-    model_cfg = model_config_from_checkpoint(ckpt)
+    from dataclasses import replace as _replace
+
+    # aux head is always on for RL fine-tuning (C11 economy-myopia fix);
+    # a checkpoint that predates it loads with strict=False and the aux
+    # head alone initializes fresh.
+    model_cfg = _replace(model_config_from_checkpoint(ckpt), aux_head=True)
     net = PolicyValueNet(model_cfg)
-    net.load_state_dict(ckpt["model"])
+    missing, unexpected = net.load_state_dict(ckpt["model"], strict=False)
+    if unexpected or any(not k.startswith("aux_head.") for k in missing):
+        raise ValueError(
+            f"checkpoint mismatch beyond the aux head: missing={missing} "
+            f"unexpected={unexpected}"
+        )
     net.to(device)
     anchor_ckpt = ckpt
     if cfg.anchor is not None:
@@ -231,6 +254,7 @@ def run(cfg: SelfPlayTrainConfig) -> None:
         "checkpoint": str(cfg.checkpoint),
         "out": str(cfg.out),
         "value_simplex": model_cfg.value_simplex,
+        "aux_head": model_cfg.aux_head,
     }
     metrics_path = cfg.out / "metrics.jsonl"
     current = cfg.out / "current.pt"
@@ -314,6 +338,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--rank-weight", type=float, default=1.0)
     parser.add_argument("--winner-pair-weight", type=float, default=3.0)
     parser.add_argument("--win-weight", type=float, default=0.5)
+    parser.add_argument("--aux-weight", type=float, default=0.5)
     parser.add_argument("--lr", type=float, default=5e-5)
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args(argv)
@@ -335,6 +360,7 @@ def main(argv: list[str] | None = None) -> None:
             rank_weight=args.rank_weight,
             winner_pair_weight=args.winner_pair_weight,
             win_weight=args.win_weight,
+            aux_weight=args.aux_weight,
             lr=args.lr,
             seed=args.seed,
         )

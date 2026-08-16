@@ -141,7 +141,7 @@ def test_loss_components_are_all_reported() -> None:
         "visits": torch.rand(n, n_cand) + 0.1,
     }
     _, parts = regularized_loss(net, frozen, batch, lambda_kl=1.0)
-    assert set(parts) == {"policy", "value", "rank", "win", "kl", "total"}
+    assert set(parts) == {"policy", "value", "rank", "win", "aux", "kl", "total"}
     assert parts["kl"] >= -1e-6
     assert parts["rank"] >= 0.0
     assert parts["win"] >= 0.0
@@ -265,3 +265,60 @@ def test_engine_rejection_drops_the_game(monkeypatch) -> None:
     monkeypatch.setattr(sp, "advance", boom)
     records = play_game(agent, sample_setup(random.Random(1)), random.Random(1), cfg)
     assert records == []
+
+
+def test_aux_targets_teach_economy_scale(monkeypatch=None) -> None:
+    """C11 fix: records carry mover-relative [abs VP/150, towns/3] so the
+    torso must model engine size, which shares hide."""
+    agent = MCTSAgent(net=_net(), simulations=2)
+    cfg = SelfPlayConfig(simulations=2)
+    setup = sample_setup(random.Random(7))
+    records = play_game(agent, setup, random.Random(7), cfg)
+    assert records
+    for r in records[:5]:
+        assert r.aux_target is not None and r.aux_target.shape == (8,)
+        assert (r.aux_target[:4] >= 0).all()  # scaled absolute VP
+        assert (r.aux_target[4:] >= 0).all() and (r.aux_target[4:] <= 3).all()
+    # mover-relative rotation: two movers at different seats disagree
+    by_seat = {r.seat: r.aux_target for r in records}
+    seats = sorted(by_seat)
+    if len(seats) > 1:
+        assert not np.allclose(by_seat[seats[0]], by_seat[seats[1]])
+
+
+def test_aux_loss_reported_when_head_enabled() -> None:
+    net = PolicyValueNet(
+        ModelConfig(hidden=64, embed=32, move_hidden=32, dropout=0.0, aux_head=True)
+    )
+    frozen = _net()
+    n, n_cand = 2, 4
+    batch = {
+        "hex_planes": torch.randn(n, 113, HEX_FEAT_DIM),
+        "globals": torch.randn(n, GLOBAL_DIM),
+        "faction": torch.randint(0, 14, (n,)),
+        "candidates": torch.randint(0, 7, (n, n_cand, MOVE_FIELDS)),
+        "cand_mask": torch.ones((n, n_cand), dtype=torch.bool),
+        "value": torch.rand(n, 4),
+        "visits": torch.rand(n, n_cand) + 0.1,
+        "aux_target": torch.rand(n, 8),
+    }
+    loss, parts = regularized_loss(net, frozen, batch, lambda_kl=1.0)
+    assert parts["aux"] > 0.0
+    loss.backward()
+    assert any(
+        p.grad is not None and torch.isfinite(p.grad).all()
+        for p in net.aux_head.parameters()
+    )
+
+
+def test_pre_aux_checkpoint_loads_with_fresh_aux_head() -> None:
+    """A checkpoint saved before the aux head existed must load into an
+    aux-enabled net with only the aux head initializing fresh."""
+    old = _net()
+    state = old.state_dict()
+    new = PolicyValueNet(
+        ModelConfig(hidden=64, embed=32, move_hidden=32, dropout=0.0, aux_head=True)
+    )
+    missing, unexpected = new.load_state_dict(state, strict=False)
+    assert not unexpected
+    assert missing and all(k.startswith("aux_head.") for k in missing)

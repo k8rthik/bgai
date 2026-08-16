@@ -62,6 +62,10 @@ class SelfPlayRecord:
     faction_id: int
     seat: int  # mover's absolute seat, to read its own final share
     final_shares: np.ndarray | None = None  # filled in when the game ends
+    aux_target: np.ndarray | None = None
+    """Mover-relative (8,): per-seat [final absolute VP / 150, final town
+    count / 3]. Shares are scale-blind; these teach the torso how big
+    the engine being built will get (C11 economy-myopia fix)."""
 
 
 @dataclass(frozen=True)
@@ -204,6 +208,9 @@ def _play_game_inner(
     vps = np.array([sim.game.factions[f].vp for f in seats], dtype=np.float32)
     total_vp = float(vps.sum())
     shares = vps / total_vp if total_vp > 0 else np.full(len(seats), 0.25, dtype=np.float32)
+    towns = np.array(
+        [len(sim.game.factions[f].towns) for f in seats], dtype=np.float32
+    )
     return [
         SelfPlayRecord(
             hex_planes=r.hex_planes,
@@ -213,6 +220,9 @@ def _play_game_inner(
             faction_id=r.faction_id,
             seat=r.seat,
             final_shares=np.roll(shares, -r.seat),  # mover-relative, like the net
+            aux_target=np.concatenate(
+                [np.roll(vps, -r.seat) / 150.0, np.roll(towns, -r.seat) / 3.0]
+            ),
         )
         for r in records
     ]
@@ -226,6 +236,7 @@ def regularized_loss(
     rank_weight: float = 1.0,
     winner_pair_weight: float = 1.0,
     win_weight: float = 0.0,
+    aux_weight: float = 0.5,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """Search-policy cross-entropy + value MSE + winner-weighted pairwise
     rank + winner-identification CE + KL(new || human).
@@ -234,7 +245,7 @@ def regularized_loss(
     -- it is the anchor, so it must not drift with the policy it is
     anchoring.
     """
-    logits, value = net(
+    logits, value, aux = net.forward_with_aux(
         batch["hex_planes"], batch["globals"], batch["faction"],
         batch["candidates"], batch["cand_mask"],
     )
@@ -267,11 +278,17 @@ def regularized_loss(
     win_ce = -(
         value_probs.gather(-1, winner.unsqueeze(-1)).clamp_min(1e-8).log().squeeze(-1)
     ).mean()
+    aux_loss = (
+        F.mse_loss(aux, batch["aux_target"])
+        if aux is not None and "aux_target" in batch
+        else torch.zeros((), device=value.device)
+    )
     loss = (
         policy_loss
         + 0.5 * value_loss
         + rank_weight * rank
         + win_weight * win_ce
+        + aux_weight * aux_loss
         + lambda_kl * kl
     )
     return loss, {
@@ -279,6 +296,7 @@ def regularized_loss(
         "value": float(value_loss.item()),
         "rank": float(rank.item()),
         "win": float(win_ce.item()),
+        "aux": float(aux_loss.item()),
         "kl": float(kl.item()),
         "total": float(loss.item()),
     }

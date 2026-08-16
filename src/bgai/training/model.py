@@ -37,6 +37,15 @@ class ModelConfig:
     faction_embed: int = 32
     field_embed: int = 24
     dropout: float = 0.1
+    aux_head: bool = False
+    """Auxiliary economy-trajectory head (2026-08-15, C11 fix): predicts
+    per-seat [final absolute VP / 150, final town count / 3] from the
+    state embedding. Share targets are scale-blind -- a 100-VP and a
+    140-VP win have the same share -- so nothing in the value loss ever
+    asked the torso to model how BIG the engine being built will get.
+    C11's diagnosis (cult-hoarding, town deficit, no surplus economy)
+    is that blindness. Only training reads this head; ``forward`` and
+    every search/checkpoint consumer are untouched."""
     value_simplex: bool = False
     """Softmax the value head over the 4 seats.
 
@@ -85,6 +94,11 @@ class PolicyValueNet(nn.Module):
         self.value_head = nn.Sequential(
             nn.Linear(c.embed, c.move_hidden), nn.SiLU(), nn.Linear(c.move_hidden, 4)
         )
+        if c.aux_head:
+            # per-seat [abs VP/150, towns/3], mover-relative: 4 seats x 2
+            self.aux_head = nn.Sequential(
+                nn.Linear(c.embed, c.move_hidden), nn.SiLU(), nn.Linear(c.move_hidden, 8)
+            )
         self.logit_scale = nn.Parameter(torch.tensor(1.0 / (c.embed**0.5)))
 
     def state_embedding(
@@ -116,6 +130,26 @@ class PolicyValueNet(nn.Module):
             value = value.softmax(dim=-1)
         return logits, value
 
+    def forward_with_aux(
+        self,
+        hex_planes: torch.Tensor,
+        globals_: torch.Tensor,
+        faction: torch.Tensor,
+        candidates: torch.Tensor,
+        cand_mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        """``forward`` plus the auxiliary economy predictions (training
+        only -- search never calls this)."""
+        state = self.state_embedding(hex_planes, globals_, faction)
+        moves = self.move_embedding(candidates)
+        logits = torch.einsum("be,bce->bc", state, moves) * self.logit_scale
+        logits = logits.masked_fill(~cand_mask, float("-inf"))
+        value = self.value_head(state)
+        if self.cfg.value_simplex:
+            value = value.softmax(dim=-1)
+        aux = self.aux_head(state) if self.cfg.aux_head else None
+        return logits, value, aux
+
 
 def model_config_from_checkpoint(checkpoint: dict) -> ModelConfig:
     """Rebuild the architecture a checkpoint was trained with.
@@ -127,4 +161,7 @@ def model_config_from_checkpoint(checkpoint: dict) -> ModelConfig:
     Checkpoints predating the flag default to the old behaviour.
     """
     stored = (checkpoint or {}).get("config") or {}
-    return ModelConfig(value_simplex=bool(stored.get("value_simplex", False)))
+    return ModelConfig(
+        value_simplex=bool(stored.get("value_simplex", False)),
+        aux_head=bool(stored.get("aux_head", False)),
+    )
