@@ -735,3 +735,15 @@ Human seat effect: seat1 29.3%/seat3 21.7% win over 76k games (se
 0.16pp) -- mirrored eval design retroactively essential; agent inherits
 the seat-1 edge but not the seat-3 penalty (n=200, needs the
 agent-games parquet store to settle).
+
+**C12 — Trajectory targets broke the plateau (2026-08-17).** Leg 5
+(aux head: per-seat [final abs VP/150, towns/3] predicted from every
+recorded state, aux_weight 0.5, win_weight 0.25) beats leg 4 h2h
+30.8%/20.8%, place 1.37/1.59, +3.4 VP -- a full generation, after leg 4
+tied. The aux loss converged 0.042 -> 0.019 (~+-19 VP final-score
+prediction from mid-game states). The diagnostic chain that produced
+it: C10 decomposition (towns -19, conversions -11 vs elite) -> C11
+cult-hoarding portfolio -> economy-myopia diagnosis -> share targets
+are scale-blind -> absolute-VP + town-count auxiliary prediction.
+Behavioral before/after (tile portfolio, towns/seat, conversions) via
+the agent-games parquet store: batch leg5_256.
