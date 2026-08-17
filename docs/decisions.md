@@ -747,3 +747,18 @@ cult-hoarding portfolio -> economy-myopia diagnosis -> share targets
 are scale-blind -> absolute-VP + town-count auxiliary prediction.
 Behavioral before/after (tile portfolio, towns/seat, conversions) via
 the agent-games parquet store: batch leg5_256.
+
+**C13 — Erratum to C10/C11's town numbers (2026-08-17, user-caught).**
+The corpus `town` bucket bundled each founding row's ENTIRE VP delta
+(tile + founding move's score-tile/favor VP + SCORE2 round bonus +
+Witches passive) while the agent tracer split tile-only -- inflating
+"human town VP" to an arithmetically impossible 27.2/seat (11.7/tile).
+Corrected tile-only: all 14.4 / top25 15.6 / top5 16.8, with the excess
+reassigned to `action` (elite action VP is therefore ~49.6, ABOVE the
+agent's 42.9, reversing C11's "agent exceeds elite action" claim).
+Revised gaps vs elite: towns -8, action -7, conversions -11 -- an even
+economy-wide spread rather than one hole, which fits the C11 myopia
+diagnosis more cleanly and explains C12's broad strength gain without
+any single behavior jumping. Lesson pinned: cross-side bucket
+comparisons require identical row-splitting rules; conservation checks
+catch missing VP, not misattributed VP.
