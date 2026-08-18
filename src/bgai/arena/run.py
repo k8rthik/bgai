@@ -89,6 +89,7 @@ def _build_net_agent(name: str, label: str, options: dict[str, object]) -> Agent
         leaf_batch=int(options.get("batch", 0)),
         top_k=int(options.get("top_k", 0)),
         late_sims=int(options.get("late", 0)),
+        root_choice=str(options.get("root", "visits")),
         device=device,
     )
 

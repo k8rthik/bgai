@@ -102,6 +102,7 @@ class MCTSAgent:
         leaf_batch: int = 0,
         top_k: int = 0,
         late_sims: int = 0,
+        root_choice: str = "visits",
     ) -> None:
         self.name = name
         self.simulations = simulations
@@ -119,6 +120,13 @@ class MCTSAgent:
         """Consider only this many highest-prior moves per node (0 = all).
         Branching is 23 on average, so an unpruned tree at 512 sims is
         about two levels deep; pruning spends the budget deeper instead."""
+        self.root_choice = root_choice
+        """Final move rule: "visits" (robust child, the classical and
+        current default) or "q" (max child: highest own-seat mean value
+        among sufficiently-visited moves). With the winner-CE-trained
+        simplex head, a move's Q approximates winner-mass -- "q" is the
+        seek-the-win rule, willing to prefer a lower-visit line whose
+        value says it flips placement."""
         self.late_sims = late_sims
         """Simulation budget for rounds 5-6 (0 = use ``simulations``
         throughout). Every diagnostic since C1 shows the same signature:
@@ -563,6 +571,19 @@ class MCTSAgent:
             return offer[int(np.argmax(root.priors))]
         counts = root.visits.astype(np.float64)
         if self.temperature <= 0:
+            if self.root_choice == "q":
+                # max child over own-seat Q, restricted to moves with at
+                # least a materiality floor of visits (an unexplored
+                # move's Q is noise, not a discovery)
+                seat = root.sim.game.setup.factions.index(root.faction)
+                floor = max(1, int(0.05 * root.total_visits))
+                eligible = counts >= floor
+                if eligible.any():
+                    q = np.full(len(counts), -np.inf)
+                    q[eligible] = (
+                        root.action_value[eligible, seat] / counts[eligible]
+                    )
+                    return offer[int(np.argmax(q))]
             return offer[int(np.argmax(counts))]
         weights = counts ** (1.0 / self.temperature)
         total = weights.sum()

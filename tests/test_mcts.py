@@ -201,3 +201,43 @@ def test_search_never_reuses_across_games() -> None:
 
     agent.reset_tree()
     assert agent._reuse_root is None
+
+
+def test_root_choice_q_prefers_high_value_over_high_visits() -> None:
+    """The 'q' rule (seek-the-win) must pick a sufficiently-visited move
+    whose mean own-seat value beats the visit leader's."""
+    import random as _random
+
+    from bgai.arena.driver import advance, new_game
+    from bgai.arena.setups import sample_setup
+
+    agent = _reuse_agent()
+    agent.root_choice = "q"
+    sim = new_game(sample_setup(_random.Random(4)))
+    while True:
+        pending = decision(sim)
+        assert pending is not None
+        _f, offer = pending
+        if len(offer) > 1:
+            break
+        sim = advance(sim, offer[0])
+    root = agent.search(sim)
+    assert root is not None
+    choice = agent.choose_sim(sim, pending[0], pending[1], _random.Random(0))
+    assert choice in pending[1]
+    # construct a synthetic root state where visits and Q disagree
+    import numpy as np
+
+    root.visits[:] = 0
+    root.action_value[:] = 0.0
+    root.visits[0] = 100  # visit leader, mediocre value
+    seat = root.sim.game.setup.factions.index(root.faction)
+    root.action_value[0, seat] = 25.0  # Q = 0.25
+    root.visits[1] = 10   # above the 5% floor of 110
+    root.action_value[1, seat] = 6.0  # Q = 0.60
+    root.total_visits = 110
+    agent._reuse_root = None
+    # bypass search by injecting the doctored root through _reusable
+    agent._reuse_root = root
+    choice2 = agent.choose_sim(root.sim, root.faction, root.offer, _random.Random(0))
+    assert choice2 == root.offer[1], "q rule must pick the higher-Q move"
