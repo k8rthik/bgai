@@ -762,3 +762,15 @@ diagnosis more cleanly and explains C12's broad strength gain without
 any single behavior jumping. Lesson pinned: cross-side bucket
 comparisons require identical row-splitting rules; conservation checks
 catch missing VP, not misattributed VP.
+
+**C14 — The KL leash is not the constraint (2026-08-18).** Leg 6 (leg-5
+recipe, lambda_kl 1.0 -> 0.5, sole change) ties leg 5 h2h (25.0/27.5,
+identical placement) with a CLEAN drift canary: KL re-equilibrated
+0.03 -> ~0.05 and human-val ordering stayed exactly at leg-5 level
+(0.711/0.561 vs 0.714/0.560). The policy took 60% more room and neither
+gained strength nor drifted -- the anchor was not what blocks
+behavioral change. Kills hypothesis B; the evidence concentrates
+further on data quantity (cluster scale). In-training metric records
+(best policy/rank/win CEs) did not translate to h2h -- as with every
+leg, own-distribution training metrics are not an arbiter. Champion
+stays selfplay_leg5b.
