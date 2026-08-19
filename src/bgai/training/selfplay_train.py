@@ -73,6 +73,9 @@ class SelfPlayTrainConfig:
     winner_pair_weight: float = 3.0
     win_weight: float = 0.5
     aux_weight: float = 0.5
+    infer_device: str = ""
+    """Central inference server device ("mps"/"cuda"; empty = per-worker
+    CPU nets, the previous behaviour)."""
     lr: float = 5e-5
     batch_size: int = 128
     epochs_per_iteration: int = 1
@@ -101,13 +104,22 @@ class SelfPlayTrainConfig:
 _WORKER: dict[str, object] = {}
 
 
-def _worker_init(checkpoint: str, cfg: SelfPlayConfig) -> None:
-    """One net per worker process, loaded once."""
+def _worker_init(checkpoint: str, cfg: SelfPlayConfig, infer=None) -> None:
+    """One agent per worker. With ``infer`` set, the worker is torch-free:
+    it claims a worker id and evaluates through the central server."""
     from bgai.agents.mcts import MCTSAgent
 
     torch.set_num_threads(1)  # workers must not fight over BLAS threads
+    evaluator = None
+    if infer is not None:
+        from bgai.agents.inference_server import RemoteEvaluator
+
+        id_q, request_q, response_qs = infer
+        wid = id_q.get()
+        evaluator = RemoteEvaluator(wid, request_q, response_qs[wid])
     _WORKER["agent"] = MCTSAgent(
-        Path(checkpoint),
+        checkpoint_path=None if evaluator is not None else Path(checkpoint),
+        evaluator=evaluator,
         simulations=cfg.simulations,
         max_depth=cfg.max_depth,
         top_k=cfg.top_k,
@@ -128,14 +140,45 @@ def _worker_game(seed: int) -> list[SelfPlayRecord]:
 
 
 def generate_parallel(
-    checkpoint: Path, games: int, workers: int, cfg: SelfPlayConfig, seed: int
+    checkpoint: Path,
+    games: int,
+    workers: int,
+    cfg: SelfPlayConfig,
+    seed: int,
+    infer_device: str = "",
 ) -> list[SelfPlayRecord]:
+    """With ``infer_device`` (e.g. "mps"), a central server owns the net
+    on that device and workers evaluate through it -- one GPU pass serves
+    every worker's leaf batch (measured flat 1.7 ms to batch 256 on M3
+    Pro MPS). The server is restarted per generation call so it always
+    serves the current checkpoint."""
     ctx = get_context("spawn")
     tasks = [seed * 100_000 + i for i in range(games)]
-    with ctx.Pool(
-        processes=workers, initializer=_worker_init, initargs=(str(checkpoint), cfg)
-    ) as pool:
-        batches = pool.map(_worker_game, tasks, chunksize=1)
+    server = None
+    infer = None
+    if infer_device:
+        from bgai.agents.inference_server import start_server
+
+        server, request_q, response_qs, stop_event = start_server(
+            checkpoint, infer_device, workers
+        )
+        id_q = ctx.Queue()
+        for i in range(workers):
+            id_q.put(i)
+        infer = (id_q, request_q, response_qs)
+    try:
+        with ctx.Pool(
+            processes=workers,
+            initializer=_worker_init,
+            initargs=(str(checkpoint), cfg, infer),
+        ) as pool:
+            batches = pool.map(_worker_game, tasks, chunksize=1)
+    finally:
+        if server is not None:
+            stop_event.set()
+            server.join(timeout=5)
+            if server.is_alive():
+                server.terminate()
     return [record for batch in batches for record in batch]
 
 
@@ -273,7 +316,7 @@ def run(cfg: SelfPlayTrainConfig) -> None:
         t0 = time.perf_counter()
         records = generate_parallel(
             current, cfg.games_per_iteration, cfg.workers, cfg.selfplay(),
-            cfg.seed + iteration,
+            cfg.seed + iteration, infer_device=cfg.infer_device,
         )
         gen_secs = time.perf_counter() - t0
         if len(records) < cfg.batch_size:
@@ -339,6 +382,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--winner-pair-weight", type=float, default=3.0)
     parser.add_argument("--win-weight", type=float, default=0.5)
     parser.add_argument("--aux-weight", type=float, default=0.5)
+    parser.add_argument("--infer-device", default="",
+                        help="central inference server device (mps/cuda; empty = CPU nets)")
     parser.add_argument("--lr", type=float, default=5e-5)
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args(argv)
@@ -361,6 +406,7 @@ def main(argv: list[str] | None = None) -> None:
             winner_pair_weight=args.winner_pair_weight,
             win_weight=args.win_weight,
             aux_weight=args.aux_weight,
+            infer_device=args.infer_device,
             lr=args.lr,
             seed=args.seed,
         )
