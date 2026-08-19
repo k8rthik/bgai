@@ -780,3 +780,12 @@ own-seat Q, 5% visit floor) loses to robust-child argmax-visits
 15.8%/34.2%, -6 VP, same net both sides. Low-visit Q is noisy and
 selection-biased upward; the winner-priority objective belongs in the
 LOSS (C12, where it won a generation), not in the decision rule.
+
+**C16 — c_puct belongs at 2.5 (2026-08-18).** Never tuned since 1.5 was
+set for the pre-simplex value scale, through two head-regime changes.
+Directional 4-way sweep, then pre-registered confirmation h2h: 2.5
+beats 1.5 28.7%/21.9% (n=320/side, ~2.8 sigma) with identical mean VP
+and placement -- more exploration converts equal positions into more
+outright wins (higher-variance, more decisive play; the right trade
+for win-maximization). Champion eval config: leg5 ckpt, 512 sims,
+top_k 8, depth 48, batch 16, c_puct 2.5.
