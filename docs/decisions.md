@@ -789,3 +789,16 @@ and placement -- more exploration converts equal positions into more
 outright wins (higher-variance, more decisive play; the right trade
 for win-maximization). Champion eval config: leg5 ckpt, 512 sims,
 top_k 8, depth 48, batch 16, c_puct 2.5.
+
+**C17 — GPU inference refuted at this model size (2026-08-19).** The
+centralized MPS server (1.7ms forwards, flat to batch 256) HALVES
+end-to-end throughput (329 vs ~650 games/hour): a CPU forward at batch
+16 costs ~10ms, less than the queue round-trip that would replace it.
+In-process MPS (no IPC): b16 worse than CPU, b64 ~5% better -- noise,
+pre virtual-loss cost. The 11M-param MLP is too small for GPUs to pay.
+Consequences: (1) the cluster request needs CPU nodes only (easier
+allocation); (2) the server code stays for a future bigger net, where
+the arithmetic flips. Pre-cluster optimization checklist is COMPLETE:
+every knob measured, adopted (c_puct 2.5, aux targets, rank/winner
+terms, tree reuse, fast-prior, setup cache), or refuted (KL loosening,
+max-child, endgame budget, 1024-sim targets, GPU inference).
