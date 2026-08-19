@@ -103,6 +103,7 @@ class MCTSAgent:
         top_k: int = 0,
         late_sims: int = 0,
         root_choice: str = "visits",
+        evaluator=None,
     ) -> None:
         self.name = name
         self.simulations = simulations
@@ -144,7 +145,15 @@ class MCTSAgent:
         moves would silently desynchronize the tree. The (game_id,
         decisions, faction, offer) match in ``search`` is the safety net:
         any mismatch falls back to a fresh expansion."""
+        self.evaluator = evaluator
+        """Optional remote evaluator (agents/inference_server.py): called
+        with pre-encoded numpy batches instead of the local net. When
+        set, this process never runs torch forward passes -- a central
+        server batches every worker's leaves into one GPU call."""
         self.device = torch.device(device)
+        if evaluator is not None:
+            self.net = None  # type: ignore[assignment]
+            return
         if net is not None:
             self.net = net
         else:
@@ -168,6 +177,8 @@ class MCTSAgent:
     ) -> tuple[np.ndarray, np.ndarray]:
         """(policy over ``offer``, value vector in mover-relative seat
         order) for one position."""
+        if self.evaluator is not None:
+            return self._evaluate_many([(game, faction, offer)])[0]
         enc = encode_state(game, faction)
         cand = np.stack([encode_move(m, game, faction) for m in offer])
         logits, value = self.net(
@@ -213,6 +224,14 @@ class MCTSAgent:
             moves = np.stack([encode_move(m, game, faction) for m in offer])
             cand[i, : len(offer)] = moves
             mask[i, : len(offer)] = True
+        if self.evaluator is not None:
+            priors, values = self.evaluator(
+                np.stack(hex_planes), np.stack(globals_),
+                np.asarray(factions, dtype=np.int64), cand, mask,
+            )
+            return [
+                (priors[i, : len(items[i][2])], values[i]) for i in range(n)
+            ]
         logits, value = self.net(
             torch.from_numpy(np.stack(hex_planes)).to(self.device),
             torch.from_numpy(np.stack(globals_)).to(self.device),
