@@ -774,3 +774,9 @@ further on data quantity (cluster scale). In-training metric records
 (best policy/rank/win CEs) did not translate to h2h -- as with every
 leg, own-distribution training metrics are not an arbiter. Champion
 stays selfplay_leg5b.
+
+**C15 — Max-child root choice refuted (2026-08-18).** root=q (argmax
+own-seat Q, 5% visit floor) loses to robust-child argmax-visits
+15.8%/34.2%, -6 VP, same net both sides. Low-visit Q is noisy and
+selection-biased upward; the winner-priority objective belongs in the
+LOSS (C12, where it won a generation), not in the decision rule.
