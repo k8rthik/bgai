@@ -11,6 +11,24 @@ Two AI tracks, cross-validated against each other and against real humans:
    context → engine tools → retrieval over expert games → test-time search → LLM-guided
    MCTS → fine-tuned models.
 
+## Where it stands (2026-08-19)
+
+The engine track is a complete, measured pipeline: a rules engine that
+replays 3,552/3,553 tournament games with zero per-move mismatches, an
+imitation net on 1.2M human decisions, a max^n MCTS with prior pruning
+and batched leaf evaluation, and five verified generations of
+human-regularized self-play. The champion agent (`selfplay_leg5b`, 512
+sims / top-k 8 / depth 48 / c_puct 2.5) scores **~111 VP per player** on
+its own tables: ahead of tmai's `ai_lode` (97–99, the only external bot
+yardstick), at roughly the **22nd–24th percentile of human players**
+(median 123, Div 1–3 average 136). Progress at local scale has been
+exhausted by measurement (`docs/decisions.md` C10–C17); the next lever
+is self-play at cluster scale (10^5–10^6 games, CPU only).
+
+The LLM track is built and mock-tested but unmeasured for lack of API
+credentials. Playing real humans (Phase 8) is prepared and deliberately
+parked on the site operator's consent.
+
 Layout:
 
 ```
@@ -26,8 +44,10 @@ data/         # gitignored: raw game cache, parquet datasets
 
 Data sources: game logs from terra.snellman.net (fetched politely: ≤1 req/s,
 identifying User-Agent, resumable cache); tournament structure from tmtour.org's
-open API. Thanks to Juho Snellman and the tmtour maintainers for keeping these
-running.
+open API. Every request carries a contact address read from the
+`BGAI_CRAWL_CONTACT` environment variable (copy `.env.example` to `.env`);
+the crawler refuses to run anonymously. Thanks to Juho Snellman and the
+tmtour maintainers for keeping these running.
 
 ## Replay harness
 
@@ -152,8 +172,11 @@ against our own baselines flatters the agent; final scores do not:
 | | VP per player | table total |
 |---|---|---|
 | Div 1-3 humans (3,553 games) | **136.3** | 545.2 |
-| tmai `ai_lode`, external heuristic (25 games) | **98.9** | 395.5 |
-| our imitation net (after the driver fix) | **~95–99** | — |
+| all-population human median (304k scores) | **123** | — |
+| our champion: deep search + self-play leg 5 (2026-08-17) | **~111** | — |
+| our deep search on the imitation net, pre-RL (2026-08-13) | ~105 | — |
+| tmai `ai_lode`, external heuristic (45 games) | **97–99** | 395.5 |
+| our imitation net (after the driver fix) | ~95–99 | — |
 | our imitation net (before the fix) | ~65 | ~256 |
 | random | ~54 | — |
 
@@ -184,53 +207,88 @@ is strong where options are few and conventions clear (`leech` 91%,
 game's grammar, not its strategy.
 
 
-## Search, self-play, and the LLM track (Phases 6–7)
+## Search (Phase 6)
 
 `src/bgai/agents/mcts.py` is a max^n MCTS: every node carries a value
 vector with one component per seat (a 4-player game is not zero-sum, so
 a scalar would be a lie), selection maximises the *acting* seat's own
-component, and leaves are evaluated by the imitation net's value head
-rather than by random rollouts. It runs on `arena/driver.py`'s
-immutable `SimState`, which exists so positions can be cloned and
-branched — see `docs/decisions.md` D6.1.
+component, and leaves are evaluated by the net's value head rather than
+by random rollouts. It runs on `arena/driver.py`'s immutable `SimState`,
+which exists so positions can be cloned and branched (D6.1).
 
-**Honest status: search adds nothing over the policy it is built from.**
-Against greedy, MCTS wins comfortably (+0.85 mean rank). Against the
-imitation policy that supplies its priors, a 1,000-game paired run
-settles it: **-0.005 +/- 0.083 mean rank (t = -0.06)** — a tight zero,
-not merely a null result, ruling out even a small benefit. It costs ~75x
-more compute per game (3.6 s vs 48 ms) to play exactly as well.
+**The first version added nothing.** Over 1,000 paired games against the
+imitation policy that supplies its priors, 64-simulation MCTS scored
+**-0.005 ± 0.083 mean rank** at 75x the compute (D6.7, re-confirmed
+after the driver fix in C4). Two diagnostics then separated the causes.
+Blending a *computed* VP projection into the leaf evaluator produced an
+inverted-U gain peaking at w=0.5 (C5): the learned value head goes blind
+off the human distribution, and search had been faithfully amplifying
+noise. A depth ladder (C6) showed 1024 simulations winning where 64 and
+256 did not: the search was also too shallow.
 
-The master plan's "each rung beats the previous" gate is therefore **not
-met for Phase 6**. The search code is not the problem — it beats greedy,
-it explores, its value vectors re-base correctly. The **value head** is:
-trained only on positions humans reached, it cannot rank the
-off-distribution positions search generates, so deeper lookahead
-averages noise rather than finding signal. That is exactly what
-self-play fixes (train the value head on states the search visits), so
-Phase 6b is the indicated next step rather than a speculative one. See
-`docs/decisions.md` D6.5–D6.7.
+**What fixed it (C7, 2026-08-13):** spend the budget deeper via **prior
+pruning** (`top_k=8`, since policy top-3 is 84%), `max_depth=48`, batched
+leaf evaluation with virtual loss, 512 simulations, on a net retrained
+with a pairwise rank loss and a simplex value head over the
+broad-population value split. Head-to-head vs the raw policy: **35.8% vs
+15.0% win rate, 106.4 vs 96.6 VP** (n=120). Rank and VP moved together
+for the first time. A one-variable sweep found more simulations help
+while more depth or narrower width hurt; `c_puct` was later confirmed at
+2.5 over the untuned 1.5 (C16, 28.7%/21.9%, n=320/side).
+
+Tree reuse between moves, a confident-move fast path, and a disk-cached
+setup list bring generation to **~650 games/hour on 10 laptop cores**
+(~28 core-seconds per game). GPU inference was measured and refuted at
+this model size: the IPC round-trip costs more than the 10 ms CPU
+forward it replaces (C17), so the cluster ask is CPU-only. The batched
+inference server (`bde9553`) stays for a future larger net.
+
+## Self-play RL (Phase 6b)
 
 `src/bgai/training/selfplay.py` + `selfplay_train.py` implement
-human-regularized self-play (policy toward the search distribution,
-value toward realised final VP shares, KL toward the frozen imitation
-policy). It **ran**: 6 iterations x 400 games = 2,400 games and 789k
-decision records, ~2,600 games/hour across 9 parallel workers.
+human-regularized self-play: policy toward the search distribution,
+value toward realised outcomes, KL toward the frozen imitation anchor
+(piKL). Generation and arena share one `MCTSAgent.search()` entry point
+so the teacher is exactly the searcher that was measured (D6.10).
 
-**It made the agent significantly worse** (+0.554 ± 0.163 mean rank,
-t = 3.40, 61.1 VP vs 64.7), and training the value head on 789k
-search-visited states still did not make search pay (−0.104 ± 0.171).
-The per-iteration drift curve shows damage growing with distance from
-the human anchor: iteration 1 level (−0.075), iteration 3 worse
-(+0.458), iteration 6 plateaued (+0.450).
+**The first run made the agent worse** (+0.554 ± 0.163 mean rank,
+D6.8): with search at parity with its policy, self-play distilled a
+teacher no stronger than its student, and every iteration was a lossy
+copy. Once C7 gave search an edge, the flywheel compounded. Each leg is
+~600–770 games and is verified head-to-head against its predecessor at
+the deep-search config (n=120, mirrored seats):
 
-The diagnosis (D6.8): self-play trains the policy toward the *search's*
-distribution, and D6.7 measured that this search has no edge over the
-policy — so the loop distills a teacher no stronger than its student,
-and every iteration is a lossy copy. Search must acquire an edge before
-self-play can bootstrap; a larger KL weight would limit the damage but
-cannot manufacture a teacher. The imitation checkpoint remains the
-strongest agent.
+| leg | change | h2h vs predecessor |
+|---|---|---|
+| 1 | value MSE only | RL *policy* +, RL *search* − (value lost ordering) |
+| 2 | + pairwise rank loss | **32.5% / 18.3%** vs pre-RL search |
+| 3 | + winner-priority pairs, win CE | **30.8% / 20.8%** vs leg 2, 109.5 VP |
+| 4 | 1024-sim targets, replay buffer | tie (25.8 / 27.5) — local scale spent |
+| 5 | + aux head: final abs VP + town count | **30.8% / 20.8%** vs leg 4, +3.4 VP |
+| 6 | KL leash halved | tie, clean drift canary — anchor is not the constraint |
+
+The leg-4 plateau was diagnosed, not tuned away. VP-source decomposition
+against rating-banded humans and a town-tile audit (C10–C13) found
+**economy myopia**: the agent took cult town tiles 55% of the time vs
+28% for top-5% humans and founded 1.28 towns per founding seat vs 2.3,
+with identical expected VP per pick, so the error was invisible to
+VP-greedy metrics. Share-based value targets are scale-blind to
+compounding economy; adding auxiliary prediction of absolute final VP
+and town count (C12) broke the plateau.
+
+Also settled by measurement and refuted: round-scaled endgame budgets
+(dead tie: the conversion weakness is evaluator knowledge, not thinking
+time), max-child root selection (loses 15.8/34.2 to robust-child), and
+in-training loss metrics as a proxy for strength (they never predicted
+h2h; the human-validation ordering probe read flat across legs that
+moved a full generation). Full record: `docs/decisions.md` C7–C17.
+
+**What is left is scale.** Total self-play to date is ~4,500 games. No
+leg has been run at more than one size, so the data-scaling curve is
+unmeasured; a 5,000-game leg is the experiment that decides whether the
+next 10^5 games buy strength or whether the lever is evaluator coverage.
+
+## LLM ladder (Phase 7)
 
 `src/bgai/llm/` + `src/bgai/agents/llm_agent.py` implement ladder rungs
 L0–L4 (bare → knowledge → engine tools → corpus retrieval → propose /
