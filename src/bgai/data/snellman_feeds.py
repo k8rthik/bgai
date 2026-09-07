@@ -19,7 +19,7 @@ import orjson
 import polars as pl
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from bgai.data.tmtour import USER_AGENT
+from bgai.data.identity import user_agent
 
 EVENTS_BASE_URL = "https://terra.snellman.net/data/events"
 FIRST_MONTH = (2014, 5)  # tmtour season 1 started 2014-05
@@ -55,7 +55,7 @@ def download_events(raw_dir: Path) -> list[Path]:
     months = month_range(FIRST_MONTH, (today.year, today.month))
     paths: list[Path] = []
     with httpx.Client(
-        headers={"User-Agent": USER_AGENT}, timeout=REQUEST_TIMEOUT_SECONDS
+        headers={"User-Agent": user_agent()}, timeout=REQUEST_TIMEOUT_SECONDS
     ) as client:
         for month in months:
             path = raw_dir / f"{month}.json"

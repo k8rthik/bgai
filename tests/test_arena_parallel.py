@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import random
 
+import pytest
+
 from bgai.arena.series import run_series, table_setup_rng
 
 
