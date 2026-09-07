@@ -24,7 +24,7 @@ import polars as pl
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from bgai.data.player_ratings import playable
-from bgai.data.tmtour import USER_AGENT
+from bgai.data.identity import user_agent
 
 VIEW_GAME_URL = "https://terra.snellman.net/app/view-game/"
 MIN_REQUEST_INTERVAL_SECONDS = 1.0
@@ -141,7 +141,7 @@ def _crawl_loop(todo: list[str], raw_dir: Path, min_interval_seconds: float) -> 
     started = time.monotonic()
     next_allowed = time.monotonic()
     with httpx.Client(
-        headers={"User-Agent": USER_AGENT}, timeout=REQUEST_TIMEOUT_SECONDS
+        headers={"User-Agent": user_agent()}, timeout=REQUEST_TIMEOUT_SECONDS
     ) as client:
         for game_id in todo:
             delay = next_allowed - time.monotonic()

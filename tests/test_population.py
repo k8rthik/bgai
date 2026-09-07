@@ -131,6 +131,7 @@ def test_crawl_loop_paces_on_request_starts_not_response_ends(monkeypatch) -> No
         return b'{"ledger": [1], "finished": 1}'
 
     monkeypatch.setattr(crawl_module, "_fetch_game", fake_fetch)
+    monkeypatch.setenv("BGAI_CRAWL_CONTACT", "test@example.org")
     monkeypatch.setattr(crawl_module.httpx, "Client", lambda **_: _NullClient())
     monkeypatch.setattr(crawl_module.gzip, "open", lambda *a, **k: _NullFile())
 

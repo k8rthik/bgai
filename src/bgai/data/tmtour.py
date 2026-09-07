@@ -13,8 +13,9 @@ from dataclasses import dataclass
 import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential
 
+from bgai.data.identity import user_agent
+
 BASE_URL = "https://tmtour.org/api2"
-USER_AGENT = "bgai-research/0.1 (Terra Mystica AI research; contact: keerthik.4.m@gmail.com)"
 REQUEST_TIMEOUT_SECONDS = 30.0
 
 _GAME_NAME_RE = re.compile(r"^4pLeague_S(\d+)_D(\d+)L(\d+)_G(\d+)$")
@@ -106,7 +107,7 @@ def qualifying_games(raw_games: list[dict], max_division: int) -> QualifyingResu
 
 def _client() -> httpx.Client:
     return httpx.Client(
-        headers={"User-Agent": USER_AGENT},
+        headers={"User-Agent": user_agent()},
         timeout=REQUEST_TIMEOUT_SECONDS,
         follow_redirects=True,
     )
