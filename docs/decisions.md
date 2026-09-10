@@ -837,8 +837,20 @@ encoding memoised per `state.hexes` mapping object (rebuilt only when
 a hex changes): a batched-index rewrite of the encoder measured SLOWER
 than the original (28 vs 22 us -- numpy scalar stores beat list
 building at 113 rows) and was reverted in favour of the memo; 23.8 ->
-18.8 s. Net: seed 7 ~31 -> ~19 s; three-seed table in the session
-report.
+18.8 s. (6) Self-play workers raise the cyclic-GC gen-0 threshold
+to 50k (`selfplay_train.WORKER_GC_THRESHOLDS`): the search allocates
+millions of short-lived tuples and keeps no cycles, so the default
+700 buys ~600 collections a game that each walk the pinned memos;
+~1 s/game. Three seeds, min of two rounds, run three-parallel under
+an unrelated agent's load on the same box (ratios are the signal):
+
+    seed   base (main)   final   final + worker GC
+    7      36.3 s        23.6 s  22.1 s
+    11     39.8 s        19.8 s  18.5 s
+    23     31.3 s        20.6 s  19.8 s
+
+Every recorded visit distribution is identical across all three
+columns for all three seeds.
 
 Refuted -- transposition tables (`state_key.py`, opt-in via
 `driver.enable_decision_table()` / `MCTSAgent(eval_table=N)`): after
