@@ -251,15 +251,15 @@ def test_engine_rejection_drops_the_game(monkeypatch) -> None:
     worker pool (compounded by EngineError not surviving pickling)."""
     import bgai.training.selfplay as sp
     from bgai.engine.tm.apply import EngineError
-    from bgai.engine.tm.state import GameState
-    from bgai.engine.tm.setup import load_setup
     from bgai.engine.tm.legal_shared import cmd as _cmd
+    from bgai.engine.tm.setup import load_setup
+    from bgai.engine.tm.state import GameState
 
     agent = MCTSAgent(net=_net(), simulations=2)
     cfg = SelfPlayConfig(simulations=2)
     state = GameState.initial(load_setup("4pLeague_S10_D1L1_G1"))
 
-    def boom(sim, choice):
+    def boom(sim, choice, **_kwargs):
         raise EngineError("fuzz finding", state=state, faction="witches", cmd=_cmd("wait"))
 
     monkeypatch.setattr(sp, "advance", boom)

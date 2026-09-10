@@ -37,33 +37,43 @@ from bgai.engine.tm.apply import EngineError
 from bgai.engine.tm.state import GameState
 from bgai.training.encode_move import MOVE_FIELDS, encode_move
 from bgai.training.encode_state import encode_state
-from bgai.training.model import (
-    ModelConfig,
-    PolicyValueNet,
-    model_config_from_checkpoint,
-)
+from bgai.training.model import PolicyValueNet, model_config_from_checkpoint
 from bgai.training.vocab import ENCODING_VERSION, FACTION_INDEX
 
 
 @dataclass
 class _Node:
-    """One decision point in the search tree."""
+    """One decision point in the search tree.
+
+    ``visits``/``action_value`` are the arrays of record (self-play reads
+    the visit distribution, tests poke them directly). The scalar fields
+    after them are read-side conveniences for ``_select``: the acting
+    seat's index, a view onto its own value column, the priors as a
+    Python list, and the allowed indices in ascending order.
+    """
 
     sim: SimState
     faction: str
     offer: tuple[ParsedCommand, ...]
     priors: np.ndarray
     seat_of: dict[str, int]
-    children: dict[int, "_Node | None"] = field(default_factory=dict)
+    children: dict[int, _Node | None] = field(default_factory=dict)
     visits: np.ndarray | None = None
     action_value: np.ndarray | None = None  # (n_actions, 4) summed value vectors
     total_visits: int = 0
     allowed: np.ndarray | None = None  # cached top-k prior indices
+    seat: int = 0
+    own_value: np.ndarray | None = None  # view: action_value[:, seat]
+    priors_list: list[float] | None = None
+    allowed_list: list[int] | None = None  # ``allowed`` sorted ascending
 
     def __post_init__(self) -> None:
         n = len(self.offer)
         self.visits = np.zeros(n, dtype=np.int32)
         self.action_value = np.zeros((n, 4), dtype=np.float32)
+        self.seat = self.sim.game.setup.factions.index(self.faction)
+        self.own_value = self.action_value[:, self.seat]
+        self.priors_list = np.asarray(self.priors).tolist()
 
 
 class MCTSAgent:
@@ -331,29 +341,42 @@ class MCTSAgent:
             return None
         if node.allowed is None:
             node.allowed = np.argsort(-node.priors)[: self.top_k]
+            node.allowed_list = sorted(node.allowed.tolist())
         return node.allowed
 
     def _select(self, node: _Node) -> int:
-        """PUCT over the acting seat's own value component."""
-        seat = node.sim.game.setup.factions.index(node.faction)
-        visits = node.visits
-        q = np.zeros(len(node.offer), dtype=np.float32)
-        visited = visits > 0
-        q[visited] = node.action_value[visited, seat] / visits[visited]
+        """PUCT over the acting seat's own value component.
+
+        Scalar Python rather than numpy: this runs ~540k times per
+        self-play game over ~23 entries, where per-call numpy dispatch
+        costs more than the arithmetic. Ties break on the lowest index,
+        as ``np.argmax`` did. Arithmetic is float64 throughout where the
+        vectorised original mixed float32 intermediates; the choice
+        differs only when the top two scores agree to ~1e-7 relative.
+        """
+        visits = node.visits.tolist()
+        own = node.own_value.tolist()
         # unvisited edges inherit the parent's own current estimate, so a
         # single bad first result cannot permanently bury a move
-        if visited.any():
-            q[~visited] = q[visited].mean()
-        else:
-            q[:] = 0.25
-        u = self.c_puct * node.priors * math.sqrt(max(node.total_visits, 1)) / (1 + visits)
-        score = q + u
-        allowed = self._allowed(node)
-        if allowed is not None:
-            masked = np.full(len(node.offer), -np.inf, dtype=np.float32)
-            masked[allowed] = score[allowed]
-            score = masked
-        return int(np.argmax(score))
+        q_sum = 0.0
+        n_visited = 0
+        for v, w in zip(visits, own, strict=True):
+            if v > 0:
+                q_sum += w / v
+                n_visited += 1
+        fill = q_sum / n_visited if n_visited else 0.25
+        scale = self.c_puct * math.sqrt(max(node.total_visits, 1))
+        priors = node.priors_list
+        indices = node.allowed_list if self._allowed(node) is not None else range(len(visits))
+        best = -math.inf
+        best_index = 0
+        for i in indices:
+            v = visits[i]
+            score = (own[i] / v if v > 0 else fill) + scale * priors[i] / (1 + v)
+            if score > best:
+                best = score
+                best_index = i
+        return best_index
 
     def _simulate(self, root: _Node) -> None:
         path: list[tuple[_Node, int]] = []
@@ -365,7 +388,9 @@ class MCTSAgent:
             child = node.children.get(action)
             if child is None:
                 try:
-                    child_sim = advance(node.sim, node.offer[action])
+                    child_sim = advance(
+                        node.sim, node.offer[action], current=(node.faction, node.offer)
+                    )
                 except EngineError:
                     # A move the engine rejects is worth nothing; record a
                     # zero vector so the search stops trying it.
@@ -380,7 +405,9 @@ class MCTSAgent:
             depth += 1
             if depth >= self.max_depth:
                 _, value = self._evaluate(node.sim.game, node.faction, node.offer)
-                self._backup(path, self._leaf_value(value, node.seat_of, node.faction, node.sim.game))
+                self._backup(
+                    path, self._leaf_value(value, node.seat_of, node.faction, node.sim.game)
+                )
                 return
 
     def _backup(self, path: list[tuple[_Node, int]], value: np.ndarray) -> None:
@@ -425,11 +452,14 @@ class MCTSAgent:
             while True:
                 action = self._select(node)
                 path.append((node, action))
-                self._apply_virtual_loss([(node, action)])
+                node.visits[action] += 1  # virtual loss, one edge
+                node.total_visits += 1
                 child = node.children.get(action)
                 if child is None:
                     try:
-                        child_sim = advance(node.sim, node.offer[action])
+                        child_sim = advance(
+                            node.sim, node.offer[action], current=(node.faction, node.offer)
+                        )
                     except EngineError:
                         self._revert_virtual_loss(path)
                         self._backup(path, np.zeros(4, dtype=np.float32))
@@ -469,7 +499,7 @@ class MCTSAgent:
                 items.append((i, sim, faction, offer))
 
         results = self._evaluate_many([(sim.game, f, o) for _i, sim, f, o in items])
-        for (i, sim, faction, offer), (priors, value_rel) in zip(items, results):
+        for (i, sim, faction, offer), (priors, value_rel) in zip(items, results, strict=True):
             path, parent, action, _ = pending[i]
             seat_of = self._seat_map(sim.game, faction)
             node = _Node(

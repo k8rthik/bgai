@@ -167,11 +167,22 @@ def decision(sim: SimState) -> tuple[str, tuple[ParsedCommand, ...]] | None:
     return _actions_offer(sim)
 
 
-def advance(sim: SimState, choice: ParsedCommand) -> SimState:
+def advance(
+    sim: SimState,
+    choice: ParsedCommand,
+    current: tuple[str, tuple[ParsedCommand, ...]] | None = None,
+) -> SimState:
     """Apply ``choice`` for the current decision's faction, then settle
     forward to the next decision point (or the finished state).
+
+    ``current`` is the pending ``(faction, offer)`` when the caller
+    already holds it (an MCTS node stores its offer; the self-play loop
+    just asked ``decision``). It must be exactly what ``decision(sim)``
+    returns -- passing it skips the driver's own re-enumeration, which
+    is the single most expensive step of a search descent.
     """
-    current = decision(sim)
+    if current is None:
+        current = decision(sim)
     if current is None:
         raise ValueError("advance called on a finished game")
     faction, offer = current
