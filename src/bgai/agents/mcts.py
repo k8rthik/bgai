@@ -35,6 +35,7 @@ from bgai.arena.driver import SimState, advance, decision
 from bgai.data.ledger_parser import ParsedCommand
 from bgai.engine.tm.apply import EngineError
 from bgai.engine.tm.state import GameState
+from bgai.engine.tm.state_key import game_key
 from bgai.training.encode_move import MOVE_FIELDS, encode_move
 from bgai.training.encode_state import encode_state
 from bgai.training.model import PolicyValueNet, model_config_from_checkpoint
@@ -133,6 +134,7 @@ class MCTSAgent:
         late_sims: int = 0,
         root_choice: str = "visits",
         evaluator=None,
+        eval_table: int = 0,
     ) -> None:
         self.name = name
         self.simulations = simulations
@@ -179,6 +181,20 @@ class MCTSAgent:
         with pre-encoded numpy batches instead of the local net. When
         set, this process never runs torch forward passes -- a central
         server batches every worker's leaves into one GPU call."""
+        self._eval_table: dict[tuple, tuple[tuple, np.ndarray, np.ndarray]] | None = (
+            {} if eval_table > 0 else None
+        )
+        self._eval_table_max = eval_table
+        """Opt-in transposition table for net evaluations (``eval_table``
+        = max entries, 0 = off), keyed by position content and mover
+        (``state_key.game_key``): ~17% of the leaves a self-play game
+        evaluates are content-repeats reached by another move order, and
+        the net is a pure function of (position, mover, offer). The offer
+        is stored with the entry and checked on a hit -- the same
+        position can carry different offers depending on the driver's
+        turn bookkeeping. Off by default: at this net size a hit saves
+        ~85 us and the misses' key/table/GC cost exceeds that
+        (docs/decisions.md C18); the arithmetic flips with a bigger net."""
         self.device = torch.device(device)
         if evaluator is not None:
             self.net = None  # type: ignore[assignment]
@@ -208,6 +224,12 @@ class MCTSAgent:
         order) for one position."""
         if self.evaluator is not None:
             return self._evaluate_many([(game, faction, offer)])[0]
+        key = None
+        if self._eval_table is not None:
+            key = (game_key(game), faction)
+            hit = self._lookup(key, offer)
+            if hit is not None:
+                return hit
         enc = encode_state(game, faction)
         cand = np.stack([encode_move(m, game, faction) for m in offer])
         logits, value = self.net(
@@ -217,10 +239,31 @@ class MCTSAgent:
             torch.from_numpy(cand.astype(np.int64))[None].to(self.device),
             torch.ones((1, len(offer)), dtype=torch.bool, device=self.device),
         )
-        return (
+        result = (
             logits[0].softmax(dim=-1).cpu().numpy(),
             value[0].cpu().numpy(),
         )
+        if key is not None:
+            self._remember(key, offer, result)
+        return result
+
+    def _lookup(
+        self, key: tuple, offer: tuple[ParsedCommand, ...]
+    ) -> tuple[np.ndarray, np.ndarray] | None:
+        assert self._eval_table is not None
+        entry = self._eval_table.get(key)
+        if entry is None or entry[0] != offer:
+            return None
+        return entry[1], entry[2]
+
+    def _remember(
+        self, key: tuple, offer: tuple[ParsedCommand, ...], result: tuple[np.ndarray, np.ndarray]
+    ) -> None:
+        table = self._eval_table
+        assert table is not None
+        if len(table) >= self._eval_table_max:
+            del table[next(iter(table))]
+        table[key] = (offer, result[0], result[1])
 
     @torch.no_grad()
     def _evaluate_many(
@@ -240,6 +283,29 @@ class MCTSAgent:
         """
         if not items:
             return []
+        if self._eval_table is None:
+            return self._evaluate_batch(items)
+        keys = [(game_key(game), faction) for game, faction, _offer in items]
+        results: list[tuple[np.ndarray, np.ndarray] | None] = [None] * len(items)
+        fresh: list[int] = []
+        for i, key in enumerate(keys):
+            hit = self._lookup(key, items[i][2])
+            if hit is None:
+                fresh.append(i)
+            else:
+                results[i] = hit
+        if fresh:
+            computed = self._evaluate_batch([items[i] for i in fresh])
+            for i, result in zip(fresh, computed, strict=True):
+                self._remember(keys[i], items[i][2], result)
+                results[i] = result
+        return results  # type: ignore[return-value]
+
+    @torch.no_grad()
+    def _evaluate_batch(
+        self, items: Sequence[tuple[GameState, str, tuple[ParsedCommand, ...]]]
+    ) -> list[tuple[np.ndarray, np.ndarray]]:
+        """One padded, masked forward pass over ``items`` (no table)."""
         width = max(len(offer) for _, _, offer in items)
         n = len(items)
         hex_planes, globals_, factions = [], [], []
@@ -259,7 +325,8 @@ class MCTSAgent:
                 np.asarray(factions, dtype=np.int64), cand, mask,
             )
             return [
-                (priors[i, : len(items[i][2])], values[i]) for i in range(n)
+                (np.array(priors[i, : len(items[i][2])]), np.array(values[i]))
+                for i in range(n)
             ]
         logits, value = self.net(
             torch.from_numpy(np.stack(hex_planes)).to(self.device),
@@ -270,8 +337,10 @@ class MCTSAgent:
         )
         priors = logits.softmax(dim=-1).cpu().numpy()
         values = value.cpu().numpy()
+        # copies, so a table entry does not pin the whole batch's arrays
         return [
-            (priors[i, : len(items[i][2])], values[i]) for i in range(n)
+            (np.array(priors[i, : len(items[i][2])]), np.array(values[i]))
+            for i in range(n)
         ]
 
     def _seat_map(self, game: GameState, faction: str) -> dict[str, int]:

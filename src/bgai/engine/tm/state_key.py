@@ -23,7 +23,7 @@ from collections.abc import Mapping
 
 from bgai.engine.tm.memo import state_memo
 from bgai.engine.tm.setup import GameSetup
-from bgai.engine.tm.state import FactionState, GameState
+from bgai.engine.tm.state import FactionState, GameState, HexState
 
 GAME_FIELDS_COVERED: tuple[str, ...] = (
     "setup",
@@ -103,7 +103,7 @@ def faction_key(fs: FactionState) -> tuple:
         fs.shipping,
         fs.dig_level,
         fs.teleport_level,
-        _sorted_items(fs.buildings),
+        tuple(fs.buildings.values()),  # FactionState.initial order, dict copies
         fs.favors,
         fs.bonus,
         fs.towns,
@@ -119,10 +119,52 @@ def faction_key(fs: FactionState) -> tuple:
     )
 
 
+class StateKey:
+    """A position's content key with its hash computed once.
+
+    Tuples do not cache their hash, and this one holds 113 hex rows, so
+    a plain tuple would re-hash (~9 us) on every table get and set. The
+    hex part is shared with every other state that carries the same
+    ``hexes`` mapping object (see ``_hexes_part``), so a new key costs a
+    few microseconds. Equality compares full content, never just the
+    hash.
+    """
+
+    __slots__ = ("parts", "_hash")
+
+    def __init__(self, parts: tuple, hash_value: int) -> None:
+        self.parts = parts
+        self._hash = hash_value
+
+    def __hash__(self) -> int:
+        return self._hash
+
+    def __eq__(self, other: object) -> bool:
+        if self is other:
+            return True
+        if not isinstance(other, StateKey):
+            return NotImplemented
+        return self._hash == other._hash and self.parts == other.parts
+
+    def __repr__(self) -> str:
+        return f"StateKey({self._hash:#x})"
+
+
 @state_memo(maxsize=4096)
-def game_key(state: GameState) -> tuple:
-    """Content tuple for a whole position (``GAME_FIELDS_COVERED`` order)."""
-    return (
+def _hexes_part(hexes: Mapping[str, HexState]) -> tuple[tuple[HexState, ...], int]:
+    """``(rows, hash(rows))`` for a ``state.hexes`` mapping -- memoised on
+    the mapping object, which the engine only rebuilds when a hex
+    changes. Board order by construction: every rebuild is a ``dict``
+    copy plus an existing-key assignment."""
+    rows = tuple(hexes.values())
+    return rows, hash(rows)
+
+
+@state_memo(maxsize=4096)
+def game_key(state: GameState) -> StateKey:
+    """Content key for a whole position (``GAME_FIELDS_COVERED`` order)."""
+    rows, rows_hash = _hexes_part(state.hexes)
+    rest = (
         _setup_key(state.setup),
         state.round,
         state.phase,
@@ -130,7 +172,6 @@ def game_key(state: GameState) -> tuple:
         state.passed_order,
         state.active_index,
         state.pending,
-        tuple(state.hexes.items()),
         state.bridges,
         tuple((name, faction_key(fs)) for name, fs in state.factions.items()),
         tuple((cult, _sorted_items(steps)) for cult, steps in state.cults.items()),
@@ -142,3 +183,4 @@ def game_key(state: GameState) -> tuple:
         state.power_actions_taken,
         tuple((name, towns) for name, towns in state.founded_towns.items()),
     )
+    return StateKey((rows, rest), hash((rows_hash, hash(rest))))
