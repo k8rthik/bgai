@@ -159,9 +159,21 @@ def model_config_from_checkpoint(checkpoint: dict) -> ModelConfig:
     head produces plausible-looking wrong values rather than an error,
     and MCTS would weigh them against a c_puct tuned for share space.
     Checkpoints predating the flag default to the old behaviour.
+
+    A ``config["model_config"]`` sub-dict (written by the actor/learner
+    pipeline, and by tests that ship a tiny net) pins the full
+    architecture; the two flags above still win when both are present so
+    a hand-edited flag cannot disagree with the stored dict silently.
     """
     stored = (checkpoint or {}).get("config") or {}
+    arch = stored.get("model_config") or {}
+    if not isinstance(arch, dict):
+        raise ValueError("checkpoint config['model_config'] must be a dict")
+    known = {k: v for k, v in arch.items() if k in ModelConfig.__dataclass_fields__}
     return ModelConfig(
-        value_simplex=bool(stored.get("value_simplex", False)),
-        aux_head=bool(stored.get("aux_head", False)),
+        **{
+            **known,
+            "value_simplex": bool(stored.get("value_simplex", known.get("value_simplex", False))),
+            "aux_head": bool(stored.get("aux_head", known.get("aux_head", False))),
+        }
     )
