@@ -22,6 +22,7 @@ from bgai.training.checkpoint_io import load_checkpoint
 from bgai.training.encode_move import MOVE_FIELDS
 from bgai.training.model import ModelConfig, PolicyValueNet, model_config_from_checkpoint
 from bgai.training.selfplay import SelfPlayRecord, regularized_loss
+from bgai.training.vocab import ENCODING_VERSION
 
 
 class FineTuneParams(Protocol):
@@ -58,6 +59,8 @@ class TrainableNets:
     model_cfg: ModelConfig
     iteration: int
     """Iteration stamped on the checkpoint the weights came from."""
+    stored_config: dict
+    """The checkpoint's ``config`` block (resume reads provenance from it)."""
 
 
 def load_trainable_nets(
@@ -86,7 +89,8 @@ def load_trainable_nets(
     for p in frozen.parameters():
         p.requires_grad_(False)
     return TrainableNets(
-        net=net, frozen=frozen, model_cfg=model_cfg, iteration=int(ckpt.get("iteration", 0))
+        net=net, frozen=frozen, model_cfg=model_cfg, iteration=int(ckpt.get("iteration", 0)),
+        stored_config=dict(ckpt.get("config") or {}),
     )
 
 
@@ -94,10 +98,12 @@ def checkpoint_payload(
     net: PolicyValueNet, model_cfg: ModelConfig, iteration: int, run_config: dict
 ) -> dict:
     """The checkpoint layout every consumer (MCTSAgent, arena, actors)
-    reads; ``model_config`` pins the full architecture."""
+    reads; ``model_config`` pins the full architecture. Tensors are
+    copied to CPU so a learner training on cuda/mps writes files that
+    CPU actors load without a device round-trip."""
     return {
-        "model": net.state_dict(),
-        "encoding_version": _encoding_version(),
+        "model": {k: v.detach().cpu() for k, v in net.state_dict().items()},
+        "encoding_version": ENCODING_VERSION,
         "iteration": int(iteration),
         "config": {
             **run_config,
@@ -106,12 +112,6 @@ def checkpoint_payload(
             "model_config": asdict(model_cfg),
         },
     }
-
-
-def _encoding_version() -> int:
-    from bgai.training.vocab import ENCODING_VERSION
-
-    return ENCODING_VERSION
 
 
 def collate(records: list[SelfPlayRecord], device: torch.device) -> dict[str, torch.Tensor]:

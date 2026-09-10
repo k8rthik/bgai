@@ -21,7 +21,18 @@ Contract with the run directory ``R``
   highest existing sequence for this actor id, so restarting an actor
   never overwrites a shard.
 - ``R/STOP``         anyone may create it; the actor finishes in-flight
-  games, flushes its partial buffer and exits.
+  games, flushes its partial buffer and exits. SIGTERM/SIGINT do the
+  same (``stop_signal``), so a tmux kill loses nothing. The actor never
+  deletes ``STOP`` -- whoever created it owns it.
+
+Actors are individually restartable at any moment: a fresh actor with
+the same ``--actor-id`` continues its shard sequence and game index and
+loads whatever ``current.pt`` is present. Rolling code upgrade: stop
+and restart actors ONE AT A TIME (the others keep the learner fed),
+then the learner last (``selfplay_learner`` resumes from ``current.pt``
+and logs a ``code_changed`` row); shard/checkpoint formats are
+versioned, and a learner refuses shards from a different
+``encoding_version``.
 
 Seeds derive from ``(base seed, actor_id, game index)`` via a hash, so
 actors never replay each other's setups and a run is reproducible given
@@ -57,11 +68,11 @@ import torch
 from bgai.training import shards as sh
 from bgai.training.checkpoint_io import checkpoint_mtime_ns, load_checkpoint
 from bgai.training.selfplay import SelfPlayConfig, SelfPlayRecord, play_game
+from bgai.training.stop_signal import StopSignal
 from bgai.training.worker_env import pin_single_thread_env
 
 log = logging.getLogger(__name__)
 
-STOP_FILE = "STOP"
 CURRENT_CHECKPOINT = "current.pt"
 SHARDS_DIR = "shards"
 
@@ -75,7 +86,6 @@ class ActorConfig:
     max_games: int | None = None
     seed: int = 0
     selfplay: SelfPlayConfig = SelfPlayConfig()
-    c_puct: float = 1.5
     checkpoint_wait_secs: float = 600.0
     """How long to wait for the learner to create ``current.pt``."""
 
@@ -164,7 +174,7 @@ def next_seq(shards_dir: Path, actor_id: int) -> int:
 _WORKER: dict[str, object] = {}
 
 
-def _actor_worker_init(checkpoint: str, cfg: SelfPlayConfig, c_puct: float) -> None:
+def _actor_worker_init(checkpoint: str, cfg: SelfPlayConfig) -> None:
     from bgai.agents.mcts import MCTSAgent
     from bgai.training.model import PolicyValueNet, model_config_from_checkpoint
 
@@ -179,7 +189,7 @@ def _actor_worker_init(checkpoint: str, cfg: SelfPlayConfig, c_puct: float) -> N
         max_depth=cfg.max_depth,
         top_k=cfg.top_k,
         leaf_batch=cfg.leaf_batch,
-        c_puct=c_puct,
+        c_puct=cfg.c_puct,
         device="cpu",
     )
     _WORKER.update(
@@ -260,10 +270,10 @@ class _Progress:
     buffer: ShardBuffer
 
 
-def _stop_requested(cfg: ActorConfig, progress: _Progress) -> bool:
+def _stop_requested(cfg: ActorConfig, progress: _Progress, stop: StopSignal) -> bool:
     if cfg.max_games is not None and progress.next_game >= cfg.max_games:
         return True
-    return (cfg.run_dir / STOP_FILE).exists()
+    return stop.requested()
 
 
 def run_actor(cfg: ActorConfig) -> int:
@@ -276,7 +286,7 @@ def run_actor(cfg: ActorConfig) -> int:
     shards_dir = cfg.run_dir / SHARDS_DIR
     shards_dir.mkdir(parents=True, exist_ok=True)
     seq0 = next_seq(shards_dir, cfg.actor_id)
-    chash = sh.config_hash(cfg.selfplay, {"c_puct": cfg.c_puct})
+    chash = sh.config_hash(cfg.selfplay)
     log.info("actor %d: start at ckpt iteration %s, seq %d, env %s", cfg.actor_id,
              payload.get("iteration"), seq0, env)
     progress = _Progress(
@@ -284,16 +294,21 @@ def run_actor(cfg: ActorConfig) -> int:
         buffer=ShardBuffer.empty(),
     )
     done: queue.Queue = queue.Queue()
+    stop = StopSignal(cfg.run_dir)  # SIGTERM or R/STOP: finish in-flight games, flush
+    stop.install()
     ctx = get_context("spawn")
-    with ctx.Pool(
-        processes=cfg.workers,
-        initializer=_actor_worker_init,
-        initargs=(str(current), cfg.selfplay, cfg.c_puct),
-    ) as pool:
-        submit = _submitter(pool, cfg, current, done)
-        while progress.in_flight < cfg.workers and not _stop_requested(cfg, progress):
-            progress = submit(progress)
-        progress = _drain(cfg, progress, done, submit, chash)
+    try:
+        with ctx.Pool(
+            processes=cfg.workers,
+            initializer=_actor_worker_init,
+            initargs=(str(current), cfg.selfplay),
+        ) as pool:
+            submit = _submitter(pool, cfg, current, done)
+            while progress.in_flight < cfg.workers and not _stop_requested(cfg, progress, stop):
+                progress = submit(progress)
+            progress = _drain(cfg, progress, done, submit, chash, stop)
+    finally:
+        stop.uninstall()
     if progress.buffer.n_games:
         _write_buffer(cfg, progress.buffer, progress.seq, chash)
     return progress.played
@@ -316,7 +331,10 @@ def _submitter(pool, cfg: ActorConfig, current: Path, done: queue.Queue):
     return submit
 
 
-def _drain(cfg: ActorConfig, progress: _Progress, done: queue.Queue, submit, chash: str):
+def _drain(
+    cfg: ActorConfig, progress: _Progress, done: queue.Queue, submit, chash: str,
+    stop: StopSignal,
+):
     """Consume results, write due shards, keep the pool fed until stop."""
     while progress.in_flight > 0:
         kind, item = done.get()
@@ -333,7 +351,7 @@ def _drain(cfg: ActorConfig, progress: _Progress, done: queue.Queue, submit, cha
             log.info("actor %d: game seed %d done in %.1fs (ckpt it %d%s, %d records)",
                      cfg.actor_id, item.seed, item.secs, item.ckpt_iteration,
                      ", reloaded" if item.reloaded else "", len(item.records))
-        if not _stop_requested(cfg, progress):
+        if not _stop_requested(cfg, progress, stop):
             progress = submit(progress)
     return progress
 
@@ -359,7 +377,7 @@ def selfplay_config_from_args(args: argparse.Namespace) -> SelfPlayConfig:
     return SelfPlayConfig(
         simulations=args.simulations, top_k=args.top_k, max_depth=args.max_depth,
         leaf_batch=args.leaf_batch, temp_decisions=args.temp_decisions,
-        fast_prior=args.fast_prior,
+        fast_prior=args.fast_prior, c_puct=args.c_puct,
     )
 
 
@@ -380,7 +398,7 @@ def main(argv: list[str] | None = None) -> None:
             run_dir=args.run_dir, actor_id=args.actor_id,
             games_per_shard=args.games_per_shard, workers=args.workers,
             max_games=args.max_games, seed=args.seed,
-            selfplay=selfplay_config_from_args(args), c_puct=args.c_puct,
+            selfplay=selfplay_config_from_args(args),
             checkpoint_wait_secs=args.checkpoint_wait_secs,
         )
     )

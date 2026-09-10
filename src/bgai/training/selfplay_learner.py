@@ -29,9 +29,29 @@ the metrics row's ``staleness_*`` fields (learner iteration minus the
 shard's ``ckpt_iteration``, per record) quantify that lag so a pipelined
 leg can be judged against the serial baseline.
 
-One CPU learner suffices: measured ~3,000 rec/s at batch 128 (5,000 on
-MPS) versus ~285 generating cores' worth of records per second at
-window-2, so ``--device`` is a convenience, not a requirement.
+Device: ``--device auto`` (default) trains on cuda, else mps, else cpu
+while actors stay on CPU; checkpoints are always written with CPU
+tensors so CPU actors load them directly. One CPU learner already keeps
+up (measured ~3,000 rec/s at batch 128, 5,000 on MPS, versus ~285
+generating cores' worth of records per second at window-2), but on a
+DGX Spark the serial loop's CPU ``fine_tune`` measured 39 s per 96-game
+iteration against ~368 s of generation -- ~10% of the loop, and in
+pipelined mode every second the learner spends training is a second of
+extra staleness -- so the idle GPU takes it.
+
+Stopping and restarting: ``R/STOP`` (or SIGTERM) ends the learner after
+the in-flight step with a ``{"event": "stopped"}`` row and the file
+removed; actors are stopped separately (they also honour ``STOP``, so
+on a single host create it once and they all see it; on a two-host run
+create it on each generation host too, or SIGTERM the actors). A
+restarted learner in the same ``R`` resumes from ``current.pt`` with
+the settings stored in it (explicit flags override), keeps numbering,
+and logs a ``code_changed`` row if the git sha differs. Every checkpoint
+config and metrics row carries ``git_sha``/``code_dirty``/
+``encoding_version``/``hostname``.
+
+Rolling upgrade: upgrade actors one at a time (each restart continues
+its own shard sequence), then stop and restart the learner last.
 """
 
 from __future__ import annotations
@@ -40,14 +60,16 @@ import argparse
 import json
 import logging
 import time
-from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass, replace
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
 
 import torch
 
 from bgai.training import shards as sh
-from bgai.training.checkpoint_io import save_atomic
+from bgai.training.checkpoint_io import load_checkpoint, save_atomic
+from bgai.training.cli_util import config_kwargs_from_stored, explicit_cli_args
+from bgai.training.run_provenance import CodeProvenance, code_provenance
 from bgai.training.selfplay import SelfPlayRecord
 from bgai.training.selfplay_finetune import (
     FineTuneConfig,
@@ -56,6 +78,8 @@ from bgai.training.selfplay_finetune import (
     fine_tune,
     load_trainable_nets,
 )
+from bgai.training.stop_signal import StopSignal
+from bgai.training.train import pick_device
 
 log = logging.getLogger(__name__)
 
@@ -75,7 +99,8 @@ class LearnerConfig:
     window_steps: int = 2
     max_iterations: int | None = None
     finetune: FineTuneConfig = FineTuneConfig()
-    device: str = "cpu"
+    device: str = "auto"
+    """auto = cuda > mps > cpu (``train.pick_device``)."""
     poll_secs: float = 5.0
     idle_timeout_secs: float | None = None
     """Exit when no shard has arrived and no step has run for this long
@@ -102,6 +127,7 @@ class LearnerState:
     """``created_at`` of the newest shard consumed by the last step."""
     last_progress: float
     steps_done: int = 0
+    prov: CodeProvenance = code_provenance()
 
 
 # --------------------------------------------------------------------------
@@ -211,47 +237,85 @@ def load_window(window: Sequence[ShardInfo]) -> list[SelfPlayRecord]:
 # --------------------------------------------------------------------------
 
 
-def _run_config(cfg: LearnerConfig) -> dict:
+def _run_config(cfg: LearnerConfig, prov: CodeProvenance) -> dict:
     return {
         **{k: v for k, v in asdict(cfg).items() if k != "finetune"},
         **asdict(cfg.finetune),
         "run_dir": str(cfg.run_dir),
         "checkpoint": str(cfg.checkpoint),
         "anchor": str(cfg.anchor) if cfg.anchor else None,
+        **prov.as_dict(),
     }
+
+
+def resolve_device(cfg: LearnerConfig) -> torch.device:
+    return pick_device(cfg.device or "auto")
 
 
 def _init(cfg: LearnerConfig, device: torch.device) -> tuple[TrainableNets, LearnerState]:
     """Build nets; publish ``current.pt`` (fresh iteration 0, or resume)."""
+    prov = code_provenance()
     current = cfg.run_dir / CURRENT_CHECKPOINT
     if current.exists():
         nets = load_trainable_nets(current, cfg.anchor or cfg.checkpoint, device)
         log.info("learner: resuming from %s at iteration %d", current, nets.iteration)
+        before = nets.stored_config.get("git_sha")
+        if before is not None and before != prov.git_sha:
+            _append_metrics(cfg.run_dir / METRICS_FILE, {
+                "event": "code_changed", "from": before, "to": prov.git_sha,
+                "wall_time": time.time(), **prov.as_dict(),
+            })
     else:
         nets = load_trainable_nets(cfg.checkpoint, cfg.anchor, device)
         nets = replace(nets, iteration=0)
-        save_atomic(checkpoint_payload(nets.net, nets.model_cfg, 0, _run_config(cfg)), current)
-        log.info("learner: initialized %s at iteration 0", current)
+        payload = checkpoint_payload(nets.net, nets.model_cfg, 0, _run_config(cfg, prov))
+        save_atomic(payload, current)
+        log.info("learner: initialized %s at iteration 0 on %s", current, device)
     now = time.monotonic()
     return nets, LearnerState(
         iteration=nets.iteration, games_at_last_step=_resumed_games(cfg), shards={},
-        prev_mark=None, last_progress=now,
+        prev_mark=None, last_progress=now, prov=prov,
     )
 
 
 def _resumed_games(cfg: LearnerConfig) -> int:
-    """Games already consumed by an earlier learner in this run dir."""
+    """Games already consumed by an earlier learner in this run dir (the
+    newest step row; event rows carry no ``total_games``)."""
     path = cfg.run_dir / METRICS_FILE
     if not path.exists():
         return 0
-    rows = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
-    if not rows:
-        return 0
-    try:
-        return int(json.loads(rows[-1]).get("total_games", 0))
-    except (ValueError, TypeError) as exc:
-        log.warning("learner: unreadable last metrics row (%s); consuming from 0", exc)
-        return 0
+    for line in reversed(path.read_text(encoding="utf-8").splitlines()):
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError as exc:
+            log.warning("learner: unreadable metrics row (%s); skipping it", exc)
+            continue
+        if "total_games" in row:
+            return int(row["total_games"])
+    return 0
+
+
+def stored_learner_config(run_dir: Path) -> dict:
+    """The learner config block stored in ``run_dir/current.pt`` ({} if none)."""
+    current = Path(run_dir) / CURRENT_CHECKPOINT
+    if not current.exists():
+        return {}
+    return dict(load_checkpoint(current).get("config") or {})
+
+
+def resumed_learner_config(run_dir: Path, overrides: dict) -> LearnerConfig:
+    """Config for continuing ``run_dir``: stored settings, then the
+    explicitly typed flags in ``overrides``."""
+    stored = stored_learner_config(run_dir)
+    cfg_kwargs = config_kwargs_from_stored(LearnerConfig, stored, {"checkpoint", "anchor"})
+    ft_kwargs = config_kwargs_from_stored(FineTuneConfig, stored, set())
+    ft_names = {f.name for f in fields(FineTuneConfig)}
+    cfg_names = {f.name for f in fields(LearnerConfig)}
+    ft = FineTuneConfig(**{**ft_kwargs, **{k: v for k, v in overrides.items() if k in ft_names}})
+    picked = {k: v for k, v in overrides.items() if k in cfg_names}
+    return LearnerConfig(**{**cfg_kwargs, **picked, "run_dir": Path(run_dir), "finetune": ft})
 
 
 def _step(
@@ -272,7 +336,9 @@ def _step(
     parts = fine_tune(nets.net, nets.frozen, records, cfg.finetune, device)
     train_secs = time.perf_counter() - t1
     iteration = state.iteration + 1
-    payload = checkpoint_payload(nets.net, nets.model_cfg, iteration, _run_config(cfg))
+    payload = checkpoint_payload(
+        nets.net, nets.model_cfg, iteration, _run_config(cfg, state.prov)
+    )
     save_atomic(payload, cfg.run_dir / CURRENT_CHECKPOINT)
     save_atomic(payload, cfg.run_dir / f"iter_{iteration:04d}.pt")
     row = _metrics_row(
@@ -301,6 +367,7 @@ def _metrics_row(state, iteration, window, new, n_records, total, load_secs, tra
         **staleness_stats(state.iteration, window),
         "wall_time": time.time(),
         **{k: round(v, 4) for k, v in parts.items()},
+        **state.prov.as_dict(),
     }
 
 
@@ -319,27 +386,52 @@ def _idle_too_long(cfg: LearnerConfig, state: LearnerState) -> bool:
     return time.monotonic() - state.last_progress > cfg.idle_timeout_secs
 
 
-def run_learner(cfg: LearnerConfig) -> int:
-    """Poll, step, publish; returns the number of steps taken."""
+def run_learner(cfg: LearnerConfig, stop_when: Callable[[], bool] | None = None) -> int:
+    """Poll, step, publish; returns the number of steps taken.
+
+    ``stop_when`` is polled between steps (the local launcher passes
+    "every actor process has exited")."""
     if cfg.games_per_step < 1 or cfg.window_steps < 1:
         raise ValueError("games_per_step and window_steps must be >= 1")
     cfg.run_dir.mkdir(parents=True, exist_ok=True)
-    device = torch.device(cfg.device)
+    device = resolve_device(cfg)
     nets, state = _init(cfg, device)
     shards_dir = cfg.run_dir / SHARDS_DIR
-    while not _finished(cfg, state):
-        shards = scan_shards(shards_dir, state.shards)
-        if len(shards) != len(state.shards):
-            state = replace(state, shards=shards, last_progress=time.monotonic())
-        if should_step(total_games(shards), state.games_at_last_step, cfg.games_per_step):
-            nets, state = _step(cfg, nets, state, device)
-            continue
-        if _idle_too_long(cfg, state):
-            log.warning("learner: no new shards for %.0fs; exiting after %d steps",
-                        cfg.idle_timeout_secs, state.steps_done)
-            break
-        time.sleep(cfg.poll_secs)
+    stop = StopSignal(cfg.run_dir)
+    stop.install()
+    try:
+        while not _finished(cfg, state):
+            shards = scan_shards(shards_dir, state.shards)
+            if len(shards) != len(state.shards):
+                state = replace(state, shards=shards, last_progress=time.monotonic())
+            if should_step(total_games(shards), state.games_at_last_step, cfg.games_per_step):
+                nets, state = _step(cfg, nets, state, device)
+            elif _idle_too_long(cfg, state):
+                log.warning("learner: no new shards for %.0fs; exiting after %d steps",
+                            cfg.idle_timeout_secs, state.steps_done)
+                break
+            elif stop_when is not None and stop_when():
+                log.warning("learner: stop condition met; exiting after %d steps",
+                            state.steps_done)
+                break
+            else:
+                time.sleep(cfg.poll_secs)
+            # STOP (file or signal) is honoured only here, at a step boundary
+            if stop.requested():
+                _stopped(cfg, state, stop)
+                break
+    finally:
+        stop.uninstall()
     return state.steps_done
+
+
+def _stopped(cfg: LearnerConfig, state: LearnerState, stop: StopSignal) -> None:
+    log.warning("learner: STOP requested; exiting after %d steps", state.steps_done)
+    _append_metrics(cfg.run_dir / METRICS_FILE, {
+        "event": "stopped", "iteration": state.iteration, "wall_time": time.time(),
+        **state.prov.as_dict(),
+    })
+    stop.clear()
 
 
 # --------------------------------------------------------------------------
@@ -369,30 +461,46 @@ def finetune_config_from_args(args: argparse.Namespace) -> FineTuneConfig:
     )
 
 
-def main(argv: list[str] | None = None) -> None:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Self-play learner (training).")
     parser.add_argument("--run-dir", type=Path, required=True)
-    parser.add_argument("--checkpoint", type=Path, required=True, help="init weights")
+    parser.add_argument("--checkpoint", type=Path, default=None,
+                        help="init weights (required unless --run-dir holds a current.pt)")
     parser.add_argument("--anchor", type=Path, default=None,
                         help="frozen KL anchor (defaults to --checkpoint)")
     parser.add_argument("--games-per-step", type=int, default=96)
     parser.add_argument("--window-steps", type=int, default=2)
     parser.add_argument("--max-iterations", type=int, default=None)
-    parser.add_argument("--device", default="cpu")
+    parser.add_argument("--device", choices=("auto", "cpu", "cuda", "mps"), default="auto")
     parser.add_argument("--poll-secs", type=float, default=5.0)
     parser.add_argument("--idle-timeout-secs", type=float, default=None)
     add_loss_args(parser)
-    args = parser.parse_args(argv)
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    steps = run_learner(
-        LearnerConfig(
-            run_dir=args.run_dir, checkpoint=args.checkpoint, anchor=args.anchor,
-            games_per_step=args.games_per_step, window_steps=args.window_steps,
-            max_iterations=args.max_iterations, finetune=finetune_config_from_args(args),
-            device=args.device, poll_secs=args.poll_secs,
-            idle_timeout_secs=args.idle_timeout_secs,
-        )
+    return parser
+
+
+def config_from_argv(argv: list[str] | None) -> LearnerConfig:
+    """Fresh run: flags as given. Existing ``current.pt`` in --run-dir:
+    stored settings, overridden only by explicitly typed flags."""
+    args = build_parser().parse_args(argv)
+    if (args.run_dir / CURRENT_CHECKPOINT).exists():
+        explicit = explicit_cli_args(build_parser, argv)
+        if "epochs" in explicit:
+            explicit["epochs_per_iteration"] = explicit.pop("epochs")
+        return resumed_learner_config(args.run_dir, explicit)
+    if args.checkpoint is None:
+        raise SystemExit("--checkpoint is required for a fresh run")
+    return LearnerConfig(
+        run_dir=args.run_dir, checkpoint=args.checkpoint, anchor=args.anchor,
+        games_per_step=args.games_per_step, window_steps=args.window_steps,
+        max_iterations=args.max_iterations, finetune=finetune_config_from_args(args),
+        device=args.device, poll_secs=args.poll_secs,
+        idle_timeout_secs=args.idle_timeout_secs,
     )
+
+
+def main(argv: list[str] | None = None) -> None:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    steps = run_learner(config_from_argv(argv))
     log.info("learner: exit after %d steps", steps)
 
 

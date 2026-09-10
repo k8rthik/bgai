@@ -17,7 +17,8 @@ from bgai.training.checkpoint_io import checkpoint_mtime_ns, save_atomic
 from bgai.training.selfplay import SelfPlayConfig
 from bgai.training.worker_env import SINGLE_THREAD_ENV, pin_single_thread_env
 
-FAST = SelfPlayConfig(simulations=2, top_k=3, max_depth=4, leaf_batch=2, fast_prior=0.9)
+FAST = SelfPlayConfig(simulations=2, top_k=3, max_depth=4, leaf_batch=2, fast_prior=0.9,
+                      c_puct=2.5)
 
 
 def _bump_mtime(path: Path) -> None:
@@ -142,7 +143,7 @@ def test_next_seq_continues_after_existing_shards(tmp_path: Path) -> None:
 def test_worker_reloads_only_when_checkpoint_mtime_changes(tmp_path: Path) -> None:
     ckpt = tmp_path / "current.pt"
     write_tiny_checkpoint(ckpt, iteration=0)
-    sa._actor_worker_init(str(ckpt), FAST, 1.5)
+    sa._actor_worker_init(str(ckpt), FAST)
     stamp = checkpoint_mtime_ns(ckpt)
     task = sa.WorkerTask(seed=sa.game_seed(0, 0, 0), checkpoint=str(ckpt), mtime_ns=stamp)
     first = sa._actor_worker_game(task)
@@ -167,7 +168,7 @@ def test_worker_reloads_only_when_checkpoint_mtime_changes(tmp_path: Path) -> No
 def test_worker_keeps_old_weights_when_new_checkpoint_is_bad(tmp_path: Path) -> None:
     ckpt = tmp_path / "current.pt"
     write_tiny_checkpoint(ckpt, iteration=0)
-    sa._actor_worker_init(str(ckpt), FAST, 1.5)
+    sa._actor_worker_init(str(ckpt), FAST)
     _bump_mtime(ckpt)
     ckpt.write_bytes(b"garbage")
     _bump_mtime(ckpt)
@@ -186,7 +187,7 @@ def test_run_actor_writes_shards_and_stops_at_max_games(tmp_path: Path) -> None:
     write_tiny_checkpoint(run_dir / "current.pt", iteration=4)
     cfg = sa.ActorConfig(
         run_dir=run_dir, actor_id=2, games_per_shard=2, workers=1, max_games=3,
-        seed=11, selfplay=FAST, c_puct=2.5,
+        seed=11, selfplay=FAST,
     )
     played = sa.run_actor(cfg)
     assert played == 3
@@ -195,6 +196,6 @@ def test_run_actor_writes_shards_and_stops_at_max_games(tmp_path: Path) -> None:
     metas = [sh.read_shard_meta(run_dir / "shards" / f) for f in files]
     assert [m.n_games for m in metas] == [2, 1]  # the partial tail is flushed on stop
     assert all(m.ckpt_iteration == 4 and m.actor_id == 2 for m in metas)
-    assert all(m.config_hash == sh.config_hash(FAST, {"c_puct": 2.5}) for m in metas)
+    assert all(m.config_hash == sh.config_hash(FAST) for m in metas)
     _, records = sh.read_shard(run_dir / "shards" / files[0])
     assert records and all(r.final_shares is not None for r in records)

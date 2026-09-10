@@ -802,3 +802,67 @@ the arithmetic flips. Pre-cluster optimization checklist is COMPLETE:
 every knob measured, adopted (c_puct 2.5, aux targets, rank/winner
 terms, tree reuse, fast-prior, setup cache), or refuted (KL loosening,
 max-child, endgame budget, 1024-sim targets, GPU inference).
+
+**C18 — Actor/learner split for self-play (2026-09-10).** The serial
+loop (`selfplay_train --mode serial`, unchanged) rebuilds a worker pool
+every iteration, idles every generating core during training, idles the
+learner during generation, and writes `current.pt` non-atomically. For
+cluster scale it is now split into two programs that share only a run
+directory: `selfplay_actor` (persistent spawn pool, reloads weights in
+place via `MCTSAgent.reload` when `current.pt`'s mtime changes, writes
+`shards/it{ckpt}_a{actor}_{seq}.npz`) and `selfplay_learner` (polls
+shards, steps once `--games-per-step` new games landed, window-2 replay,
+identical `fine_tune`, atomic `current.pt`/`iter_NNNN.pt`, per-record
+staleness histogram + games/hour in `metrics.jsonl`). `selfplay_train
+--mode pipelined` runs both locally; two hosts run them by hand with
+`tools/sync_run_dir.sh`. Alternatives rejected: a queue/RPC transport
+(one more service to keep alive on a cluster; the filesystem plus rsync
+is enough at ~20 KB/game and one 45 MB checkpoint per step) and a
+per-shard-sized learner step (would change training semantics; the
+step rule intentionally mirrors the serial iteration so the two can be
+compared). Measurements behind the design: learner throughput 3,000
+rec/s CPU / 5,000 MPS at batch 128 (`_collate` alone 97k rec/s), so ONE
+CPU learner keeps up with ~285 generating cores at window-2; shard
+format ~69 B/record with packbits hex planes (pickle was ~3.4 KB); the
+in-code `torch.set_num_threads(1)` did not stop OpenMP spinning on Linux
+aarch64 (5 runnable threads/worker, game thread at ~1/3 core), fixed by
+exporting `OMP/OPENBLAS/MKL/POLARS` thread counts in the parent before
+spawn. Also fixed on the way: `c_puct` was never threaded through
+`SelfPlayConfig` (generation ran at 1.5 while the champion evaluates at
+2.5, C16); it is now a config field and `--c-puct` flag, default 1.5 so
+existing legs stay comparable. Cost of being wrong: pipelined games are
+STALE by construction (the histogram measures it -- a tiny local run
+showed mean 0.7 iterations at step 3), which the serial loop never was.
+**Validation gate before any pipelined leg is trusted:** run pipelined
+and serial from the same checkpoint to equal game counts, then h2h at
+the deep config (512 sims, top_k 8, depth 48, batch 16, c_puct 2.5;
+n=120 mirrored); they must tie. A pipelined loss there means staleness
+matters at this scale and the learner must throttle (wait for
+`ckpt_iteration == iteration - 1` shards) before the cluster run.
+
+**C18b — Runs are resumable and the learner trains on the GPU
+(2026-09-10, same branch).** (1) `selfplay_train --resume RUN_DIR
+[--extra-iterations N | --iterations TOTAL]` (both modes) and a
+learner restarted in its run dir take iteration, base seed, anchor and
+every setting from `current.pt`'s stored config (explicit flags
+override), continue numbering (so `seed + iteration` never replays a
+game), append `metrics.jsonl`, and never overwrite an `iter_NN.pt`; a
+fresh run refuses an `--out` that already holds `current.pt`. The
+anchor path and base seed are stored on every save, so a restart from a
+mid-run checkpoint can no longer silently re-anchor the piKL leash to
+the drifted policy. (2) `RUN_DIR/STOP` or SIGTERM ends serial runs,
+the learner and actors at an iteration/step/game boundary with a
+`{"event": "stopped"}` row -- a tmux kill loses at most one in-flight
+iteration. (3) Every checkpoint config and metrics row is stamped with
+`git_sha`, `code_dirty`, `encoding_version`, `hostname`; resume refuses
+a different `encoding_version` and logs `{"event": "code_changed"}` on
+a different sha, which is how a games/hour change gets attributed to a
+code upgrade. Rolling upgrade on a cluster: actors one at a time (each
+continues its shard sequence), learner last. (4) The learner defaults
+to `--device auto` (cuda > mps > cpu) while actors stay on CPU;
+checkpoints are always written with CPU tensors. Motivation: on the DGX
+Spark (ARM CPU + GB10) the serial loop's CPU `fine_tune` measured 39 s
+per 96-game iteration against ~368 s of generation -- ~10% of the loop
+spent on a step the idle GPU does in seconds -- and in pipelined mode
+a slow learner is extra staleness. Serial mode keeps its CPU default
+unless `--device` is passed.

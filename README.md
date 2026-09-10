@@ -250,6 +250,10 @@ human-regularized self-play: policy toward the search distribution,
 value toward realised outcomes, KL toward the frozen imitation anchor
 (piKL). Generation and arena share one `MCTSAgent.search()` entry point
 so the teacher is exactly the searcher that was measured (D6.10).
+For cluster scale the loop is split into decoupled `selfplay_actor` /
+`selfplay_learner` processes sharing only a run directory
+(`selfplay_train --mode pipelined` runs both locally; runs resume with
+`--resume RUN_DIR`, stop with `RUN_DIR/STOP`; C18).
 
 **The first run made the agent worse** (+0.554 ± 0.163 mean rank,
 D6.8): with search at parity with its policy, self-play distilled a
