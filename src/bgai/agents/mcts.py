@@ -62,6 +62,13 @@ class _Node:
     action_value: np.ndarray | None = None  # (n_actions, 4) summed value vectors
     total_visits: int = 0
     allowed: np.ndarray | None = None  # cached top-k prior indices
+    leaf_values: dict[int, tuple[str, np.ndarray]] = field(default_factory=dict)
+    """Edges that resolved without a child node -- ``("terminal", v)``,
+    ``("stuck", v)`` (zero-move engine edge) or ``("rejected", v)``
+    (EngineError) -- with the value that was backed up. ``children``
+    holds None for these too; without this table a re-selected edge
+    re-ran ``advance``+``decision`` on the identical state (the most
+    re-queried single states were hit 200+ times per game)."""
     seat: int = 0
     own_value: np.ndarray | None = None  # view: action_value[:, seat]
     priors_list: list[float] | None = None
@@ -74,6 +81,18 @@ class _Node:
         self.seat = self.sim.game.setup.factions.index(self.faction)
         self.own_value = self.action_value[:, self.seat]
         self.priors_list = np.asarray(self.priors).tolist()
+
+
+@dataclass
+class _Pending:
+    """A batched descent waiting for its leaf to be resolved: either a
+    fresh ``sim`` to classify and evaluate, or a ``cached`` leaf value."""
+
+    path: list[tuple[_Node, int]]
+    parent: _Node
+    action: int
+    sim: SimState | None
+    cached: tuple[str, np.ndarray] | None
 
 
 class MCTSAgent:
@@ -269,9 +288,15 @@ class MCTSAgent:
     # -- tree -------------------------------------------------------------
 
     def _expand(self, sim: SimState) -> tuple[_Node | None, np.ndarray | None]:
+        node, value, _kind = self._expand_kind(sim)
+        return node, value
+
+    def _expand_kind(self, sim: SimState) -> tuple[_Node | None, np.ndarray, str]:
+        """``(node, value, kind)``: kind is "node" when a searchable child
+        was created, else the ``leaf_values`` tag for the resolved edge."""
         pending = decision(sim)
         if pending is None:
-            return None, self._terminal_value(sim)
+            return None, self._terminal_value(sim), "terminal"
         faction, offer = pending
         if not offer:
             # Engine edge (selfplay_deep iter-5 crash): a pending decision
@@ -279,7 +304,7 @@ class MCTSAgent:
             # ACTC double-turn corner. The position can't be searched or
             # net-evaluated (no candidates), so value it with the engine's
             # own VP projection and stop descending.
-            return None, computed_value(sim.game)
+            return None, computed_value(sim.game), "stuck"
         priors, value = self._evaluate(sim.game, faction, offer)
         node = _Node(
             sim=sim,
@@ -288,7 +313,7 @@ class MCTSAgent:
             priors=priors,
             seat_of=self._seat_map(sim.game, faction),
         )
-        return node, self._leaf_value(value, node.seat_of, faction, sim.game)
+        return node, self._leaf_value(value, node.seat_of, faction, sim.game), "node"
 
     def _terminal_value(self, sim: SimState) -> np.ndarray:
         """Final VP shares, in absolute seat order of the setup."""
@@ -387,6 +412,10 @@ class MCTSAgent:
             path.append((node, action))
             child = node.children.get(action)
             if child is None:
+                cached = node.leaf_values.get(action)
+                if cached is not None:
+                    self._backup(path, cached[1])
+                    return
                 try:
                     child_sim = advance(
                         node.sim, node.offer[action], current=(node.faction, node.offer)
@@ -394,11 +423,15 @@ class MCTSAgent:
                 except EngineError:
                     # A move the engine rejects is worth nothing; record a
                     # zero vector so the search stops trying it.
-                    self._backup(path, np.zeros(4, dtype=np.float32))
+                    value = np.zeros(4, dtype=np.float32)
+                    self._backup(path, value)
                     node.children[action] = None
+                    node.leaf_values[action] = ("rejected", value)
                     return
-                new_node, value = self._expand(child_sim)
+                new_node, value, kind = self._expand_kind(child_sim)
                 node.children[action] = new_node
+                if new_node is None:
+                    node.leaf_values[action] = (kind, value)
                 self._backup(path, value)
                 return
             node = child
@@ -434,17 +467,23 @@ class MCTSAgent:
             node.visits[action] -= 1
             node.total_visits -= 1
 
-    def _descend_batch(
-        self, root: _Node, count: int
-    ) -> list[tuple[list[tuple[_Node, int]], _Node, int, SimState]]:
+    def _descend_batch(self, root: _Node, count: int) -> list[_Pending]:
         """Walk ``count`` paths to unexpanded leaves, holding virtual loss.
 
         Paths that resolve without a network evaluation -- an engine
         rejection, or hitting ``max_depth`` -- are backed up immediately
         and not returned; only leaves needing a forward pass come back, so
-        the caller can evaluate them in one batch.
+        the caller can evaluate them in one batch. A cached terminal/stuck
+        edge is returned too (with its value, no ``advance``), so it is
+        backed up at the same point of the batch as a fresh one would be.
         """
-        pending: list[tuple[list[tuple[_Node, int]], _Node, int, SimState]] = []
+        pending: list[_Pending] = []
+        # Virtual loss does not always move the next descent off an edge,
+        # so one batch can reach the same unexpanded edge several times.
+        # Those repeats share the first descent's child state: the engine
+        # step is deterministic, and the leaf still gets one pending entry
+        # per path so the batch's backups are unchanged.
+        advanced: dict[tuple[int, int], SimState] = {}
         for _ in range(count):
             path: list[tuple[_Node, int]] = []
             node = root
@@ -456,16 +495,30 @@ class MCTSAgent:
                 node.total_visits += 1
                 child = node.children.get(action)
                 if child is None:
-                    try:
-                        child_sim = advance(
-                            node.sim, node.offer[action], current=(node.faction, node.offer)
-                        )
-                    except EngineError:
-                        self._revert_virtual_loss(path)
-                        self._backup(path, np.zeros(4, dtype=np.float32))
-                        node.children[action] = None
+                    cached = node.leaf_values.get(action)
+                    if cached is not None:
+                        if cached[0] == "rejected":
+                            self._revert_virtual_loss(path)
+                            self._backup(path, cached[1])
+                        else:
+                            pending.append(_Pending(path, node, action, None, cached))
                         break
-                    pending.append((path, node, action, child_sim))
+                    edge = (id(node), action)
+                    child_sim = advanced.get(edge)
+                    if child_sim is None:
+                        try:
+                            child_sim = advance(
+                                node.sim, node.offer[action], current=(node.faction, node.offer)
+                            )
+                        except EngineError:
+                            value = np.zeros(4, dtype=np.float32)
+                            self._revert_virtual_loss(path)
+                            self._backup(path, value)
+                            node.children[action] = None
+                            node.leaf_values[action] = ("rejected", value)
+                            break
+                        advanced[edge] = child_sim
+                    pending.append(_Pending(path, node, action, child_sim, None))
                     break
                 node = child
                 depth += 1
@@ -485,22 +538,32 @@ class MCTSAgent:
         if not pending:
             return
         items = []
-        terminal: list[int] = []
-        stuck: list[int] = []
-        for i, (_path, _parent, _action, sim) in enumerate(pending):
-            decided = decision(sim)
+        terminal: list[tuple[_Pending, np.ndarray]] = []
+        stuck: list[tuple[_Pending, np.ndarray]] = []
+        decided_by_sim: dict[int, tuple[str, tuple[ParsedCommand, ...]] | None] = {}
+        for entry in pending:
+            if entry.cached is not None:
+                kind, value = entry.cached
+                (terminal if kind == "terminal" else stuck).append((entry, value))
+                continue
+            sim = entry.sim
+            if id(sim) in decided_by_sim:
+                decided = decided_by_sim[id(sim)]
+            else:
+                decided = decided_by_sim[id(sim)] = decision(sim)
             if decided is None:
-                terminal.append(i)
+                terminal.append((entry, self._terminal_value(sim)))
             elif not decided[1]:
                 # zero-move decision: same engine edge _expand guards
-                stuck.append(i)
+                stuck.append((entry, computed_value(sim.game)))
             else:
                 faction, offer = decided
-                items.append((i, sim, faction, offer))
+                items.append((entry, sim, faction, offer))
 
-        results = self._evaluate_many([(sim.game, f, o) for _i, sim, f, o in items])
-        for (i, sim, faction, offer), (priors, value_rel) in zip(items, results, strict=True):
-            path, parent, action, _ = pending[i]
+        results = self._evaluate_many([(sim.game, f, o) for _e, sim, f, o in items])
+        for (entry, sim, faction, offer), (priors, value_rel) in zip(
+            items, results, strict=True
+        ):
             seat_of = self._seat_map(sim.game, faction)
             node = _Node(
                 sim=sim,
@@ -509,19 +572,15 @@ class MCTSAgent:
                 priors=priors,
                 seat_of=seat_of,
             )
-            parent.children[action] = node
-            self._revert_virtual_loss(path)
-            self._backup(path, self._leaf_value(value_rel, seat_of, faction, sim.game))
-        for i in terminal:
-            path, parent, action, sim = pending[i]
-            parent.children[action] = None
-            self._revert_virtual_loss(path)
-            self._backup(path, self._terminal_value(sim))
-        for i in stuck:
-            path, parent, action, sim = pending[i]
-            parent.children[action] = None
-            self._revert_virtual_loss(path)
-            self._backup(path, computed_value(sim.game))
+            entry.parent.children[entry.action] = node
+            self._revert_virtual_loss(entry.path)
+            self._backup(entry.path, self._leaf_value(value_rel, seat_of, faction, sim.game))
+        for kind, resolved in (("terminal", terminal), ("stuck", stuck)):
+            for entry, value in resolved:
+                entry.parent.children[entry.action] = None
+                entry.parent.leaf_values[entry.action] = (kind, value)
+                self._revert_virtual_loss(entry.path)
+                self._backup(entry.path, value)
 
     # -- Agent protocol ---------------------------------------------------
 
