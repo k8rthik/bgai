@@ -363,10 +363,19 @@ def connect_moves(state: GameState, faction: str, fs: FactionState) -> list[Pars
     if faction != "mermaids":
         return []
     board = base_board()
+    # ``river_town_candidate`` is None for any river hex touching none of
+    # the faction's buildings (its seed set is empty), so only rivers
+    # adjacent to a building can qualify -- a handful, not all 36.
+    own = frozenset().union(*fs.buildings.values()) if fs.buildings else frozenset()
+    touched: set[str] = set()
+    for b in own:
+        touched.update(board.adjacent.get(b, frozenset()))
     return [
         cmd("connect", loc=hex_key)
         for hex_key, hx in board.hexes.items()
-        if hx.color == RIVER and river_town_candidate(state, faction, hex_key) is not None
+        if hx.color == RIVER
+        and hex_key in touched
+        and river_town_candidate(state, faction, hex_key) is not None
     ]
 
 

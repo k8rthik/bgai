@@ -88,49 +88,79 @@ def _seat_order(state: GameState, faction: str) -> tuple[str, ...]:
     return seats[pivot:] + seats[:pivot]
 
 
+_RIVER_COL = len(COLORS)
+_BUILDING_COL = len(COLORS) + 1
+_OWNER_COL = len(COLORS) + 1 + len(BUILDINGS)
+_ALL_ROWS = np.arange(len(HEXES))
+
+
+def _hex_planes(state: GameState, seat_of: dict[str, int]) -> np.ndarray:
+    """Hex rows via three batched index assignments rather than ~340
+    scalar numpy stores (search encodes ~65k states per game)."""
+    color_cols: list[int] = []
+    building_rows: list[int] = []
+    building_cols: list[int] = []
+    owner_rows: list[int] = []
+    owner_cols: list[int] = []
+    hexes = state.hexes
+    for row, hex_key in enumerate(HEXES):
+        hx = hexes[hex_key]
+        color = COLOR_INDEX.get(hx.color)
+        color_cols.append(_RIVER_COL if color is None else color)
+        if hx.building is not None:
+            building_rows.append(row)
+            building_cols.append(_BUILDING_COL + BUILDING_INDEX[hx.building])
+        if hx.owner is not None:
+            seat = seat_of.get(hx.owner)
+            if seat is not None:
+                owner_rows.append(row)
+                owner_cols.append(_OWNER_COL + seat)
+    planes = np.zeros((len(HEXES), HEX_FEAT_DIM), dtype=np.int8)
+    planes[_ALL_ROWS, color_cols] = 1
+    planes[building_rows, building_cols] = 1
+    planes[owner_rows, owner_cols] = 1
+    return planes
+
+
+def _seat_block(g: list[int], seat: int, name: str, state: GameState, active: str | None) -> None:
+    fs = state.factions[name]
+    base = seat * SEAT_BLOCK
+    g[base + FACTION_INDEX[name]] = 1
+    g[base + _RES_OFFSET : base + _RES_OFFSET + _N_RES] = (
+        fs.coins, fs.workers, fs.priests, fs.priest_pool, fs.vp
+    )
+    g[base + _BOWLS_OFFSET : base + _BOWLS_OFFSET + 3] = (
+        fs.power.bowl1, fs.power.bowl2, fs.power.bowl3
+    )
+    g[base + _TRACKS_OFFSET : base + _TRACKS_OFFSET + 2] = (fs.shipping, fs.dig_level)
+    g[base + _SPADES_OFFSET : base + _SPADES_OFFSET + 2] = (
+        fs.spades_available, fs.extra_actions
+    )
+    g[base + _FLAGS_OFFSET] = int(fs.passed)
+    g[base + _FLAGS_OFFSET + 1] = int(name == active)
+    cults = state.cults[name]
+    for cult in CULTS4:
+        g[base + _CULTS_OFFSET + CULT_INDEX[cult]] = cults[cult]
+    g[base + _KEYS_OFFSET] = fs.keys
+    g[base + _KEYS_OFFSET + 1] = fs.bridges_built
+    if fs.bonus is not None:
+        g[base + _BON_OFFSET + _BON_INDEX[fs.bonus]] = 1
+    for fav in fs.favors:
+        g[base + _FAV_OFFSET + _FAV_INDEX[fav]] += 1
+    g[base + _TOWNS_OFFSET] = len(fs.towns)
+
+
 def encode_state(state: GameState, faction: str) -> StateEncoding:
     order = _seat_order(state, faction)
     seat_of = {name: i for i, name in enumerate(order)}
+    planes = _hex_planes(state, seat_of)
 
-    planes = np.zeros((len(HEXES), HEX_FEAT_DIM), dtype=np.int8)
-    for row, hex_key in enumerate(HEXES):
-        hx = state.hexes[hex_key]
-        if hx.color in COLOR_INDEX:
-            planes[row, COLOR_INDEX[hx.color]] = 1
-        else:  # river
-            planes[row, len(COLORS)] = 1
-        if hx.building is not None:
-            planes[row, len(COLORS) + 1 + BUILDING_INDEX[hx.building]] = 1
-        if hx.owner is not None and hx.owner in seat_of:
-            planes[row, len(COLORS) + 1 + len(BUILDINGS) + seat_of[hx.owner]] = 1
-
-    g = np.zeros(GLOBAL_DIM, dtype=np.int16)
+    # Filled as a Python list (int16 conversion once at the end): list
+    # stores are an order of magnitude cheaper than scalar numpy stores.
+    g: list[int] = [0] * GLOBAL_DIM
     active = state.turn_order[state.active_index] if state.turn_order else None
     for seat, name in enumerate(order):
-        fs = state.factions[name]
-        base = seat * SEAT_BLOCK
-        g[base + FACTION_INDEX[name]] = 1
-        g[base + _RES_OFFSET : base + _RES_OFFSET + _N_RES] = (
-            fs.coins, fs.workers, fs.priests, fs.priest_pool, fs.vp
-        )
-        g[base + _BOWLS_OFFSET : base + _BOWLS_OFFSET + 3] = (
-            fs.power.bowl1, fs.power.bowl2, fs.power.bowl3
-        )
-        g[base + _TRACKS_OFFSET : base + _TRACKS_OFFSET + 2] = (fs.shipping, fs.dig_level)
-        g[base + _SPADES_OFFSET : base + _SPADES_OFFSET + 2] = (
-            fs.spades_available, fs.extra_actions
-        )
-        g[base + _FLAGS_OFFSET] = int(fs.passed)
-        g[base + _FLAGS_OFFSET + 1] = int(name == active)
-        for cult in CULTS4:
-            g[base + _CULTS_OFFSET + CULT_INDEX[cult]] = state.cults[name][cult]
-        g[base + _KEYS_OFFSET] = fs.keys
-        g[base + _KEYS_OFFSET + 1] = fs.bridges_built
-        if fs.bonus is not None:
-            g[base + _BON_OFFSET + _BON_INDEX[fs.bonus]] = 1
-        for fav in fs.favors:
-            g[base + _FAV_OFFSET + _FAV_INDEX[fav]] += 1
-        g[base + _TOWNS_OFFSET] = len(fs.towns)
+        _seat_block(g, seat, name, state, active)
 
     g[_CTX_ROUND + state.round] = 1
     g[_CTX_PHASE + _PHASE_INDEX[state.phase]] = 1
@@ -149,4 +179,4 @@ def encode_state(state: GameState, faction: str) -> StateEncoding:
             g[_CTX_ACTS + int(act[3:]) - 1] = 1
     g[_CTX_PENDING] = len(state.pending)
 
-    return StateEncoding(hex_planes=planes, globals=g)
+    return StateEncoding(hex_planes=planes, globals=np.array(g, dtype=np.int16))
