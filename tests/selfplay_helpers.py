@@ -62,7 +62,7 @@ def synthetic_records(
             SelfPlayRecord(
                 hex_planes=rng.integers(0, 2, (len(HEXES), HEX_FEAT_DIM)).astype(np.int8),
                 globals=rng.integers(-3, 40, (GLOBAL_DIM,)).astype(np.int16),
-                candidates=rng.integers(0, 120, (k, MOVE_FIELDS)).astype(np.int16),
+                candidates=rng.integers(0, 8, (k, MOVE_FIELDS)).astype(np.int16),
                 visits=rng.integers(0, 50, (k,)).astype(np.float32),
                 faction_id=int(rng.integers(0, 14)),
                 seat=int(rng.integers(0, 4)),
