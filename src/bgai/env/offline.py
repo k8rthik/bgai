@@ -45,7 +45,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from collections.abc import Iterator, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -67,9 +67,9 @@ from bgai.env.observation import (
     encode_hex_planes,
     seat_order,
 )
+from bgai.env.offline_records import ExportStats, OfflineTransition
+from bgai.env.offline_shards import iter_transitions, load_shard, pack_shard
 from bgai.env.reward import dense_step_rewards, terminal_rewards
-from bgai.training.encode_move import MOVE_FIELDS
-from bgai.training.vocab import FACTION_INDEX
 
 __all__ = [
     "ExportStats",
@@ -80,6 +80,8 @@ __all__ = [
     "load_shard",
     "main",
 ]
+# ``iter_transitions``/``load_shard`` are re-exported from
+# ``bgai.env.offline_shards`` so a consumer needs one import, not two.
 
 GAMES_PER_SHARD = 50
 """Smaller than ``dataset_build.GAMES_PER_SHARD`` (200) because an offline
@@ -91,40 +93,6 @@ MASK_SOURCE = "legal_moves_for+canonical_offer"
 DEFAULT_MOVES = Path("data/datasets/moves.parquet")
 DEFAULT_DELTAS = Path("data/datasets/deltas.parquet")
 DEFAULT_META = Path("data/datasets/games_meta.parquet")
-
-
-@dataclass(frozen=True)
-class OfflineTransition:
-    """One logged human decision as an RL transition."""
-
-    obs: Observation
-    action: int
-    reward: float
-    next_obs: Observation | None
-    done: bool
-    faction: str
-    seat: int
-    game_id: str
-    position: int
-    """Index of this decision within its game's decision stream -- the
-    stable key the shard writer builds ``next_index`` from (an identity or
-    array comparison would be fragile; a position is not)."""
-    next_position: int = -1
-
-    @property
-    def mask(self) -> np.ndarray:
-        """The legal mask -- the observation's own, by construction."""
-        return self.obs.action_mask
-
-
-@dataclass(frozen=True)
-class ExportStats:
-    shard_count: int
-    record_count: int
-    games: int
-    failed_games: tuple[str, ...]
-    unmatched: int
-    skipped_single_candidate: int
 
 
 # --------------------------------------------------------------------------
@@ -270,109 +238,6 @@ def _assemble(
     return out
 
 
-# --------------------------------------------------------------------------
-# shard writing
-# --------------------------------------------------------------------------
-
-
-def _pack(
-    transitions: Sequence[OfflineTransition], games: Sequence[str]
-) -> dict[str, np.ndarray]:
-    """Flatten a shard. ``next_index`` points inside this same shard; -1 is
-    terminal. Per-seat trajectories never cross a shard boundary because
-    shards are cut on whole games.
-    """
-    game_index = {g: i for i, g in enumerate(games)}
-    row_of = {(t.game_id, t.position): i for i, t in enumerate(transitions)}
-    cand_counts = np.array([t.obs.n_legal for t in transitions], dtype=np.int32)
-    next_index = np.array(
-        [
-            -1
-            if t.next_position < 0
-            else row_of.get((t.game_id, t.next_position), -1)
-            for t in transitions
-        ],
-        dtype=np.int32,
-    )
-    return {
-        "hex_planes": np.stack([t.obs.hex_planes for t in transitions]),
-        "globals": np.stack([t.obs.globals for t in transitions]),
-        "cand_flat": np.concatenate(
-            [t.obs.candidates[: t.obs.n_legal] for t in transitions]
-        ),
-        "cand_counts": cand_counts,
-        "action": np.array([t.action for t in transitions], dtype=np.int32),
-        "reward": np.array([t.reward for t in transitions], dtype=np.float32),
-        "done": np.array([t.done for t in transitions], dtype=bool),
-        "next_index": next_index,
-        "seat": np.array([t.seat for t in transitions], dtype=np.int8),
-        "faction": np.array(
-            [FACTION_INDEX[t.faction] for t in transitions], dtype=np.int8
-        ),
-        "game": np.array(
-            [game_index[t.game_id] for t in transitions], dtype=np.int32
-        ),
-    }
-
-
-def load_shard(path: Path) -> dict[str, np.ndarray]:
-    """Read one shard's arrays. ``cand_flat`` is ragged; use
-    :func:`iter_transitions` for assembled records.
-    """
-    with np.load(path) as data:
-        return {key: data[key] for key in data.files}
-
-
-def iter_transitions(
-    path: Path, max_candidates: int
-) -> Iterator[dict[str, np.ndarray | int | float | bool]]:
-    """Yield materialized ``(obs, action, mask, reward, next_obs, done)``
-    dicts from a shard, re-padding candidates to ``max_candidates``.
-    """
-    shard = load_shard(path)
-    offsets = np.concatenate([[0], np.cumsum(shard["cand_counts"])]).astype(np.int64)
-
-    def pad(row: int) -> tuple[np.ndarray, np.ndarray]:
-        start, end = int(offsets[row]), int(offsets[row + 1])
-        count = end - start
-        if count > max_candidates:
-            raise ValueError(
-                f"row {row} has {count} candidates, more than max_candidates="
-                f"{max_candidates}"
-            )
-        candidates = np.zeros((max_candidates, MOVE_FIELDS), dtype=np.int16)
-        candidates[:count] = shard["cand_flat"][start:end]
-        mask = np.zeros(max_candidates, dtype=np.int8)
-        mask[:count] = 1
-        return candidates, mask
-
-    for row in range(len(shard["action"])):
-        candidates, mask = pad(row)
-        nxt = int(shard["next_index"][row])
-        next_obs = None
-        if nxt >= 0:
-            n_candidates, n_mask = pad(nxt)
-            next_obs = {
-                "hex_planes": shard["hex_planes"][nxt],
-                "globals": shard["globals"][nxt],
-                "candidates": n_candidates,
-                "action_mask": n_mask,
-            }
-        yield {
-            "obs": {
-                "hex_planes": shard["hex_planes"][row],
-                "globals": shard["globals"][row],
-                "candidates": candidates,
-                "action_mask": mask,
-            },
-            "action": int(shard["action"][row]),
-            "mask": mask,
-            "reward": float(shard["reward"][row]),
-            "next_obs": next_obs,
-            "done": bool(shard["done"][row]),
-        }
-
-
 def _final_vps(game_id: str, meta_df: pl.DataFrame) -> dict[str, int]:
     row = meta_df.filter(pl.col("game_id") == game_id)
     if row.height == 0:
@@ -437,7 +302,7 @@ def build(
         if not transitions:
             continue
         name = f"shard_{shard_index:04d}.npz"
-        np.savez_compressed(out / name, **_pack(transitions, kept))
+        np.savez_compressed(out / name, **pack_shard(transitions, kept))
         shards.append(
             {"file": name, "records": len(transitions), "games": len(kept)}
         )

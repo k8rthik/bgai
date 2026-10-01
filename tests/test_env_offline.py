@@ -20,9 +20,8 @@ from bgai.env.offline import (
     DEFAULT_MOVES,
     MASK_SOURCE,
     build,
-    iter_transitions,
-    load_shard,
 )
+from bgai.env.offline_shards import iter_transitions, load_shard
 from bgai.env.reward import terminal_rewards
 from bgai.training.encode_move import MOVE_FIELDS
 
@@ -240,3 +239,29 @@ def test_cli_runs(tmp_path: Path, capsys) -> None:
     out = capsys.readouterr().out
     assert "transitions" in out
     assert "unmatched=0" in out
+
+
+def test_shard_io_is_reachable_from_one_import() -> None:
+    """``offline_shards`` is a separate module so the replay side and the
+    I/O side need not import each other, but a consumer should still only
+    have to import ``bgai.env.offline``.
+    """
+    import bgai.env.offline as offline
+    import bgai.env.offline_shards as shards
+
+    assert offline.iter_transitions is shards.iter_transitions
+    assert offline.load_shard is shards.load_shard
+    for name in offline.__all__:
+        assert hasattr(offline, name), name
+
+
+def test_the_mask_is_derived_from_cand_counts_not_stored(export: Path) -> None:
+    """A stored mask would be a second, divergeable copy of cand_counts."""
+    manifest = json.loads((export / "manifest.json").read_text())
+    shard = load_shard(export / manifest["shards"][0]["file"])
+    assert "action_mask" not in shard
+    records = list(
+        iter_transitions(export / manifest["shards"][0]["file"], MAX_CANDIDATES)
+    )
+    for row, record in enumerate(records[:40]):
+        assert int(record["mask"].sum()) == int(shard["cand_counts"][row])
