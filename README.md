@@ -38,6 +38,7 @@ src/bgai/
   agents/     # Agent interface + random / heuristic / imitation / mcts / llm
   arena/      # match runner, faction/seat rotation, TrueSkill reports
   training/   # encoders, nets, imitation + RL loops (cluster-portable)
+  env/        # TM-Env: PettingZoo AEC + Gymnasium wrappers, offline-RL export
 tests/        # replay-oracle suite is the backbone
 data/         # gitignored: raw game cache, parquet datasets
 ```
@@ -287,6 +288,99 @@ moved a full generation). Full record: `docs/decisions.md` C7–C17.
 leg has been run at more than one size, so the data-scaling curve is
 unmeasured; a 5,000-game leg is the experiment that decides whether the
 next 10^5 games buy strength or whether the lever is evaluator coverage.
+
+## TM-Env — standard-API environments
+
+`src/bgai/env/` puts the engine behind the two interfaces the RL
+ecosystem consumes: a **PettingZoo AEC** environment for the real 2–5
+player game, and a **Gymnasium** environment where one seat learns and the
+rest are filled by any agent from `src/bgai/agents/`. Full design,
+measurements and decision log: `docs/tm-env.md`.
+
+```bash
+# random masked play + an existing checkpoint, through the wrappers
+uv run python -m bgai.env.bench --episodes 50 --players 2,3,4,5
+uv run python -m bgai.env.bench --episodes 8 --players 4 --no-random \
+    --learner mcts --checkpoint data/checkpoints/selfplay_leg5b/current.pt \
+    --simulations 512 --top-k 8 --max-depth 48 --leaf-batch 16 --c-puct 2.5
+
+# PettingZoo api_test + seed_test + Gymnasium check_env
+uv run python -m bgai.env.bench --conformance --players 2,3,4,5
+
+# logged human games -> (obs, action, mask, reward, next_obs, done)
+uv run python -m bgai.env.offline --out data/datasets/offline_rl --limit 200
+```
+
+Both wrappers are thin adapters over one immutable `Episode`, which is a
+thin adapter over `arena/driver.py`. **Legal action masks come from
+`engine/tm/legal.py`'s own move generation** via `driver.decision` — the
+env never enumerates a move, it only indexes what the engine offered, so a
+hand-maintained duplicate of the rules is structurally impossible. The
+action space is an index into that offer (`Discrete(320)`; measured maximum
+offer 232 over 85,460 random decisions) and the observation carries each
+candidate's `encode_move` features, which is the shape the imitation net
+already scores in.
+
+Reward is the engine's own final VP, four ways: terminal VP share
+(default — the exact target the existing value head predicts), terminal
+rank, terminal win, and a dense per-decision VP delta whose returns
+telescope to absolute final VP (C12's finding as a reward). Every mode is
+centred so a table sums to zero. `docs/tm-env.md` records what each one is
+blind to.
+
+Seeded determinism is tested, including across subprocesses with different
+`PYTHONHASHSEED`s — which surfaced **a real pre-existing engine bug**:
+`legal_actions.bridge_moves` unpacks a `frozenset` of two hexes, so the
+same bridge is offered with its endpoints in either order depending on the
+process's hash seed, and every later action index shifts. Two subprocesses
+on the same seed and action stream diverged at decision 56 and finished
+191 vs 196 decisions apart. TM-Env normalizes the orientation in its own
+layer (the engine is untouched); the one-line upstream fix
+(`a, b = sorted(pair)`) would make `arena` and self-play cross-process
+reproducible too and is flagged in `docs/tm-env.md` (E6).
+
+Measured, 50 random-play episodes per player count through the AEC env,
+zero engine errors:
+
+| players | episode length (decisions) | VP per player | table total |
+|---|---|---|---|
+| 2 | 81.2 [51–118] | 73.8 ± 8.5 | 147.7 |
+| 3 | 119.2 [83–170] | 65.3 ± 9.7 | 195.9 |
+| 4 | 158.3 [113–187] | 59.1 ± 10.3 | 236.6 |
+| 5 | 201.0 [163–251] | 56.2 ± 10.4 | 281.1 |
+
+The 4-player 59.1 VP lands where the arena's own random baseline does
+(~54 on corpus-sampled tables) — the check that the wrapper has not
+quietly changed the game. Two 30-episode repeats, one on entirely
+different tables, hold VP per player to ~±1. `PettingZoo api_test` (raw
+and wrapped), `seed_test` and `Gymnasium check_env` all pass at 2, 3, 4
+and 5 players.
+
+The project's real agents run through it end to end — tree reuse, batched
+leaf evaluation and all. In the Gymnasium learner seat against three
+random opponents, off `data/checkpoints/selfplay_leg5b/current.pt`:
+the imitation policy scores **119.0 VP** (n=4, 4/4 wins) and max^n MCTS
+at the champion search config (512 sims / top-k 8 / depth 48 / batch 16 /
+c_puct 2.5) scores **105.2 VP** (n=12, 12/12 wins, ~5 decisions/sec).
+Small n against random opponents: that is a usability check, not a
+strength claim. Random masked play runs at order 10³ decisions/sec and
+the wrapper costs under 2× over the bare engine path.
+
+**The offline-RL export** replays logged human games and emits per-seat
+`(obs, action, mask, reward, next_obs, done)` trajectories — per-*seat*,
+because a seat's `next_obs` has to be its own next decision, not whatever
+seat moved next. The corpus holds **1,195,522** logged decisions over
+3,374 tmtour Div 1–3 games and **20,515,803** over 64,411 games once the
+broad population crawl is included (both are the `record_count` in the
+shard manifests). Exporting the first 10 league games gives 3,164
+transitions, 316.4/game, 0 unmatched — so a full population export
+projects to ~20M transitions and ~1.7 GB compressed.
+
+**Scope:** 2/3/5-player tables are reference-rules-correct but never
+replay-validated (the whole corpus is 4-player), and the checkpoint-backed
+opponents are 4-player only because `training/encode_state.py` and MCTS's
+max^n value vector are both pinned at four seats. TM-Env says so rather
+than producing wrong numbers.
 
 ## LLM ladder (Phase 7)
 
