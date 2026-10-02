@@ -337,7 +337,7 @@ def bridge_moves(state: GameState, faction: str, fs: FactionState) -> list[Parse
     for pair in _bridgable_pairs():
         if pair in state.bridges:
             continue
-        a, b = tuple(pair)
+        a, b = sorted(pair)
         if state.hexes[a].owner == faction or state.hexes[b].owner == faction:
             moves.append(cmd("bridge", loc=a, loc2=b))
     return moves
