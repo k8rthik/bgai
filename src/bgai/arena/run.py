@@ -11,6 +11,7 @@ writes the HTML report, and prints a one-line summary.
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 from bgai.agents import GreedyAgent, RandomAgent
@@ -94,6 +95,17 @@ def _build_net_agent(name: str, label: str, options: dict[str, object]) -> Agent
     )
 
 
+def _parse_meta(pairs: list[str]) -> dict[str, object]:
+    """``["k=v", ...]`` -> typed dict; fails before any game is played."""
+    meta: dict[str, object] = {}
+    for pair in pairs:
+        key, sep, value = pair.partition("=")
+        if not sep or not key.strip():
+            raise SystemExit(f"malformed --meta {pair!r} -- expected K=V")
+        meta[key.strip()] = _coerce(value.strip())
+    return meta
+
+
 def _split_specs(spec: str) -> list[str]:
     """Split on commas that separate agents, not the ones inside options.
 
@@ -142,7 +154,16 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--workers", type=int, default=1, help="processes to shard tables across"
     )
+    parser.add_argument(
+        "--json", type=Path, default=None,
+        help="write every game as JSON (for bgai.arena.compare)",
+    )
+    parser.add_argument(
+        "--meta", action="append", default=[], metavar="K=V",
+        help="provenance stored in the --json run (repeatable)",
+    )
     args = parser.parse_args(argv)
+    meta = _parse_meta(args.meta)
 
     agents = _build_agents(args.agents)
     names = list(agents)
@@ -163,6 +184,12 @@ def main(argv: list[str] | None = None) -> None:
         )
     if args.report is not None:
         write_report(series, args.report)
+    if args.json is not None:
+        from bgai.arena.compare import series_to_run
+
+        run = series_to_run(series, seed=args.seed, agents_spec=args.agents, meta=meta)
+        args.json.parent.mkdir(parents=True, exist_ok=True)
+        args.json.write_text(json.dumps(run), encoding="utf-8")
     outcomes = agent_outcomes(series.results)
     print(f"{len(series.results)} games, {series.n_errors} errors")
     print(f"{'agent':<12}{'win%':>8}{'mean place':>12}{'mean VP':>10}{'μ−3σ':>9}{'seats':>8}")
