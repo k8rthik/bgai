@@ -40,6 +40,8 @@ def test_train_runs_and_checkpoints(tmp_path: Path) -> None:
     ckpt = torch.load(out / "last.pt", weights_only=False)
     assert ckpt["encoding_version"] == ENCODING_VERSION
     assert ckpt["step"] == 8
+    # the checkpoint pins its full architecture (see test_model_config_checkpoint)
+    assert ckpt["config"]["model_config"]["hidden"] == 1024
     assert 0.0 <= last["top1"] <= 1.0 and last["top3"] >= last["top1"]
 
 

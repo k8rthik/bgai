@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import random
+from dataclasses import asdict
 
 import numpy as np
 import torch
@@ -70,7 +71,9 @@ def test_server_round_trip_over_processes(tmp_path) -> None:
     ckpt_path = tmp_path / "srv.pt"
     _torch.save(
         {"model": net.state_dict(), "encoding_version": ENCODING_VERSION,
-         "config": {"value_simplex": False, "aux_head": False}},
+         # a non-default size must say so (model_config_from_checkpoint)
+         "config": {"value_simplex": False, "aux_head": False,
+                    "model_config": asdict(net.cfg)}},
         ckpt_path,
     )
     proc, req_q, resp_qs, stop = start_server(ckpt_path, "cpu", n_workers=2, max_batch=64)

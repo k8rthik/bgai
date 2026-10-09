@@ -263,7 +263,10 @@ def train(cfg: TrainConfig) -> dict[str, float]:
         blob = {
             "model": net.state_dict(),
             "optimizer": opt.state_dict(),
-            "config": {**asdict(cfg), "shards": str(cfg.shards), "out": str(cfg.out)},
+            "config": {
+                **asdict(cfg), "shards": str(cfg.shards), "out": str(cfg.out),
+                "model_config": asdict(net.cfg),
+            },
             "encoding_version": ENCODING_VERSION,
             "step": step,
             "val": val,

@@ -43,7 +43,7 @@ import numpy as np
 import torch
 
 from bgai.training.encode_move import MOVE_FIELDS
-from bgai.training.model import PolicyValueNet, model_config_from_checkpoint
+from bgai.training.model import ModelConfig, PolicyValueNet, model_config_from_checkpoint
 from bgai.training.selfplay import SelfPlayConfig, SelfPlayRecord, play_game, regularized_loss
 from bgai.training.train import pick_device
 from bgai.training.vocab import ENCODING_VERSION
@@ -256,6 +256,18 @@ def fine_tune(
     return last
 
 
+def _saved_config(run_config: dict, model_cfg: ModelConfig) -> dict:
+    """Checkpoint ``config``: the run's settings plus the architecture.
+    ``model_config`` pins every size (``model_config_from_checkpoint``);
+    the two flags stay top-level for readers that predate it."""
+    return {
+        **run_config,
+        "value_simplex": model_cfg.value_simplex,
+        "aux_head": model_cfg.aux_head,
+        "model_config": asdict(model_cfg),
+    }
+
+
 def run(cfg: SelfPlayTrainConfig) -> None:
     device = pick_device("cpu")  # generation dominates; keep the net on CPU
     cfg.out.mkdir(parents=True, exist_ok=True)
@@ -292,13 +304,9 @@ def run(cfg: SelfPlayTrainConfig) -> None:
     for p in frozen.parameters():
         p.requires_grad_(False)
 
-    saved_config = {
-        **asdict(cfg),
-        "checkpoint": str(cfg.checkpoint),
-        "out": str(cfg.out),
-        "value_simplex": model_cfg.value_simplex,
-        "aux_head": model_cfg.aux_head,
-    }
+    saved_config = _saved_config(
+        {**asdict(cfg), "checkpoint": str(cfg.checkpoint), "out": str(cfg.out)}, model_cfg
+    )
     metrics_path = cfg.out / "metrics.jsonl"
     current = cfg.out / "current.pt"
     torch.save(
