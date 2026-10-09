@@ -35,9 +35,9 @@ def test_train_runs_and_checkpoints(tmp_path: Path) -> None:
             log_every=1000,
         )
     )
-    assert (out / "checkpoint.pt").exists()
+    assert (out / "last.pt").exists()
     assert (out / "metrics.jsonl").exists()
-    ckpt = torch.load(out / "checkpoint.pt", weights_only=False)
+    ckpt = torch.load(out / "last.pt", weights_only=False)
     assert ckpt["encoding_version"] == ENCODING_VERSION
     assert ckpt["step"] == 8
     assert 0.0 <= last["top1"] <= 1.0 and last["top3"] >= last["top1"]

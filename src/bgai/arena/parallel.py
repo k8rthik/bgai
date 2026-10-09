@@ -18,8 +18,8 @@ single-process ranking exactly.
 from __future__ import annotations
 
 import multiprocessing as mp
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Sequence
 
 from bgai.arena.ratings import new_ratings, update
 from bgai.arena.series import SeriesResult, run_series
