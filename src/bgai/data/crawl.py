@@ -23,8 +23,8 @@ import orjson
 import polars as pl
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from bgai.data.player_ratings import playable
 from bgai.data.identity import user_agent
+from bgai.data.player_ratings import playable
 
 VIEW_GAME_URL = "https://terra.snellman.net/app/view-game/"
 MIN_REQUEST_INTERVAL_SECONDS = 1.0

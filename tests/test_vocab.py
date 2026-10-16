@@ -15,16 +15,14 @@ from bgai.training.vocab import (
     HEX_INDEX,
     HEXES,
     TILE_INDEX,
-    TILES,
     VERB_INDEX,
-    VERBS,
     normalize_color,
 )
 
 
 def test_hex_vocabulary_covers_full_board() -> None:
     assert len(HEXES) == 113
-    assert HEXES == tuple(sorted(HEXES))
+    assert tuple(sorted(HEXES)) == HEXES
     assert all(HEXES[HEX_INDEX[h]] == h for h in HEXES)
     assert "A1" in HEX_INDEX and "r35" in HEX_INDEX
 
@@ -76,7 +74,6 @@ def test_every_blocking_pending_answer_verb_is_encodable() -> None:
     """Regression (leg-2 crash): any verb the driver can OFFER an agent
     must be in VERBS -- search encodes every offer's candidates,
     including forced single-move answers like cultist_leech_bonus."""
-    from bgai.training.encode_move import encode_move
     from bgai.training.vocab import VERB_INDEX
 
     for verb in ("cultist_leech_bonus", "gain_cult", "gain_favor", "gain_town", "leech"):

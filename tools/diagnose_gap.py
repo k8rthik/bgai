@@ -76,7 +76,7 @@ def corpus_games(n: int) -> list[dict[str, float]]:
     for game_id in picked:
         captured: list[GameState] = []
 
-        def hook(state, faction, cmd):
+        def hook(state, faction, cmd, captured=captured):
             captured.append(state)
 
         result = replay_game(game_id, moves_df, deltas_df, on_decision=hook)

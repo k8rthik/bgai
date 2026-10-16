@@ -17,7 +17,8 @@ import pytest
 from gymnasium.utils.env_checker import check_env
 from pettingzoo.test import api_test, seed_test
 
-from bgai.env.aec import TerraMysticaAECEnv, env as wrapped_env, raw_env
+from bgai.env.aec import TerraMysticaAECEnv, raw_env
+from bgai.env.aec import env as wrapped_env
 from bgai.env.config import MAX_CANDIDATES, MAX_PLAYERS, MIN_PLAYERS, EnvConfig
 from bgai.env.single import make_single_env
 from bgai.env.spaces import action_space, inner_observation_space, observation_space

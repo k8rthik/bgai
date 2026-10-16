@@ -18,12 +18,12 @@ from dataclasses import dataclass
 import numpy as np
 import polars as pl
 
+from bgai.arena.sim import canonical_moves
 from bgai.data.ledger_parser import ParsedCommand
 from bgai.engine.tm.legal import legal_moves_for
 from bgai.engine.tm.legal_match import match_index
 from bgai.engine.tm.replay import replay_game
 from bgai.engine.tm.state import GameState
-from bgai.arena.sim import canonical_moves
 from bgai.training.encode_move import encode_move
 from bgai.training.encode_state import encode_state
 from bgai.training.provenance import GameProvenance

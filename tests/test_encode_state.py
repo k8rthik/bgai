@@ -36,7 +36,7 @@ def test_mover_seat_block_holds_own_resources() -> None:
     enc = encode_state(state, mover)
     data = FACTIONS[mover]
     # seat block 0 is the mover; documented offsets in encode_state
-    from bgai.training.encode_state import SEAT_BLOCK, _RES_OFFSET
+    from bgai.training.encode_state import _RES_OFFSET, SEAT_BLOCK
 
     block = enc.globals[:SEAT_BLOCK]
     assert block[_RES_OFFSET + 0] == data.coins

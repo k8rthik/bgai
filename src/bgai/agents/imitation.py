@@ -19,12 +19,10 @@ from bgai.engine.tm.state import GameState
 from bgai.training.encode_move import encode_move
 from bgai.training.encode_state import encode_state
 from bgai.training.model import (
-    ModelConfig,
     PolicyValueNet,
     model_config_from_checkpoint,
 )
 from bgai.training.vocab import ENCODING_VERSION, FACTION_INDEX
-
 
 DEFAULT_TEMPERATURE = 0.0
 """Take the policy's argmax.

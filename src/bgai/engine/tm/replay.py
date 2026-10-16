@@ -68,7 +68,7 @@ from __future__ import annotations
 import argparse
 import json
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -76,7 +76,6 @@ from typing import Any
 import polars as pl
 
 from bgai.data.ledger_parser import Kind, ParsedCommand
-from typing import Callable
 
 # Phase 5 imitation capture (plan 2026-08-04-imitation-phase5, Task 2):
 # called with the PRE-apply state, acting faction, and command for every

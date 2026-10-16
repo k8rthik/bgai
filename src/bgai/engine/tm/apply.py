@@ -54,7 +54,7 @@ class EngineError(Exception):
         return (_engine_error_from_message, (str(self),))
 
 
-def _engine_error_from_message(message: str) -> "EngineError":
+def _engine_error_from_message(message: str) -> EngineError:
     err = EngineError.__new__(EngineError)
     Exception.__init__(err, message)
     err.game_round = None

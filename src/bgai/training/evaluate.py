@@ -19,7 +19,6 @@ from torch.utils.data import DataLoader
 
 from bgai.training.dataset import ImitationDataset, collate
 from bgai.training.model import (
-    ModelConfig,
     PolicyValueNet,
     model_config_from_checkpoint,
 )

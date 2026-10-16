@@ -64,8 +64,8 @@ def test_server_round_trip_over_processes(tmp_path) -> None:
     import torch as _torch
 
     from bgai.agents.inference_server import RemoteEvaluator, start_server
-    from bgai.training.vocab import ENCODING_VERSION
     from bgai.training.encode_state import GLOBAL_DIM, HEX_FEAT_DIM
+    from bgai.training.vocab import ENCODING_VERSION
 
     net = _net()
     ckpt_path = tmp_path / "srv.pt"

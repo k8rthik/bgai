@@ -7,7 +7,8 @@ import random
 import numpy as np
 import pytest
 
-from bgai.env.aec import TerraMysticaAECEnv, env as wrapped_env, raw_env
+from bgai.env.aec import TerraMysticaAECEnv, raw_env
+from bgai.env.aec import env as wrapped_env
 from bgai.env.config import (
     ILLEGAL_ACTION_REWARD,
     MAX_PLAYERS,

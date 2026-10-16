@@ -15,7 +15,7 @@ still arrive well mixed -- the standard trade for sharded corpora.
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Iterator, Sequence
+from collections.abc import Iterator, Sequence
 
 import numpy as np
 from torch.utils.data import Sampler

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import random
 
-
 import pytest
 
 from bgai.engine.tm.apply import EngineError

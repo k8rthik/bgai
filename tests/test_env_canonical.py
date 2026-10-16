@@ -23,7 +23,7 @@ from bgai.env.canonical import (
 
 
 def test_only_bridge_has_an_unordered_hex_pair() -> None:
-    assert UNORDERED_PAIR_VERBS == frozenset({"bridge"})
+    assert frozenset({"bridge"}) == UNORDERED_PAIR_VERBS
 
 
 def test_bridge_endpoints_are_spelled_low_to_high() -> None:

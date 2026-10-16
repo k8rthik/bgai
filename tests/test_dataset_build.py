@@ -36,6 +36,7 @@ def test_weight_power_sharpens_strength_weighting(tmp_path) -> None:
     an elite table almost like a weak one. weight_power re-shapes them at
     load time, without rebuilding a 2.5 GB shard set."""
     import numpy as np
+
     from bgai.training.dataset import ImitationDataset
 
     build(tmp_path, limit=4)

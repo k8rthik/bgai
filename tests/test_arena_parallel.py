@@ -8,8 +8,6 @@ rather than from one stream shared with every earlier table.
 
 from __future__ import annotations
 
-import random
-
 import pytest
 
 from bgai.arena.series import run_series, table_setup_rng
@@ -69,8 +67,8 @@ def test_parallel_matches_sequential_exactly() -> None:
     shard-major merge silently ranks agents differently -- the first
     version of the parallel runner did exactly that and left greedy tied
     with random."""
-    from bgai.arena.parallel import run_series_parallel
     from bgai.agents import GreedyAgent, RandomAgent
+    from bgai.arena.parallel import run_series_parallel
 
     spec = "greedy,random"
     seats = ("greedy", "random", "greedy", "random")

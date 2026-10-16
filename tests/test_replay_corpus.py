@@ -146,7 +146,11 @@ def _replay_to_final_state(game_id: str, moves_df: pl.DataFrame) -> GameState:
     ``test_regression_set_final_vp_matches_games_meta`` below excludes a
     dropped faction's own VP from the cross-check.
     """
-    from bgai.engine.tm.replay import _advance_after_row, _apply_pending_drops, _ensure_actions_phase_started
+    from bgai.engine.tm.replay import (
+        _advance_after_row,
+        _apply_pending_drops,
+        _ensure_actions_phase_started,
+    )
     from bgai.engine.tm.state import Phase
 
     setup = load_setup(game_id)

@@ -11,7 +11,6 @@ from pathlib import Path
 
 import pytest
 
-from bgai.env.config import MAX_PLAYERS, MIN_PLAYERS, EnvConfig, RewardMode
 from bgai.env.bench import (
     RunStats,
     main,
@@ -19,6 +18,7 @@ from bgai.env.bench import (
     run_random,
     run_with_policy,
 )
+from bgai.env.config import MAX_PLAYERS, MIN_PLAYERS, EnvConfig, RewardMode
 
 COUNTS = list(range(MIN_PLAYERS, MAX_PLAYERS + 1))
 

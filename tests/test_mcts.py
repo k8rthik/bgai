@@ -226,7 +226,6 @@ def test_root_choice_q_prefers_high_value_over_high_visits() -> None:
     choice = agent.choose_sim(sim, pending[0], pending[1], _random.Random(0))
     assert choice in pending[1]
     # construct a synthetic root state where visits and Q disagree
-    import numpy as np
 
     root.visits[:] = 0
     root.action_value[:] = 0.0

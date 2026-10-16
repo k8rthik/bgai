@@ -14,8 +14,9 @@ verified offline; only the *measurement* of a rung needs credentials.
 from __future__ import annotations
 
 import os
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Callable, Protocol, Sequence
+from typing import Protocol
 
 
 @dataclass(frozen=True)
@@ -33,7 +34,7 @@ class Usage:
     output_tokens: int = 0
     calls: int = 0
 
-    def add(self, other: "Usage") -> None:
+    def add(self, other: Usage) -> None:
         self.input_tokens += other.input_tokens
         self.output_tokens += other.output_tokens
         self.calls += other.calls

@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import polars as pl
-
 from pathlib import Path
+
+import polars as pl
 
 from bgai.data.player_ratings import BASE_MAP, playable, rate
 from bgai.data.population import _game_rows
