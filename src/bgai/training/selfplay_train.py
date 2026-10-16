@@ -89,6 +89,7 @@ from bgai.training.stop_signal import StopSignal
 from bgai.training.train import pick_device
 from bgai.training.vocab import ENCODING_VERSION
 from bgai.training.worker_env import pin_single_thread_env
+from bgai.training.worker_pool import shielded_pool
 
 _collate = collate  # backward-compatible name for tools/offline_sweep-style imports
 
@@ -242,7 +243,8 @@ def generate_parallel(
             id_q.put(i)
         infer = (id_q, request_q, response_qs)
     try:
-        with ctx.Pool(
+        with shielded_pool(
+            ctx,
             processes=workers,
             initializer=_worker_init,
             initargs=(str(checkpoint), cfg, infer),

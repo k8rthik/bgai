@@ -79,6 +79,7 @@ from bgai.training.checkpoint_io import checkpoint_mtime_ns, load_checkpoint
 from bgai.training.selfplay import SelfPlayConfig, SelfPlayRecord, play_game
 from bgai.training.stop_signal import StopSignal
 from bgai.training.worker_env import pin_single_thread_env
+from bgai.training.worker_pool import shielded_pool
 
 log = logging.getLogger(__name__)
 
@@ -409,7 +410,8 @@ def _run_actor(cfg: ActorConfig, stop: StopSignal, env: dict[str, str]) -> int:
     )
     done: queue.Queue = queue.Queue()
     ctx = get_context("spawn")
-    with ctx.Pool(
+    with shielded_pool(
+        ctx,
         processes=cfg.workers,
         initializer=_actor_worker_init,
         initargs=(str(current), cfg.selfplay),
