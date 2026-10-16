@@ -40,6 +40,7 @@ from bgai.engine.tm.round_flow import (
 from bgai.engine.tm.scoring import final_scoring
 from bgai.engine.tm.setup import GameSetup
 from bgai.engine.tm.state import GameState, Phase, active_faction, with_faction
+from bgai.engine.tm.state_key import game_key
 
 MAIN_TRACK_VERBS = frozenset(
     {
@@ -139,12 +140,56 @@ def new_game(setup: GameSetup) -> SimState:
     return _settle(SimState(game=start_setup(GameState.initial(setup))))
 
 
+_DECISION_TABLE: dict[tuple, tuple[str, tuple[ParsedCommand, ...]]] | None = None
+_DECISION_TABLE_MAX = 0
+
+
+def enable_decision_table(max_entries: int = 200_000) -> None:
+    """Opt in to a process-wide transposition table for ``decision``.
+
+    Search reaches equal positions through different move orders (~18%
+    of the states a 512-sim self-play game asks about are content
+    repeats), and the offer is a pure function of the position plus the
+    driver's turn bookkeeping, so the table is exact: keyed by full
+    content (``state_key.game_key``), compared by value on a hit.
+
+    OFF by default, measured as a net loss at the champion config
+    (docs/decisions.md C18): a hit saves ~100 us of enumeration, and at
+    an 18% hit rate that does not cover the key, table and GC cost of
+    the 82% misses. Worth re-measuring if enumeration gets dearer or
+    the hit rate rises (deeper search, more simulations).
+    """
+    global _DECISION_TABLE, _DECISION_TABLE_MAX
+    _DECISION_TABLE = {}
+    _DECISION_TABLE_MAX = max_entries
+
+
+def disable_decision_table() -> None:
+    global _DECISION_TABLE
+    _DECISION_TABLE = None
+
+
 def decision(sim: SimState) -> tuple[str, tuple[ParsedCommand, ...]] | None:
     """``(faction, canonical offer)`` for the pending decision, or None
     if the game is finished. Never returns an empty offer.
     """
     if sim.finished:
         return None
+    table = _DECISION_TABLE
+    if table is None:
+        return _decision_uncached(sim)
+    key = (game_key(sim.game), sim.fresh_taken, sim.free_used, sim.prev_verb)
+    hit = table.get(key)
+    if hit is not None:
+        return hit
+    result = _decision_uncached(sim)
+    if len(table) >= _DECISION_TABLE_MAX:
+        del table[next(iter(table))]
+    table[key] = result
+    return result
+
+
+def _decision_uncached(sim: SimState) -> tuple[str, tuple[ParsedCommand, ...]]:
     forced = _forced_answer(sim.game)
     if forced is not None:
         faction, answers = forced
@@ -167,11 +212,22 @@ def decision(sim: SimState) -> tuple[str, tuple[ParsedCommand, ...]] | None:
     return _actions_offer(sim)
 
 
-def advance(sim: SimState, choice: ParsedCommand) -> SimState:
+def advance(
+    sim: SimState,
+    choice: ParsedCommand,
+    current: tuple[str, tuple[ParsedCommand, ...]] | None = None,
+) -> SimState:
     """Apply ``choice`` for the current decision's faction, then settle
     forward to the next decision point (or the finished state).
+
+    ``current`` is the pending ``(faction, offer)`` when the caller
+    already holds it (an MCTS node stores its offer; the self-play loop
+    just asked ``decision``). It must be exactly what ``decision(sim)``
+    returns -- passing it skips the driver's own re-enumeration, which
+    is the single most expensive step of a search descent.
     """
-    current = decision(sim)
+    if current is None:
+        current = decision(sim)
     if current is None:
         raise ValueError("advance called on a finished game")
     faction, offer = current

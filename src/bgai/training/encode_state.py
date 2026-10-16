@@ -21,11 +21,13 @@ Layout (verified by tests/test_encode_state.py):
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 import numpy as np
 
-from bgai.engine.tm.state import GameState, Phase
+from bgai.engine.tm.memo import state_memo
+from bgai.engine.tm.state import GameState, HexState, Phase
 from bgai.engine.tm.tiles import BONUS_TILES, FAVOR_TILES
 from bgai.training.vocab import (
     BUILDING_INDEX,
@@ -88,13 +90,22 @@ def _seat_order(state: GameState, faction: str) -> tuple[str, ...]:
     return seats[pivot:] + seats[:pivot]
 
 
-def encode_state(state: GameState, faction: str) -> StateEncoding:
-    order = _seat_order(state, faction)
-    seat_of = {name: i for i, name in enumerate(order)}
+@state_memo(maxsize=2048)
+def _hex_planes(hexes: Mapping[str, HexState], faction: str, seats: tuple[str, ...]) -> np.ndarray:
+    """Hex rows, memoised on the ``state.hexes`` mapping object.
 
+    The engine rebuilds that mapping only when a hex changes (a build,
+    upgrade or transform); every other move -- converts, passes, power
+    actions, leech answers, cult sends -- hands the child state the very
+    same mapping object, so a search tree shares it widely. The rows
+    depend on nothing else but the mover-relative seat order, which is a
+    function of ``(seats, faction)``.
+    """
+    pivot = seats.index(faction)
+    seat_of = {name: i for i, name in enumerate(seats[pivot:] + seats[:pivot])}
     planes = np.zeros((len(HEXES), HEX_FEAT_DIM), dtype=np.int8)
     for row, hex_key in enumerate(HEXES):
-        hx = state.hexes[hex_key]
+        hx = hexes[hex_key]
         if hx.color in COLOR_INDEX:
             planes[row, COLOR_INDEX[hx.color]] = 1
         else:  # river
@@ -103,6 +114,14 @@ def encode_state(state: GameState, faction: str) -> StateEncoding:
             planes[row, len(COLORS) + 1 + BUILDING_INDEX[hx.building]] = 1
         if hx.owner is not None and hx.owner in seat_of:
             planes[row, len(COLORS) + 1 + len(BUILDINGS) + seat_of[hx.owner]] = 1
+    planes.setflags(write=False)
+    return planes
+
+
+def encode_state(state: GameState, faction: str) -> StateEncoding:
+    order = _seat_order(state, faction)
+    # Read-only shared array: consumers copy (astype/np.stack) before use.
+    planes = _hex_planes(state.hexes, faction, state.setup.factions)
 
     g = np.zeros(GLOBAL_DIM, dtype=np.int16)
     active = state.turn_order[state.active_index] if state.turn_order else None

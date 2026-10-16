@@ -41,8 +41,8 @@ import torch.nn.functional as F
 
 from bgai.agents.mcts import MCTSAgent
 from bgai.arena.driver import advance, decision, new_game
-from bgai.engine.tm.apply import EngineError
 from bgai.arena.setups import sample_setup
+from bgai.engine.tm.apply import EngineError
 from bgai.engine.tm.setup import GameSetup
 from bgai.training.encode_move import encode_move
 from bgai.training.encode_state import encode_state
@@ -168,7 +168,7 @@ def _play_game_inner(
             return []
         if len(offer) == 1:
             agent.note_advance(offer[0])
-            sim = advance(sim, offer[0])
+            sim = advance(sim, offer[0], current=pending)
             continue
         if cfg.fast_prior < 1.0:
             priors, _ = agent._evaluate(sim.game, faction, offer)
@@ -176,7 +176,7 @@ def _play_game_inner(
             if float(priors[top]) >= cfg.fast_prior:
                 choice = offer[top]
                 agent.note_advance(choice)
-                sim = advance(sim, choice)
+                sim = advance(sim, choice, current=pending)
                 continue
         root = agent.search(sim)
         assert root is not None  # decision(sim) was non-None with a real offer
@@ -203,7 +203,7 @@ def _play_game_inner(
         else:
             choice = offer[int(np.argmax(visits))]
         agent.note_advance(choice)
-        sim = advance(sim, choice)
+        sim = advance(sim, choice, current=pending)
 
     vps = np.array([sim.game.factions[f].vp for f in seats], dtype=np.float32)
     total_vp = float(vps.sum())

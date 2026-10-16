@@ -11,6 +11,7 @@ cycle if these lived in either of those two files instead.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from functools import cache
 
 from bgai.data.ledger_parser import Kind, ParsedCommand
 from bgai.engine.tm.state import FactionState, GameState
@@ -24,8 +25,17 @@ def cmd(verb: str, *, kind: Kind = Kind.DECISION, **fields: object) -> ParsedCom
     ``raw`` is just the verb -- these commands are never re-parsed, only
     fed to ``apply()`` (generative smoke test) or compared structurally
     against real ledger rows (containment test).
+
+    Interned: ``ParsedCommand`` is frozen and compared by value, and
+    enumeration builds the same few thousand commands millions of times
+    per self-play game, so equal calls share one instance.
     """
-    return ParsedCommand(verb=verb, kind=kind, raw=verb, **fields)  # type: ignore[arg-type]
+    return _interned(verb, kind, tuple(fields.items()))
+
+
+@cache
+def _interned(verb: str, kind: Kind, fields: tuple[tuple[str, object], ...]) -> ParsedCommand:
+    return ParsedCommand(verb=verb, kind=kind, raw=verb, **dict(fields))  # type: ignore[arg-type]
 
 
 def resource_amount(fs: FactionState, res: str) -> int:

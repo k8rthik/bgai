@@ -802,3 +802,88 @@ the arithmetic flips. Pre-cluster optimization checklist is COMPLETE:
 every knob measured, adopted (c_puct 2.5, aux targets, rank/winner
 terms, tree reuse, fast-prior, setup cache), or refuted (KL loosening,
 max-child, endgame budget, 1024-sim targets, GPU inference).
+
+**C18 — Engine/MCTS hot path: memoise, don't compile (2026-09-10).**
+A 512-sim self-play game at the champion config cost ~28-31 core-s
+(cProfile: rules engine 44%, Python PUCT select+backup 20%, net 12%,
+encoding 6%). Every step below preserves the search exactly -- seed 7
+under PYTHONHASHSEED=0 (hash randomisation was the only source of
+run-to-run drift) reproduces the same 306 recorded visit distributions
+bit for bit after each commit -- and the 29-game corpus regression set
+plus the engine suite pass throughout.
+
+Kept, in order of payoff (seed 7 wall, single process, same box):
+(1) `advance(sim, choice, current=...)`: MCTS nodes and the self-play
+loop already hold the pending offer; the driver re-enumerated it on
+every child expansion, so legal moves ran twice per node. 135k ->
+68k `decision()` calls/game, 31.3 -> 25.1 s. (2) Scalar PUCT
+selection over cached per-node lists instead of ~15 numpy ufunc calls
+on 23-entry arrays (540k calls/game; 500k `np.mean` calls gone): 25.1
+-> 23.2 s; shadow-compared against the vectorised original on every
+call of three games, 1 disagreement in 1.56M (float64 vs float32
+intermediates on a near-tie), no root distribution changed. (3)
+Identity-keyed, pinned, bounded memos (`engine/tm/memo.py`) for pure
+per-state geometry -- `reachable` split into plain+teleport parts so
+`teleport_crossing` is two membership tests, `clusters`, and
+`_shipping_reach`/`_teleport_reach` on (board, source, level);
+`directly_adjacent` returns the board's own frozenset when no bridge
+exists; `cmd` interns `ParsedCommand`s (2.7M constructions/game ->
+lookups); Mermaids `connect` only asks river hexes adjacent to a
+building. (4) Resolved MCTS leaves (terminal/stuck/rejected) were
+stored as `None`, indistinguishable from unexpanded, so single states
+were re-advanced 200+ times per game; `node.leaf_values` replays the
+same value at the same point of the batch. (5) Hex planes of the state
+encoding memoised per `state.hexes` mapping object (rebuilt only when
+a hex changes): a batched-index rewrite of the encoder measured SLOWER
+than the original (28 vs 22 us -- numpy scalar stores beat list
+building at 113 rows) and was reverted in favour of the memo; 23.8 ->
+18.8 s. (6) Self-play workers raise the cyclic-GC gen-0 threshold
+to 50k (`selfplay_train.WORKER_GC_THRESHOLDS`): the search allocates
+millions of short-lived tuples and keeps no cycles, so the default
+700 buys ~600 collections a game that each walk the pinned memos;
+~1 s/game. Three seeds, min of two rounds, run three-parallel under
+an unrelated agent's load on the same box (ratios are the signal):
+
+    seed   base (main)   final   final + worker GC
+    7      36.3 s        23.6 s  22.1 s
+    11     39.8 s        19.8 s  18.5 s
+    23     31.3 s        20.6 s  19.8 s
+
+Every recorded visit distribution is identical across all three
+columns for all three seeds.
+
+Refuted -- transposition tables (`state_key.py`, opt-in via
+`driver.enable_decision_table()` / `MCTSAgent(eval_table=N)`): after
+(1) and (4), 18% of decision() calls and 17% of net leaves are
+genuine content-repeats (different move orders). A full-content key
+with cached hash costs 6 us to build and 0.6 us to look up, the tables
+are exact (visit distributions identical), hit rates land where
+predicted (18.8% / 16.3% / 84.8% for decisions / batched evals /
+single evals) -- and the game gets slower: 23.3 -> 28.9 s with default
+GC (7.8k collections, 5 s: the tables pin ~2M tuples that every
+gen-2 pass walks), 25.7 s with gen-0 threshold 50k. A hit saves ~100
+us of enumeration or ~85 us of encode+forward, which at these hit
+rates is ~2 s/game -- the same as the misses' overhead now that a
+decision is cheap. Kept off by default at zero cost; flips with a
+bigger net (forward >> 85 us) or a higher hit rate.
+
+Refuted -- a compiled port. Spike on the two hottest primitives
+before memoisation, real board, 339 (source, level) calls: pure
+Python 1.68 us/call, Cython on the same string-keyed dict/frozenset
+objects 1.31 us (1.3x), Rust/PyO3 on an integer-indexed board 0.55 us
+including the string<->id mapping at the boundary (3.1x; 0.24 us raw,
+6.9x). Both build here (macOS arm64; PyO3 needs
+`-undefined dynamic_lookup` and PYO3_PYTHON pinned to the venv).
+Decision if it is ever revisited: Cython, because it speeds up the
+existing object model in place with only a C compiler on the target,
+whereas Rust's real speed needs a representation change that the
+Python boundary eats and a cargo toolchain on every Linux aarch64
+node (`uv_build` cannot compile either; a setuptools backend with an
+optional extension and pure-Python fallback would be required). Not
+implemented: after memoisation those primitives are dict lookups, the
+remaining engine time is spread over legal-move enumeration, `apply`
+and dataclass `replace` (~22% of the game), and a 1.5-2x on that
+would be worth ~8-10% for a 1000+ line port with its own parity
+burden. The next lever with a measured payoff is not in the engine:
+torch's linear layers are now the single largest item (~6 s of 40 s
+profiled), and self-play scales with worker count.

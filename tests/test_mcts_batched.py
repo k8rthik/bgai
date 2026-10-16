@@ -19,8 +19,8 @@ import numpy as np
 import pytest
 
 from bgai.agents.mcts import MCTSAgent
-from bgai.arena.setups import load_setup
 from bgai.arena.driver import SimState, advance, decision, new_game
+from bgai.arena.setups import load_setup
 
 CKPT = Path("data/checkpoints/snap/simplex_best.pt")
 
@@ -62,7 +62,7 @@ def test_batched_matches_one_at_a_time(agent: MCTSAgent) -> None:
     batched = agent._evaluate_many(items)
 
     assert len(batched) == len(singles)
-    for (p1, v1), (p2, v2) in zip(singles, batched):
+    for (p1, v1), (p2, v2) in zip(singles, batched, strict=False):
         assert p1.shape == p2.shape, "ragged candidate sets must not be truncated"
         np.testing.assert_allclose(p1, p2, atol=1e-4)
         np.testing.assert_allclose(v1, v2, atol=1e-4)
@@ -106,7 +106,7 @@ def test_virtual_loss_makes_concurrent_descents_diverge(agent: MCTSAgent) -> Non
     root, _ = agent._expand(sim)
 
     pending = agent._descend_batch(root, 6)
-    actions = [action for _path, _node, action, _sim in pending]
+    actions = [entry.action for entry in pending]
     assert len(set(actions)) > 1, "virtual loss must spread descents across moves"
 
 

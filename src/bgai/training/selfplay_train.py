@@ -103,13 +103,24 @@ class SelfPlayTrainConfig:
 
 _WORKER: dict[str, object] = {}
 
+WORKER_GC_THRESHOLDS = (50_000, 50, 1000)
+"""``gc.set_threshold`` arguments for a self-play worker process."""
+
 
 def _worker_init(checkpoint: str, cfg: SelfPlayConfig, infer=None) -> None:
     """One agent per worker. With ``infer`` set, the worker is torch-free:
     it claims a worker id and evaluates through the central server."""
+    import gc
+
     from bgai.agents.mcts import MCTSAgent
 
     torch.set_num_threads(1)  # workers must not fight over BLAS threads
+    # Search allocates millions of short-lived tuples per game and keeps
+    # no reference cycles (immutable states, parent-less tree nodes), so
+    # the default gen-0 threshold (700) buys nothing but ~600 collections
+    # a game that each walk the pinned memos. Measured ~1 s/game
+    # (docs/decisions.md C18).
+    gc.set_threshold(*WORKER_GC_THRESHOLDS)
     evaluator = None
     if infer is not None:
         from bgai.agents.inference_server import RemoteEvaluator

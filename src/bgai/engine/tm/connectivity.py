@@ -72,6 +72,7 @@ from collections import deque
 
 from bgai.engine.tm.board import RIVER, Board, base_board, hex_distance
 from bgai.engine.tm.factions_data import FACTIONS
+from bgai.engine.tm.memo import state_memo
 from bgai.engine.tm.state import GameState
 from bgai.engine.tm.tiles import BONUS_TILES
 
@@ -89,11 +90,18 @@ def directly_adjacent(state: GameState, hex_key: str) -> frozenset[str]:
     map's adjacency table to include built bridges.
     """
     board = base_board()
-    neighbors = set(board.adjacent.get(hex_key, frozenset()))
+    plain = board.adjacent.get(hex_key, frozenset())
+    if not state.bridges:
+        return plain
+    neighbors = set(plain)
     for bridge in state.bridges:
         if hex_key in bridge:
             neighbors |= bridge - {hex_key}
     return frozenset(neighbors)
+
+
+_SHIPPING_REACH: dict[tuple[int, str, int], frozenset[str]] = {}
+_TELEPORT_REACH: dict[tuple[int, str, int], frozenset[str]] = {}
 
 
 def _shipping_reach(board: Board, source: str, level: int) -> frozenset[str]:
@@ -102,9 +110,20 @@ def _shipping_reach(board: Board, source: str, level: int) -> frozenset[str]:
     Ports ``map.pm`` ``setup_hex_ranges`` with ``river_only=1``: the path
     must leave ``source`` onto a river hex, may only continue through
     further river hexes, and terminates the moment it reaches land.
+
+    Pure board geometry (no state input), so the answer is memoised per
+    ``(board, source, level)`` -- search asks it ~800k times per game.
     """
     if level <= 0:
         return frozenset()
+    key = (id(board), source, level)
+    hit = _SHIPPING_REACH.get(key)
+    if hit is None:
+        hit = _SHIPPING_REACH[key] = _shipping_reach_bfs(board, source, level)
+    return hit
+
+
+def _shipping_reach_bfs(board: Board, source: str, level: int) -> frozenset[str]:
 
     visited_river: dict[str, int] = {}
     queue: deque[tuple[str, int]] = deque()
@@ -136,10 +155,16 @@ def _teleport_reach(board: Board, source: str, effective_range: int) -> frozense
     """
     if effective_range <= 0:
         return frozenset()
-    max_distance = effective_range + 1
-    return frozenset(
-        h for h in board.hexes if h != source and hex_distance(source, h, board) <= max_distance
-    )
+    key = (id(board), source, effective_range)
+    hit = _TELEPORT_REACH.get(key)
+    if hit is None:
+        max_distance = effective_range + 1
+        hit = _TELEPORT_REACH[key] = frozenset(
+            h
+            for h in board.hexes
+            if h != source and hex_distance(source, h, board) <= max_distance
+        )
+    return hit
 
 
 def effective_shipping(state: GameState, faction: str) -> int:
@@ -157,27 +182,47 @@ def effective_shipping(state: GameState, faction: str) -> int:
     return level
 
 
+@state_memo()
+def _plain_reach(state: GameState, faction: str) -> frozenset[str]:
+    """Union of direct adjacency (bridges included) and shipping range
+    over every one of ``faction``'s building hexes -- the two range
+    modes ``check_reachable`` tries before the teleport table."""
+    board = base_board()
+    ship_level = effective_shipping(state, faction)
+    result: set[str] = set()
+    for loc in _faction_buildings(state, faction):
+        result |= directly_adjacent(state, loc)
+        if ship_level > 0:
+            result |= _shipping_reach(board, loc, ship_level)
+    return frozenset(result)
+
+
+@state_memo()
+def _teleport_reach_all(state: GameState, faction: str) -> frozenset[str]:
+    """Union of tunnel/carpet range over every building hex (empty for
+    factions without a ``TeleportTrack``)."""
+    teleport = FACTIONS[faction].teleport
+    if teleport is None:
+        return frozenset()
+    board = base_board()
+    fs = state.factions[faction]
+    effective_range = min(teleport.range + fs.teleport_level, teleport.max_range)
+    result: set[str] = set()
+    for loc in _faction_buildings(state, faction):
+        result |= _teleport_reach(board, loc, effective_range)
+    return frozenset(result)
+
+
+@state_memo()
 def reachable(state: GameState, faction: str) -> frozenset[str]:
     """Hexes ``faction`` may build/transform on: direct, shipping, or teleport range.
 
     Purely geometric (see module docstring): does not exclude occupied
-    hexes or check terrain-color legality.
+    hexes or check terrain-color legality. Memoised per state object
+    (``memo.state_memo``): legal-move enumeration asks once per action
+    family, search asks again on expansion.
     """
-    board = base_board()
-    fs = state.factions[faction]
-    building_hexes = _faction_buildings(state, faction)
-    teleport = FACTIONS[faction].teleport
-    ship_level = effective_shipping(state, faction)
-
-    result: set[str] = set()
-    for loc in building_hexes:
-        result |= directly_adjacent(state, loc)
-        if ship_level > 0:
-            result |= _shipping_reach(board, loc, ship_level)
-        if teleport is not None:
-            effective_range = min(teleport.range + fs.teleport_level, teleport.max_range)
-            result |= _teleport_reach(board, loc, effective_range)
-    return frozenset(result)
+    return _plain_reach(state, faction) | _teleport_reach_all(state, faction)
 
 
 def teleport_crossing(
@@ -203,29 +248,32 @@ def teleport_crossing(
     ``handle_build``), so ``state.round`` is never 0 when this runs.
     """
     teleport = FACTIONS[faction].teleport
-    building_hexes = _faction_buildings(state, faction)
-    for loc in building_hexes:
-        if hex_key in directly_adjacent(state, loc):
-            return {}, 0
-    board = base_board()
-    ship_level = effective_shipping(state, faction)
-    if ship_level > 0:
-        for loc in building_hexes:
-            if hex_key in _shipping_reach(board, loc, ship_level):
-                return {}, 0
     if teleport is None:
+        # Every branch below answers ({}, 0) for a faction with no
+        # teleport track; skip the adjacency/shipping scans entirely.
         return {}, 0
-    fs = state.factions[faction]
-    effective_range = min(teleport.range + fs.teleport_level, teleport.max_range)
-    for loc in building_hexes:
-        if hex_key in _teleport_reach(board, loc, effective_range):
-            level = min(fs.teleport_level, len(teleport.cost) - 1)
-            return dict(teleport.cost[level]), teleport.vp_gain[level]
+    if hex_key in _plain_reach(state, faction):
+        return {}, 0
+    if hex_key in _teleport_reach_all(state, faction):
+        fs = state.factions[faction]
+        level = min(fs.teleport_level, len(teleport.cost) - 1)
+        return dict(teleport.cost[level]), teleport.vp_gain[level]
     return {}, 0
 
 
 def clusters(
     state: GameState, faction: str, *, river_skip: bool = False, indirect: bool = False
+) -> tuple[frozenset[str], ...]:
+    """Connected components of ``faction``'s building hexes (memoised per
+    state object -- town detection and legal-move enumeration both ask).
+    See :func:`_clusters` for the semantics.
+    """
+    return _clusters(state, faction, river_skip, indirect)
+
+
+@state_memo()
+def _clusters(
+    state: GameState, faction: str, river_skip: bool, indirect: bool
 ) -> tuple[frozenset[str], ...]:
     """Connected components of ``faction``'s building hexes.
 

@@ -35,35 +35,65 @@ from bgai.arena.driver import SimState, advance, decision
 from bgai.data.ledger_parser import ParsedCommand
 from bgai.engine.tm.apply import EngineError
 from bgai.engine.tm.state import GameState
+from bgai.engine.tm.state_key import game_key
 from bgai.training.encode_move import MOVE_FIELDS, encode_move
 from bgai.training.encode_state import encode_state
-from bgai.training.model import (
-    ModelConfig,
-    PolicyValueNet,
-    model_config_from_checkpoint,
-)
+from bgai.training.model import PolicyValueNet, model_config_from_checkpoint
 from bgai.training.vocab import ENCODING_VERSION, FACTION_INDEX
 
 
 @dataclass
 class _Node:
-    """One decision point in the search tree."""
+    """One decision point in the search tree.
+
+    ``visits``/``action_value`` are the arrays of record (self-play reads
+    the visit distribution, tests poke them directly). The scalar fields
+    after them are read-side conveniences for ``_select``: the acting
+    seat's index, a view onto its own value column, the priors as a
+    Python list, and the allowed indices in ascending order.
+    """
 
     sim: SimState
     faction: str
     offer: tuple[ParsedCommand, ...]
     priors: np.ndarray
     seat_of: dict[str, int]
-    children: dict[int, "_Node | None"] = field(default_factory=dict)
+    children: dict[int, _Node | None] = field(default_factory=dict)
     visits: np.ndarray | None = None
     action_value: np.ndarray | None = None  # (n_actions, 4) summed value vectors
     total_visits: int = 0
     allowed: np.ndarray | None = None  # cached top-k prior indices
+    leaf_values: dict[int, tuple[str, np.ndarray]] = field(default_factory=dict)
+    """Edges that resolved without a child node -- ``("terminal", v)``,
+    ``("stuck", v)`` (zero-move engine edge) or ``("rejected", v)``
+    (EngineError) -- with the value that was backed up. ``children``
+    holds None for these too; without this table a re-selected edge
+    re-ran ``advance``+``decision`` on the identical state (the most
+    re-queried single states were hit 200+ times per game)."""
+    seat: int = 0
+    own_value: np.ndarray | None = None  # view: action_value[:, seat]
+    priors_list: list[float] | None = None
+    allowed_list: list[int] | None = None  # ``allowed`` sorted ascending
 
     def __post_init__(self) -> None:
         n = len(self.offer)
         self.visits = np.zeros(n, dtype=np.int32)
         self.action_value = np.zeros((n, 4), dtype=np.float32)
+        self.seat = self.sim.game.setup.factions.index(self.faction)
+        self.own_value = self.action_value[:, self.seat]
+        self.priors_list = np.asarray(self.priors).tolist()
+
+
+@dataclass
+class _Pending:
+    """A batched descent waiting for its leaf to be resolved: either a
+    fresh ``sim`` to classify and evaluate, or a ``cached`` leaf value."""
+
+    path: list[tuple[_Node, int]]
+    parent: _Node
+    action: int
+    sim: SimState | None
+    cached: tuple[str, np.ndarray] | None
 
 
 class MCTSAgent:
@@ -104,6 +134,7 @@ class MCTSAgent:
         late_sims: int = 0,
         root_choice: str = "visits",
         evaluator=None,
+        eval_table: int = 0,
     ) -> None:
         self.name = name
         self.simulations = simulations
@@ -150,6 +181,20 @@ class MCTSAgent:
         with pre-encoded numpy batches instead of the local net. When
         set, this process never runs torch forward passes -- a central
         server batches every worker's leaves into one GPU call."""
+        self._eval_table: dict[tuple, tuple[tuple, np.ndarray, np.ndarray]] | None = (
+            {} if eval_table > 0 else None
+        )
+        self._eval_table_max = eval_table
+        """Opt-in transposition table for net evaluations (``eval_table``
+        = max entries, 0 = off), keyed by position content and mover
+        (``state_key.game_key``): ~17% of the leaves a self-play game
+        evaluates are content-repeats reached by another move order, and
+        the net is a pure function of (position, mover, offer). The offer
+        is stored with the entry and checked on a hit -- the same
+        position can carry different offers depending on the driver's
+        turn bookkeeping. Off by default: at this net size a hit saves
+        ~85 us and the misses' key/table/GC cost exceeds that
+        (docs/decisions.md C18); the arithmetic flips with a bigger net."""
         self.device = torch.device(device)
         if evaluator is not None:
             self.net = None  # type: ignore[assignment]
@@ -179,6 +224,12 @@ class MCTSAgent:
         order) for one position."""
         if self.evaluator is not None:
             return self._evaluate_many([(game, faction, offer)])[0]
+        key = None
+        if self._eval_table is not None:
+            key = (game_key(game), faction)
+            hit = self._lookup(key, offer)
+            if hit is not None:
+                return hit
         enc = encode_state(game, faction)
         cand = np.stack([encode_move(m, game, faction) for m in offer])
         logits, value = self.net(
@@ -188,10 +239,31 @@ class MCTSAgent:
             torch.from_numpy(cand.astype(np.int64))[None].to(self.device),
             torch.ones((1, len(offer)), dtype=torch.bool, device=self.device),
         )
-        return (
+        result = (
             logits[0].softmax(dim=-1).cpu().numpy(),
             value[0].cpu().numpy(),
         )
+        if key is not None:
+            self._remember(key, offer, result)
+        return result
+
+    def _lookup(
+        self, key: tuple, offer: tuple[ParsedCommand, ...]
+    ) -> tuple[np.ndarray, np.ndarray] | None:
+        assert self._eval_table is not None
+        entry = self._eval_table.get(key)
+        if entry is None or entry[0] != offer:
+            return None
+        return entry[1], entry[2]
+
+    def _remember(
+        self, key: tuple, offer: tuple[ParsedCommand, ...], result: tuple[np.ndarray, np.ndarray]
+    ) -> None:
+        table = self._eval_table
+        assert table is not None
+        if len(table) >= self._eval_table_max:
+            del table[next(iter(table))]
+        table[key] = (offer, result[0], result[1])
 
     @torch.no_grad()
     def _evaluate_many(
@@ -211,6 +283,29 @@ class MCTSAgent:
         """
         if not items:
             return []
+        if self._eval_table is None:
+            return self._evaluate_batch(items)
+        keys = [(game_key(game), faction) for game, faction, _offer in items]
+        results: list[tuple[np.ndarray, np.ndarray] | None] = [None] * len(items)
+        fresh: list[int] = []
+        for i, key in enumerate(keys):
+            hit = self._lookup(key, items[i][2])
+            if hit is None:
+                fresh.append(i)
+            else:
+                results[i] = hit
+        if fresh:
+            computed = self._evaluate_batch([items[i] for i in fresh])
+            for i, result in zip(fresh, computed, strict=True):
+                self._remember(keys[i], items[i][2], result)
+                results[i] = result
+        return results  # type: ignore[return-value]
+
+    @torch.no_grad()
+    def _evaluate_batch(
+        self, items: Sequence[tuple[GameState, str, tuple[ParsedCommand, ...]]]
+    ) -> list[tuple[np.ndarray, np.ndarray]]:
+        """One padded, masked forward pass over ``items`` (no table)."""
         width = max(len(offer) for _, _, offer in items)
         n = len(items)
         hex_planes, globals_, factions = [], [], []
@@ -230,7 +325,8 @@ class MCTSAgent:
                 np.asarray(factions, dtype=np.int64), cand, mask,
             )
             return [
-                (priors[i, : len(items[i][2])], values[i]) for i in range(n)
+                (np.array(priors[i, : len(items[i][2])]), np.array(values[i]))
+                for i in range(n)
             ]
         logits, value = self.net(
             torch.from_numpy(np.stack(hex_planes)).to(self.device),
@@ -241,8 +337,10 @@ class MCTSAgent:
         )
         priors = logits.softmax(dim=-1).cpu().numpy()
         values = value.cpu().numpy()
+        # copies, so a table entry does not pin the whole batch's arrays
         return [
-            (priors[i, : len(items[i][2])], values[i]) for i in range(n)
+            (np.array(priors[i, : len(items[i][2])]), np.array(values[i]))
+            for i in range(n)
         ]
 
     def _seat_map(self, game: GameState, faction: str) -> dict[str, int]:
@@ -259,9 +357,15 @@ class MCTSAgent:
     # -- tree -------------------------------------------------------------
 
     def _expand(self, sim: SimState) -> tuple[_Node | None, np.ndarray | None]:
+        node, value, _kind = self._expand_kind(sim)
+        return node, value
+
+    def _expand_kind(self, sim: SimState) -> tuple[_Node | None, np.ndarray, str]:
+        """``(node, value, kind)``: kind is "node" when a searchable child
+        was created, else the ``leaf_values`` tag for the resolved edge."""
         pending = decision(sim)
         if pending is None:
-            return None, self._terminal_value(sim)
+            return None, self._terminal_value(sim), "terminal"
         faction, offer = pending
         if not offer:
             # Engine edge (selfplay_deep iter-5 crash): a pending decision
@@ -269,7 +373,7 @@ class MCTSAgent:
             # ACTC double-turn corner. The position can't be searched or
             # net-evaluated (no candidates), so value it with the engine's
             # own VP projection and stop descending.
-            return None, computed_value(sim.game)
+            return None, computed_value(sim.game), "stuck"
         priors, value = self._evaluate(sim.game, faction, offer)
         node = _Node(
             sim=sim,
@@ -278,7 +382,7 @@ class MCTSAgent:
             priors=priors,
             seat_of=self._seat_map(sim.game, faction),
         )
-        return node, self._leaf_value(value, node.seat_of, faction, sim.game)
+        return node, self._leaf_value(value, node.seat_of, faction, sim.game), "node"
 
     def _terminal_value(self, sim: SimState) -> np.ndarray:
         """Final VP shares, in absolute seat order of the setup."""
@@ -331,29 +435,42 @@ class MCTSAgent:
             return None
         if node.allowed is None:
             node.allowed = np.argsort(-node.priors)[: self.top_k]
+            node.allowed_list = sorted(node.allowed.tolist())
         return node.allowed
 
     def _select(self, node: _Node) -> int:
-        """PUCT over the acting seat's own value component."""
-        seat = node.sim.game.setup.factions.index(node.faction)
-        visits = node.visits
-        q = np.zeros(len(node.offer), dtype=np.float32)
-        visited = visits > 0
-        q[visited] = node.action_value[visited, seat] / visits[visited]
+        """PUCT over the acting seat's own value component.
+
+        Scalar Python rather than numpy: this runs ~540k times per
+        self-play game over ~23 entries, where per-call numpy dispatch
+        costs more than the arithmetic. Ties break on the lowest index,
+        as ``np.argmax`` did. Arithmetic is float64 throughout where the
+        vectorised original mixed float32 intermediates; the choice
+        differs only when the top two scores agree to ~1e-7 relative.
+        """
+        visits = node.visits.tolist()
+        own = node.own_value.tolist()
         # unvisited edges inherit the parent's own current estimate, so a
         # single bad first result cannot permanently bury a move
-        if visited.any():
-            q[~visited] = q[visited].mean()
-        else:
-            q[:] = 0.25
-        u = self.c_puct * node.priors * math.sqrt(max(node.total_visits, 1)) / (1 + visits)
-        score = q + u
-        allowed = self._allowed(node)
-        if allowed is not None:
-            masked = np.full(len(node.offer), -np.inf, dtype=np.float32)
-            masked[allowed] = score[allowed]
-            score = masked
-        return int(np.argmax(score))
+        q_sum = 0.0
+        n_visited = 0
+        for v, w in zip(visits, own, strict=True):
+            if v > 0:
+                q_sum += w / v
+                n_visited += 1
+        fill = q_sum / n_visited if n_visited else 0.25
+        scale = self.c_puct * math.sqrt(max(node.total_visits, 1))
+        priors = node.priors_list
+        indices = node.allowed_list if self._allowed(node) is not None else range(len(visits))
+        best = -math.inf
+        best_index = 0
+        for i in indices:
+            v = visits[i]
+            score = (own[i] / v if v > 0 else fill) + scale * priors[i] / (1 + v)
+            if score > best:
+                best = score
+                best_index = i
+        return best_index
 
     def _simulate(self, root: _Node) -> None:
         path: list[tuple[_Node, int]] = []
@@ -364,23 +481,35 @@ class MCTSAgent:
             path.append((node, action))
             child = node.children.get(action)
             if child is None:
+                cached = node.leaf_values.get(action)
+                if cached is not None:
+                    self._backup(path, cached[1])
+                    return
                 try:
-                    child_sim = advance(node.sim, node.offer[action])
+                    child_sim = advance(
+                        node.sim, node.offer[action], current=(node.faction, node.offer)
+                    )
                 except EngineError:
                     # A move the engine rejects is worth nothing; record a
                     # zero vector so the search stops trying it.
-                    self._backup(path, np.zeros(4, dtype=np.float32))
+                    value = np.zeros(4, dtype=np.float32)
+                    self._backup(path, value)
                     node.children[action] = None
+                    node.leaf_values[action] = ("rejected", value)
                     return
-                new_node, value = self._expand(child_sim)
+                new_node, value, kind = self._expand_kind(child_sim)
                 node.children[action] = new_node
+                if new_node is None:
+                    node.leaf_values[action] = (kind, value)
                 self._backup(path, value)
                 return
             node = child
             depth += 1
             if depth >= self.max_depth:
                 _, value = self._evaluate(node.sim.game, node.faction, node.offer)
-                self._backup(path, self._leaf_value(value, node.seat_of, node.faction, node.sim.game))
+                self._backup(
+                    path, self._leaf_value(value, node.seat_of, node.faction, node.sim.game)
+                )
                 return
 
     def _backup(self, path: list[tuple[_Node, int]], value: np.ndarray) -> None:
@@ -407,17 +536,23 @@ class MCTSAgent:
             node.visits[action] -= 1
             node.total_visits -= 1
 
-    def _descend_batch(
-        self, root: _Node, count: int
-    ) -> list[tuple[list[tuple[_Node, int]], _Node, int, SimState]]:
+    def _descend_batch(self, root: _Node, count: int) -> list[_Pending]:
         """Walk ``count`` paths to unexpanded leaves, holding virtual loss.
 
         Paths that resolve without a network evaluation -- an engine
         rejection, or hitting ``max_depth`` -- are backed up immediately
         and not returned; only leaves needing a forward pass come back, so
-        the caller can evaluate them in one batch.
+        the caller can evaluate them in one batch. A cached terminal/stuck
+        edge is returned too (with its value, no ``advance``), so it is
+        backed up at the same point of the batch as a fresh one would be.
         """
-        pending: list[tuple[list[tuple[_Node, int]], _Node, int, SimState]] = []
+        pending: list[_Pending] = []
+        # Virtual loss does not always move the next descent off an edge,
+        # so one batch can reach the same unexpanded edge several times.
+        # Those repeats share the first descent's child state: the engine
+        # step is deterministic, and the leaf still gets one pending entry
+        # per path so the batch's backups are unchanged.
+        advanced: dict[tuple[int, int], SimState] = {}
         for _ in range(count):
             path: list[tuple[_Node, int]] = []
             node = root
@@ -425,17 +560,34 @@ class MCTSAgent:
             while True:
                 action = self._select(node)
                 path.append((node, action))
-                self._apply_virtual_loss([(node, action)])
+                node.visits[action] += 1  # virtual loss, one edge
+                node.total_visits += 1
                 child = node.children.get(action)
                 if child is None:
-                    try:
-                        child_sim = advance(node.sim, node.offer[action])
-                    except EngineError:
-                        self._revert_virtual_loss(path)
-                        self._backup(path, np.zeros(4, dtype=np.float32))
-                        node.children[action] = None
+                    cached = node.leaf_values.get(action)
+                    if cached is not None:
+                        if cached[0] == "rejected":
+                            self._revert_virtual_loss(path)
+                            self._backup(path, cached[1])
+                        else:
+                            pending.append(_Pending(path, node, action, None, cached))
                         break
-                    pending.append((path, node, action, child_sim))
+                    edge = (id(node), action)
+                    child_sim = advanced.get(edge)
+                    if child_sim is None:
+                        try:
+                            child_sim = advance(
+                                node.sim, node.offer[action], current=(node.faction, node.offer)
+                            )
+                        except EngineError:
+                            value = np.zeros(4, dtype=np.float32)
+                            self._revert_virtual_loss(path)
+                            self._backup(path, value)
+                            node.children[action] = None
+                            node.leaf_values[action] = ("rejected", value)
+                            break
+                        advanced[edge] = child_sim
+                    pending.append(_Pending(path, node, action, child_sim, None))
                     break
                 node = child
                 depth += 1
@@ -455,22 +607,32 @@ class MCTSAgent:
         if not pending:
             return
         items = []
-        terminal: list[int] = []
-        stuck: list[int] = []
-        for i, (_path, _parent, _action, sim) in enumerate(pending):
-            decided = decision(sim)
+        terminal: list[tuple[_Pending, np.ndarray]] = []
+        stuck: list[tuple[_Pending, np.ndarray]] = []
+        decided_by_sim: dict[int, tuple[str, tuple[ParsedCommand, ...]] | None] = {}
+        for entry in pending:
+            if entry.cached is not None:
+                kind, value = entry.cached
+                (terminal if kind == "terminal" else stuck).append((entry, value))
+                continue
+            sim = entry.sim
+            if id(sim) in decided_by_sim:
+                decided = decided_by_sim[id(sim)]
+            else:
+                decided = decided_by_sim[id(sim)] = decision(sim)
             if decided is None:
-                terminal.append(i)
+                terminal.append((entry, self._terminal_value(sim)))
             elif not decided[1]:
                 # zero-move decision: same engine edge _expand guards
-                stuck.append(i)
+                stuck.append((entry, computed_value(sim.game)))
             else:
                 faction, offer = decided
-                items.append((i, sim, faction, offer))
+                items.append((entry, sim, faction, offer))
 
-        results = self._evaluate_many([(sim.game, f, o) for _i, sim, f, o in items])
-        for (i, sim, faction, offer), (priors, value_rel) in zip(items, results):
-            path, parent, action, _ = pending[i]
+        results = self._evaluate_many([(sim.game, f, o) for _e, sim, f, o in items])
+        for (entry, sim, faction, offer), (priors, value_rel) in zip(
+            items, results, strict=True
+        ):
             seat_of = self._seat_map(sim.game, faction)
             node = _Node(
                 sim=sim,
@@ -479,19 +641,15 @@ class MCTSAgent:
                 priors=priors,
                 seat_of=seat_of,
             )
-            parent.children[action] = node
-            self._revert_virtual_loss(path)
-            self._backup(path, self._leaf_value(value_rel, seat_of, faction, sim.game))
-        for i in terminal:
-            path, parent, action, sim = pending[i]
-            parent.children[action] = None
-            self._revert_virtual_loss(path)
-            self._backup(path, self._terminal_value(sim))
-        for i in stuck:
-            path, parent, action, sim = pending[i]
-            parent.children[action] = None
-            self._revert_virtual_loss(path)
-            self._backup(path, computed_value(sim.game))
+            entry.parent.children[entry.action] = node
+            self._revert_virtual_loss(entry.path)
+            self._backup(entry.path, self._leaf_value(value_rel, seat_of, faction, sim.game))
+        for kind, resolved in (("terminal", terminal), ("stuck", stuck)):
+            for entry, value in resolved:
+                entry.parent.children[entry.action] = None
+                entry.parent.leaf_values[entry.action] = (kind, value)
+                self._revert_virtual_loss(entry.path)
+                self._backup(entry.path, value)
 
     # -- Agent protocol ---------------------------------------------------
 
