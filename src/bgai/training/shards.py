@@ -54,7 +54,7 @@ from bgai.training.selfplay import SelfPlayConfig, SelfPlayRecord
 from bgai.training.vocab import ENCODING_VERSION, HEXES
 
 SHARD_FORMAT_VERSION = 1
-_SHARD_RE = re.compile(r"^it(\d{4})_a(\d{3})_(\d{6})\.npz$")
+_SHARD_RE = re.compile(r"^it(\d{4,})_a(\d{3,})_(\d{6,})\.npz$")
 _ARRAY_KEYS = (
     "hex_planes", "globals", "candidates", "visits", "n_cand",
     "faction_id", "seat", "final_shares", "has_aux", "meta_json",

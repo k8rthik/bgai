@@ -146,3 +146,11 @@ def test_shard_name_layout() -> None:
     assert sh.is_shard_file(Path("x/it0005_a002_000017.npz"))
     assert not sh.is_shard_file(Path("x/it0005_a002_000017.tmp"))
     assert not sh.is_shard_file(Path("x/.it0005_a002_000017.npz.tmp"))
+
+
+def test_shard_names_past_four_and_six_digits_are_recognised() -> None:
+    # Regression: iteration 10000 of scale_1m wrote it10000_* shards the
+    # 4-digit regex rejected, so the learner saw no new data and idled out.
+    for name in (sh.shard_name(10000, 4, 25128), sh.shard_name(9, 1, 1_000_000)):
+        assert sh.is_shard_file(Path(name)), name
+    assert sh.shard_name(10000, 4, 25128) == "it10000_a004_025128.npz"
