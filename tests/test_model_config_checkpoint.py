@@ -60,10 +60,11 @@ def test_a_non_dict_model_config_is_rejected() -> None:
 
 
 def test_selfplay_train_checkpoints_store_the_full_architecture() -> None:
-    from bgai.training.selfplay_train import _saved_config
+    # selfplay_train (serial and pipelined) writes through checkpoint_payload
+    from bgai.training.selfplay_finetune import checkpoint_payload
 
-    saved = _saved_config({"a": 1}, SMALL)
-    assert saved["model_config"] == asdict(SMALL)
+    saved = checkpoint_payload(PolicyValueNet(SMALL), SMALL, 1, {"a": 1})["config"]
+    assert saved["model_config"] == asdict(SMALL) and saved["a"] == 1
     assert saved["value_simplex"] == SMALL.value_simplex
     assert model_config_from_checkpoint({"config": saved}) == SMALL
 

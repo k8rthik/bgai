@@ -80,6 +80,10 @@ class SelfPlayConfig:
     top_k: int = 8
     max_depth: int = 48
     leaf_batch: int = 16
+    c_puct: float = 1.5
+    """PUCT exploration constant. 1.5 is the MCTSAgent default every
+    self-play leg so far generated with; the arena champion config uses
+    2.5 (decision C16). Threaded through explicitly so a run can choose."""
     temperature: float = 1.0
     temp_decisions: int = 30
     """Sample moves ∝ visits for this many recorded decisions per game,
@@ -319,6 +323,7 @@ def generate(
         max_depth=cfg.max_depth,
         top_k=cfg.top_k,
         leaf_batch=cfg.leaf_batch,
+        c_puct=cfg.c_puct,
         device=device,
     )
     rng = random.Random(seed)

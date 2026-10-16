@@ -670,6 +670,30 @@ class MCTSAgent:
         """Drop any retained subtree (call at game boundaries)."""
         self._reuse_root = None
 
+    def reload(self, checkpoint_path: Path) -> int:
+        """Swap the local net's weights for ``checkpoint_path``'s IN PLACE
+        (``load_state_dict``, measured 4 ms) and drop any retained tree.
+
+        The actor/learner split calls this between games when the
+        learner's ``current.pt`` mtime changes. Validation first, weights
+        second: a checkpoint from a different encoding or architecture
+        raises ``ValueError`` and leaves the current weights untouched.
+        Returns the checkpoint's ``iteration`` (0 when absent).
+        """
+        if self.net is None:
+            raise ValueError("reload needs a local net; evaluator-backed agents have none")
+        ckpt = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
+        version = ckpt.get("encoding_version") if isinstance(ckpt, dict) else None
+        if version != ENCODING_VERSION:
+            raise ValueError(f"checkpoint encoding v{version} != code v{ENCODING_VERSION}")
+        cfg = model_config_from_checkpoint(ckpt)
+        if cfg != self.net.cfg:
+            raise ValueError(f"checkpoint architecture {cfg} != agent net {self.net.cfg}")
+        self.net.load_state_dict(ckpt["model"])
+        self.net.eval()
+        self.reset_tree()
+        return int(ckpt.get("iteration", 0))
+
     def note_advance(self, choice: ParsedCommand) -> None:
         """Walk the retained tree down the edge actually played.
 
