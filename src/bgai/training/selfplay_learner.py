@@ -90,6 +90,9 @@ log = logging.getLogger(__name__)
 CURRENT_CHECKPOINT = "current.pt"
 SHARDS_DIR = "shards"
 METRICS_FILE = "metrics.jsonl"
+DONE_FILE = "DONE"
+"""Written once ``max_iterations`` is reached, so tools/run_watchdog.sh can
+tell a finished run from a dead learner (both leave current.pt aging)."""
 
 
 @dataclass(frozen=True)
@@ -449,7 +452,18 @@ def run_learner(cfg: LearnerConfig, stop_when: Callable[[], bool] | None = None)
                 break
     finally:
         stop.uninstall()
+    if _finished(cfg, state):
+        _mark_done(cfg, state)
     return state.steps_done
+
+
+def _mark_done(cfg: LearnerConfig, state: LearnerState) -> None:
+    payload = {"iteration": state.iteration, "max_iterations": cfg.max_iterations,
+               "wall_time": time.time()}
+    tmp = cfg.run_dir / f"{DONE_FILE}.tmp"
+    tmp.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+    tmp.replace(cfg.run_dir / DONE_FILE)
+    log.info("learner: run complete at iteration %d; wrote %s", state.iteration, DONE_FILE)
 
 
 def _stopped(cfg: LearnerConfig, state: LearnerState, stop: StopSignal) -> None:

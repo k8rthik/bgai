@@ -451,3 +451,21 @@ def test_resumed_games_skips_malformed_metrics_rows(tmp_path: Path) -> None:
     )
     cfg = _learner_cfg(run_dir, tmp_path / "init.pt")
     assert sl._resumed_games(cfg) == 6
+
+
+def test_watchdog_reports_a_done_run_as_finished_not_down(tmp_path: Path) -> None:
+    run = tmp_path / "run"
+    run.mkdir()
+    (run / "current.pt").write_bytes(b"x")
+    old = time.time() - 6 * 3600
+    os.utime(run / "current.pt", (old, old))
+    (run / "DONE").write_text('{"iteration": 3, "max_iterations": 3}\n')
+    env = {**os.environ, "HOME": str(tmp_path)}  # no ntfy topic: alerts only logged
+    script = Path(__file__).resolve().parents[1] / "tools" / "run_watchdog.sh"
+    for _ in range(2):
+        out = subprocess.run(["bash", str(script), str(run), "1", "4"], env=env,
+                             capture_output=True, text=True, timeout=60)
+        assert out.returncode == 0, out.stderr
+        assert "finished" in out.stdout and "PROBLEM" not in out.stdout
+    # second run is quiet: the "finished" alert is sent once, not every 10 min
+    assert "alert NOT sent" not in out.stderr

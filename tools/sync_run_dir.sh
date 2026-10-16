@@ -17,6 +17,8 @@
 #      owner removes STOP (the launcher, or you, once the learner stopped)
 #      the mirror drops it too and a later actor start does not exit at
 #      once. Actors also discard a STOP older than their own start.
+#   4. PULLS   learner R/DONE         -> local    R/DONE  (completion marker
+#      for run_watchdog.sh).
 #
 # The learner host runs nothing extra. Multiple generation hosts never
 # collide because shard names carry the actor id -- give every actor
@@ -57,6 +59,10 @@ while true; do
 
   # 3. mirror STOP, including its removal
   run_rsync "STOP mirror" -a --delete --include='/STOP' --exclude='*' \
+      "$REMOTE/" "$LOCAL/" || true
+
+  # 4. pull DONE (the learner's completion marker, read by run_watchdog.sh)
+  run_rsync "DONE pull" -a --include='/DONE' --exclude='*' \
       "$REMOTE/" "$LOCAL/" || true
 
   round=$((round + 1))

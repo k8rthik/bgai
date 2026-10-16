@@ -131,6 +131,21 @@ def test_learner_steps_once_enough_games_arrive_and_logs_staleness(tmp_path: Pat
     assert {"policy", "value", "kl", "total"} <= set(row)
 
 
+def test_learner_marks_run_done_only_when_max_iterations_reached(tmp_path: Path) -> None:
+    # A finished run must be distinguishable from a dead one: the watchdog
+    # alerted "run needs attention" for a day after scale_1m completed.
+    init = tmp_path / "init.pt"
+    write_tiny_checkpoint(init, iteration=0)
+    run_dir = tmp_path / "run"
+    _write(run_dir / "shards", 0, n_games=1, ckpt_iteration=0, n_records=20)
+    sl.run_learner(_cfg(run_dir, init, max_iterations=1))
+    assert not (run_dir / sl.DONE_FILE).exists(), "idle exit is not completion"
+    _write(run_dir / "shards", 1, n_games=1, ckpt_iteration=0, n_records=20)
+    assert sl.run_learner(_cfg(run_dir, init, max_iterations=1)) == 1
+    done = json.loads((run_dir / sl.DONE_FILE).read_text())
+    assert done["iteration"] == 1 and done["max_iterations"] == 1
+
+
 def test_learner_second_step_uses_window_and_reports_staleness(tmp_path: Path) -> None:
     init = tmp_path / "init.pt"
     write_tiny_checkpoint(init, iteration=0)
