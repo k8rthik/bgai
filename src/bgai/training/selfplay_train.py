@@ -63,7 +63,9 @@ trained-from-scratch RL result.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
+import signal
 import time
 from dataclasses import asdict, dataclass, fields
 from multiprocessing import get_context
@@ -177,6 +179,9 @@ def _worker_init(checkpoint: str, cfg: SelfPlayConfig, infer=None) -> None:
     it claims a worker id and evaluates through the central server."""
     from bgai.agents.mcts import MCTSAgent
 
+    for sig in (signal.SIGINT, signal.SIGTERM):  # the parent's StopSignal decides
+        with contextlib.suppress(ValueError):
+            signal.signal(sig, signal.SIG_IGN)
     torch.set_num_threads(1)  # workers must not fight over BLAS threads
     evaluator = None
     if infer is not None:
@@ -270,7 +275,13 @@ def resumed_config(run_dir: Path, overrides: dict) -> SelfPlayTrainConfig:
         raise ValueError(
             f"cannot resume {run_dir}: encoding v{version} != code v{ENCODING_VERSION}"
         )
-    base = config_kwargs_from_stored(SelfPlayTrainConfig, stored, _PATH_FIELDS)
+    # Pipelined runs are written by the learner, whose own config block
+    # knows nothing about mode/search/actors; the launcher's full config
+    # rides along under "launcher" (finding 1). Serial runs store it flat.
+    source = stored.get("launcher") or stored
+    if not isinstance(source, dict):
+        raise ValueError(f"{run_dir}/current.pt has a malformed launcher config block")
+    base = config_kwargs_from_stored(SelfPlayTrainConfig, source, _PATH_FIELDS)
     if "checkpoint" not in base:
         raise ValueError(f"{run_dir}/current.pt stores no run config; cannot resume")
     known = {f.name for f in fields(SelfPlayTrainConfig)}
@@ -320,7 +331,9 @@ def _log_code_change(metrics: Path, stored: dict, prov: CodeProvenance) -> None:
 # --------------------------------------------------------------------------
 
 
-def _saved_config(cfg: SelfPlayTrainConfig, prov: CodeProvenance) -> dict:
+def saved_config(cfg: SelfPlayTrainConfig, prov: CodeProvenance) -> dict:
+    """The run config block stored in every checkpoint (paths as strings,
+    provenance stamped); ``resumed_config`` reads it back."""
     return {
         **asdict(cfg),
         **{k: (str(getattr(cfg, k)) if getattr(cfg, k) is not None else None)
@@ -335,7 +348,7 @@ def _start(cfg: SelfPlayTrainConfig, nets: TrainableNets, prov: CodeProvenance) 
     current = cfg.out / "current.pt"
     if cfg.resume is None:
         save_atomic(
-            checkpoint_payload(nets.net, nets.model_cfg, 0, _saved_config(cfg, prov)), current
+            checkpoint_payload(nets.net, nets.model_cfg, 0, saved_config(cfg, prov)), current
         )
         return 1
     start = nets.iteration + 1
@@ -399,7 +412,7 @@ def run(cfg: SelfPlayTrainConfig) -> None:
             f"{current} exists: pass --resume {cfg.out} to continue it, or choose a new --out"
         )
     nets = load_trainable_nets(cfg.checkpoint, cfg.anchor, device)
-    saved_config = _saved_config(cfg, prov)
+    stored = saved_config(cfg, prov)
     metrics_path = cfg.out / "metrics.jsonl"
     start = _start(cfg, nets, prov)
     prev_records = _load_prev_records(cfg.out, start - 1) if cfg.resume is not None else []
@@ -407,9 +420,7 @@ def run(cfg: SelfPlayTrainConfig) -> None:
     stop.install()
     try:
         for iteration in range(start, cfg.iterations + 1):
-            prev_records, row = _iteration(
-                cfg, nets, iteration, prev_records, device, saved_config
-            )
+            prev_records, row = _iteration(cfg, nets, iteration, prev_records, device, stored)
             _append_row(metrics_path, {**row, **prov.as_dict()})
             if stop.requested():
                 _append_row(metrics_path, {"event": "stopped", "iteration": iteration,
@@ -479,8 +490,20 @@ def config_from_args(args: argparse.Namespace) -> SelfPlayTrainConfig:
 
 def config_from_argv(argv: list[str] | None) -> SelfPlayTrainConfig:
     args = build_parser().parse_args(argv)
+    explicit = explicit_cli_args(build_parser, argv)
     if args.resume is not None:
-        return resumed_config(args.resume, explicit_cli_args(build_parser, argv))
+        for fixed in ("checkpoint", "out"):
+            if fixed in explicit:
+                raise SystemExit(
+                    f"error: --{fixed} conflicts with --resume (the run directory defines it)"
+                )
+        if "iterations" in explicit and "extra_iterations" in explicit:
+            raise SystemExit(
+                "error: --iterations (run total) and --extra-iterations are mutually exclusive"
+            )
+        return resumed_config(args.resume, explicit)
+    if args.extra_iterations is not None:
+        raise SystemExit("error: --extra-iterations requires --resume RUN_DIR")
     return config_from_args(args)
 
 

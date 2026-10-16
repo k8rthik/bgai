@@ -97,8 +97,8 @@ def _result(ckpt_iteration: int, n_records: int = 1) -> sa.WorkerResult:
     from selfplay_helpers import synthetic_records
 
     return sa.WorkerResult(
-        seed=1, ckpt_iteration=ckpt_iteration, records=tuple(synthetic_records(n_records, rng)),
-        reloaded=False, secs=0.0,
+        seed=1, game_index=1, ckpt_iteration=ckpt_iteration,
+        records=tuple(synthetic_records(n_records, rng)), reloaded=False, secs=0.0,
     )
 
 
@@ -145,7 +145,8 @@ def test_worker_reloads_only_when_checkpoint_mtime_changes(tmp_path: Path) -> No
     write_tiny_checkpoint(ckpt, iteration=0)
     sa._actor_worker_init(str(ckpt), FAST)
     stamp = checkpoint_mtime_ns(ckpt)
-    task = sa.WorkerTask(seed=sa.game_seed(0, 0, 0), checkpoint=str(ckpt), mtime_ns=stamp)
+    task = sa.WorkerTask(seed=sa.game_seed(0, 0, 0), game_index=0, checkpoint=str(ckpt),
+                         mtime_ns=stamp)
     first = sa._actor_worker_game(task)
     assert first.ckpt_iteration == 0 and not first.reloaded
     assert len(first.records) > 0
@@ -156,11 +157,13 @@ def test_worker_reloads_only_when_checkpoint_mtime_changes(tmp_path: Path) -> No
     new_stamp = checkpoint_mtime_ns(ckpt)
     assert new_stamp != stamp
     second = sa._actor_worker_game(
-        sa.WorkerTask(seed=sa.game_seed(0, 0, 1), checkpoint=str(ckpt), mtime_ns=new_stamp)
+        sa.WorkerTask(seed=sa.game_seed(0, 0, 1), game_index=1, checkpoint=str(ckpt),
+                      mtime_ns=new_stamp)
     )
     assert second.reloaded and second.ckpt_iteration == 2
     third = sa._actor_worker_game(
-        sa.WorkerTask(seed=sa.game_seed(0, 0, 2), checkpoint=str(ckpt), mtime_ns=new_stamp)
+        sa.WorkerTask(seed=sa.game_seed(0, 0, 2), game_index=2, checkpoint=str(ckpt),
+                      mtime_ns=new_stamp)
     )
     assert not third.reloaded and third.ckpt_iteration == 2
 
@@ -173,7 +176,8 @@ def test_worker_keeps_old_weights_when_new_checkpoint_is_bad(tmp_path: Path) -> 
     ckpt.write_bytes(b"garbage")
     _bump_mtime(ckpt)
     res = sa._actor_worker_game(
-        sa.WorkerTask(seed=3, checkpoint=str(ckpt), mtime_ns=checkpoint_mtime_ns(ckpt))
+        sa.WorkerTask(seed=3, game_index=3, checkpoint=str(ckpt),
+                      mtime_ns=checkpoint_mtime_ns(ckpt))
     )
     assert not res.reloaded and res.ckpt_iteration == 0 and len(res.records) > 0
 

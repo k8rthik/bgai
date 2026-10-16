@@ -87,17 +87,17 @@ def test_pipelined_run_end_to_end(tmp_path: Path) -> None:
 
 
 def test_pipelined_resume_continues_numbering_and_refuses_clobber(tmp_path: Path) -> None:
-    from dataclasses import replace
-
     import pytest
 
     cfg = _cfg(tmp_path, iterations=1)
     assert run_pipelined(cfg, actor_stop_timeout=120.0) == 1
     with pytest.raises(ValueError, match="resume"):
         run_pipelined(cfg, actor_stop_timeout=120.0)
-    resumed = replace(cfg, resume=cfg.out, checkpoint=cfg.out / "current.pt",
-                      anchor=cfg.checkpoint, iterations=2)
-    assert learner_config(resumed).max_iterations == 1
+    from bgai.training.selfplay_train import resumed_config
+
+    resumed = resumed_config(cfg.out, {"extra_iterations": 1})
+    assert resumed.mode == "pipelined" and resumed.iterations == 2
+    assert learner_config(resumed).max_iterations == 2  # run total
     assert run_pipelined(resumed, actor_stop_timeout=120.0) == 1
     assert load_checkpoint(cfg.out / "current.pt")["iteration"] == 2
     rows = [json.loads(line) for line in (cfg.out / "metrics.jsonl").read_text().splitlines()]

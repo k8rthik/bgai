@@ -77,6 +77,11 @@ class ShardMeta:
     created_at: float
     n_records: int
     format_version: int = SHARD_FORMAT_VERSION
+    game_index_start: int = 0
+    game_index_end: int = 0
+    """Per-actor game index range [start, end) held by this shard; a
+    restarted actor resumes its seed index from the highest end it finds.
+    0/0 on converted legacy pickles (no provenance to recover)."""
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), sort_keys=True)
@@ -85,9 +90,43 @@ class ShardMeta:
     def from_json(cls, text: str) -> ShardMeta:
         try:
             raw = json.loads(text)
-            return cls(**{k: raw[k] for k in cls.__dataclass_fields__ if k in raw})
-        except (TypeError, ValueError, KeyError) as exc:
+        except ValueError as exc:
             raise ShardError(f"bad shard metadata: {exc}") from exc
+        if not isinstance(raw, dict):
+            raise ShardError("bad shard metadata: not a JSON object")
+        fields_ = {k: raw[k] for k in cls.__dataclass_fields__ if k in raw}
+        try:
+            meta = cls(**fields_)
+        except TypeError as exc:
+            raise ShardError(f"bad shard metadata: {exc}") from exc
+        return _validated(meta)
+
+
+_INT_FIELDS = (
+    "encoding_version", "ckpt_iteration", "actor_id", "seed", "n_games", "n_records",
+    "format_version", "game_index_start", "game_index_end",
+)
+_NON_NEGATIVE = tuple(f for f in _INT_FIELDS if f != "seed")
+
+
+def _validated(meta: ShardMeta) -> ShardMeta:
+    """Type/range checks: a malformed metadata blob must surface as a
+    ShardError the learner skips, not a TypeError that kills its poll."""
+    for name in _INT_FIELDS:
+        value = getattr(meta, name)
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ShardError(f"bad shard metadata: {name} must be an int, got {value!r}")
+    for name in _NON_NEGATIVE:
+        if getattr(meta, name) < 0:
+            raise ShardError(f"bad shard metadata: {name} must be >= 0")
+    if meta.game_index_end < meta.game_index_start:
+        raise ShardError("bad shard metadata: game_index_end < game_index_start")
+    if not isinstance(meta.config_hash, str):
+        raise ShardError("bad shard metadata: config_hash must be a string")
+    created = meta.created_at
+    if isinstance(created, bool) or not isinstance(created, int | float) or created < 0:
+        raise ShardError(f"bad shard metadata: created_at must be a number, got {created!r}")
+    return meta
 
 
 def shard_name(ckpt_iteration: int, actor_id: int, seq: int) -> str:
@@ -163,11 +202,13 @@ def write_shard(
     config_hash: str,
     n_games: int,
     created_at: float | None = None,
+    game_index_start: int = 0,
+    game_index_end: int = 0,
 ) -> ShardMeta:
     """Atomically write ``records`` to ``path``; returns the metadata."""
     if not records:
         raise ValueError("refusing to write an empty shard")
-    meta = ShardMeta(
+    meta = _validated(ShardMeta(
         encoding_version=ENCODING_VERSION,
         ckpt_iteration=int(ckpt_iteration),
         actor_id=int(actor_id),
@@ -176,7 +217,9 @@ def write_shard(
         n_games=int(n_games),
         created_at=float(created_at if created_at is not None else time.time()),
         n_records=len(records),
-    )
+        game_index_start=int(game_index_start),
+        game_index_end=int(game_index_end),
+    ))
     arrays = {**_stack(records), "meta_json": np.array(meta.to_json())}
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)

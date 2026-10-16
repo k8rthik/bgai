@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import signal
+import time
 from pathlib import Path
 
 import numpy as np
@@ -222,7 +224,10 @@ def test_learner_honours_stop_between_steps(tmp_path: Path) -> None:
             d / sh.shard_name(0, 0, seq), synthetic_records(20, np.random.default_rng(seq)),
             ckpt_iteration=0, actor_id=0, seed=seq, config_hash="t", n_games=2,
         )
-    (run_dir / "STOP").touch()
+    stop_file = run_dir / "STOP"
+    stop_file.touch()
+    future = time.time_ns() + 60_000_000_000  # newer than the learner's start
+    os.utime(stop_file, ns=(future, future))
     cfg = sl.LearnerConfig(
         run_dir=run_dir, checkpoint=init, games_per_step=2, window_steps=2,
         finetune=FineTuneConfig(batch_size=8, lr=1e-3), poll_secs=0.05,
@@ -232,7 +237,7 @@ def test_learner_honours_stop_between_steps(tmp_path: Path) -> None:
     rows = _rows(run_dir)
     assert rows[0]["iteration"] == 1 and {"git_sha", "hostname"} <= set(rows[0])
     assert rows[-1]["event"] == "stopped"
-    assert not (run_dir / "STOP").exists()
+    assert stop_file.exists(), "the learner leaves STOP for the run owner"
 
 
 def test_learner_device_auto_resolves_and_saves_cpu_tensors(tmp_path: Path) -> None:

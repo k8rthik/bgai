@@ -141,7 +141,7 @@ def test_learner_second_step_uses_window_and_reports_staleness(tmp_path: Path) -
     # actors kept playing on iteration 0 while the learner stepped: stale by 1
     _write(d, 1, n_games=1, ckpt_iteration=0, n_records=20)
     _write(d, 2, n_games=1, ckpt_iteration=1, n_records=20)
-    assert sl.run_learner(_cfg(run_dir, init, max_iterations=1)) == 1
+    assert sl.run_learner(_cfg(run_dir, init, max_iterations=2)) == 1  # total, not "1 more"
     assert load_checkpoint(run_dir / "current.pt")["iteration"] == 2
     rows = [json.loads(line) for line in (run_dir / "metrics.jsonl").read_text().splitlines()]
     assert [r["iteration"] for r in rows] == [1, 2]

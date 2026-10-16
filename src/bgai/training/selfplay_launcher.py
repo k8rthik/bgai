@@ -32,10 +32,11 @@ than idling for ``--idle-timeout-secs``.
 
 Resume: ``selfplay_train --resume R --mode pipelined --extra-iterations N``
 restarts actors (they continue their shard sequences) and a learner that
-picks numbering up from ``R/current.pt``. ``R/STOP`` during a run stops
-the learner at a step boundary (it removes the file), after which this
-launcher re-creates it for the actors and removes it again once they
-have exited.
+picks numbering up from ``R/current.pt`` and stops at the same
+``--iterations`` total. ``R/STOP`` during a run stops the learner at a
+step boundary; the learner leaves the file in place so the actors (which
+check it only between games, and latch it once seen) still find it, and
+this launcher -- the run owner -- removes it once every actor has exited.
 """
 
 from __future__ import annotations
@@ -48,9 +49,9 @@ import time
 from collections.abc import Sequence
 from pathlib import Path
 
-from bgai.training.checkpoint_io import load_checkpoint
+from bgai.training.run_provenance import code_provenance
 from bgai.training.selfplay_learner import CURRENT_CHECKPOINT, LearnerConfig, run_learner
-from bgai.training.selfplay_train import SelfPlayTrainConfig
+from bgai.training.selfplay_train import SelfPlayTrainConfig, saved_config
 from bgai.training.stop_signal import STOP_FILE
 from bgai.training.worker_env import pin_single_thread_env
 
@@ -58,6 +59,10 @@ log = logging.getLogger(__name__)
 
 ACTOR_STOP_TIMEOUT_SECS = 900.0
 """Long enough for a 512-sim game in flight to finish and be sharded."""
+ACTOR_CHECKPOINT_WAIT_SECS = 120.0
+"""The in-process learner publishes iteration 0 within seconds; if it
+fails first, STOP (created in ``run_pipelined``'s finally) ends the wait
+anyway, so this only bounds a pathological start."""
 
 
 def actor_argv(cfg: SelfPlayTrainConfig, actor_id: int, workers: int) -> list[str]:
@@ -76,25 +81,22 @@ def actor_argv(cfg: SelfPlayTrainConfig, actor_id: int, workers: int) -> list[st
         "--temp-decisions", str(sp.temp_decisions),
         "--fast-prior", str(sp.fast_prior),
         "--c-puct", str(sp.c_puct),
+        "--checkpoint-wait-secs", str(ACTOR_CHECKPOINT_WAIT_SECS),
     ]
 
 
-def _done_iterations(cfg: SelfPlayTrainConfig) -> int:
-    current = cfg.out / CURRENT_CHECKPOINT
-    if cfg.resume is None or not current.exists():
-        return 0
-    return int(load_checkpoint(current).get("iteration", 0))
-
-
 def learner_config(cfg: SelfPlayTrainConfig) -> LearnerConfig:
-    """``--iterations`` is the run total; under ``--resume`` the learner
-    only runs the remainder (it picks numbering up from ``current.pt``)."""
+    """``--iterations`` is the run total in both places: the learner stops
+    when ``current.pt`` reaches it, so a resumed launcher passes the same
+    number and the learner simply has fewer steps left. The full launcher
+    config rides along in every checkpoint for ``--resume``."""
     return LearnerConfig(
         run_dir=cfg.out, checkpoint=cfg.checkpoint, anchor=cfg.anchor,
         games_per_step=cfg.games_per_iteration, window_steps=2,
-        max_iterations=max(0, cfg.iterations - _done_iterations(cfg)),
+        max_iterations=cfg.iterations,
         finetune=cfg.finetune(), device=cfg.device or "auto",
         poll_secs=2.0, idle_timeout_secs=cfg.idle_timeout_secs,
+        launcher=saved_config(cfg, code_provenance()),
     )
 
 

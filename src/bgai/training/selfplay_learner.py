@@ -40,13 +40,17 @@ pipelined mode every second the learner spends training is a second of
 extra staleness -- so the idle GPU takes it.
 
 Stopping and restarting: ``R/STOP`` (or SIGTERM) ends the learner after
-the in-flight step with a ``{"event": "stopped"}`` row and the file
-removed; actors are stopped separately (they also honour ``STOP``, so
-on a single host create it once and they all see it; on a two-host run
-create it on each generation host too, or SIGTERM the actors). A
+the in-flight step with a ``{"event": "stopped"}`` row. The learner
+does NOT remove ``STOP``: actors on the same directory only check it at
+game boundaries and must still see it. The run owner cleans up -- the
+pipelined launcher once every actor has exited, or the operator; a
+``STOP`` older than a process's own start is stale and ignored, and
+``tools/sync_run_dir.sh`` mirrors the removal to generation hosts. A
 restarted learner in the same ``R`` resumes from ``current.pt`` with
 the settings stored in it (explicit flags override), keeps numbering,
-and logs a ``code_changed`` row if the git sha differs. Every checkpoint
+runs only up to ``--max-iterations`` (a run TOTAL; ``--extra-iterations``
+adds to the checkpoint's iteration) and logs a ``code_changed`` row if
+the git sha differs. Every checkpoint
 config and metrics row carries ``git_sha``/``code_dirty``/
 ``encoding_version``/``hostname``.
 
@@ -98,7 +102,15 @@ class LearnerConfig:
     games_per_step: int = 96
     window_steps: int = 2
     max_iterations: int | None = None
+    """Run TOTAL: stop once ``current.pt`` reaches this iteration, whether
+    the steps happened in this process or an earlier one. The CLI's
+    ``--extra-iterations N`` is the additive form (checkpoint + N)."""
     finetune: FineTuneConfig = FineTuneConfig()
+    launcher: dict | None = None
+    """Full ``selfplay_train`` config of a pipelined run, stored verbatim
+    in every checkpoint so ``selfplay_train --resume`` can rebuild the
+    launcher (mode, search, actors) and not silently fall back to a
+    serial loop. None for a hand-started learner."""
     device: str = "auto"
     """auto = cuda > mps > cpu (``train.pick_device``)."""
     poll_secs: float = 5.0
@@ -292,8 +304,13 @@ def _resumed_games(cfg: LearnerConfig) -> int:
         except ValueError as exc:
             log.warning("learner: unreadable metrics row (%s); skipping it", exc)
             continue
-        if "total_games" in row:
-            return int(row["total_games"])
+        if "total_games" not in row:
+            continue
+        total = row["total_games"]
+        if isinstance(total, bool) or not isinstance(total, int) or total < 0:
+            log.warning("learner: malformed total_games %r in metrics row; skipping it", total)
+            continue
+        return total
     return 0
 
 
@@ -307,14 +324,22 @@ def stored_learner_config(run_dir: Path) -> dict:
 
 def resumed_learner_config(run_dir: Path, overrides: dict) -> LearnerConfig:
     """Config for continuing ``run_dir``: stored settings, then the
-    explicitly typed flags in ``overrides``."""
-    stored = stored_learner_config(run_dir)
+    explicitly typed flags in ``overrides``. ``max_iterations`` stays the
+    run total; ``extra_iterations`` means checkpoint iteration + N."""
+    current = Path(run_dir) / CURRENT_CHECKPOINT
+    payload = load_checkpoint(current)
+    stored = dict(payload.get("config") or {})
     cfg_kwargs = config_kwargs_from_stored(LearnerConfig, stored, {"checkpoint", "anchor"})
     ft_kwargs = config_kwargs_from_stored(FineTuneConfig, stored, set())
     ft_names = {f.name for f in fields(FineTuneConfig)}
     cfg_names = {f.name for f in fields(LearnerConfig)}
     ft = FineTuneConfig(**{**ft_kwargs, **{k: v for k, v in overrides.items() if k in ft_names}})
     picked = {k: v for k, v in overrides.items() if k in cfg_names}
+    extra = overrides.get("extra_iterations")
+    if extra is not None:
+        if "max_iterations" in overrides:
+            raise ValueError("--max-iterations (run total) and --extra-iterations are exclusive")
+        picked["max_iterations"] = int(payload.get("iteration", 0)) + int(extra)
     return LearnerConfig(**{**cfg_kwargs, **picked, "run_dir": Path(run_dir), "finetune": ft})
 
 
@@ -377,7 +402,9 @@ def _append_metrics(path: Path, row: dict) -> None:
 
 
 def _finished(cfg: LearnerConfig, state: LearnerState) -> bool:
-    return cfg.max_iterations is not None and state.steps_done >= cfg.max_iterations
+    """``max_iterations`` is the run total, measured on the checkpoint's
+    iteration -- a restart after the total was reached does nothing."""
+    return cfg.max_iterations is not None and state.iteration >= cfg.max_iterations
 
 
 def _idle_too_long(cfg: LearnerConfig, state: LearnerState) -> bool:
@@ -426,12 +453,15 @@ def run_learner(cfg: LearnerConfig, stop_when: Callable[[], bool] | None = None)
 
 
 def _stopped(cfg: LearnerConfig, state: LearnerState, stop: StopSignal) -> None:
-    log.warning("learner: STOP requested; exiting after %d steps", state.steps_done)
+    """Log the stop. The STOP file is deliberately left in place: actors
+    sharing the directory check it only between games, and the run owner
+    (launcher/operator) removes it once they have all exited."""
+    log.warning("learner: STOP requested; exiting after %d steps (STOP left for the run "
+                "owner to remove)", state.steps_done)
     _append_metrics(cfg.run_dir / METRICS_FILE, {
         "event": "stopped", "iteration": state.iteration, "wall_time": time.time(),
         **state.prov.as_dict(),
     })
-    stop.clear()
 
 
 # --------------------------------------------------------------------------
@@ -470,7 +500,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help="frozen KL anchor (defaults to --checkpoint)")
     parser.add_argument("--games-per-step", type=int, default=96)
     parser.add_argument("--window-steps", type=int, default=2)
-    parser.add_argument("--max-iterations", type=int, default=None)
+    parser.add_argument("--max-iterations", type=int, default=None,
+                        help="run total (checkpoint iteration to stop at)")
+    parser.add_argument("--extra-iterations", type=int, default=None,
+                        help="resume only: run this many more steps than the checkpoint")
     parser.add_argument("--device", choices=("auto", "cpu", "cuda", "mps"), default="auto")
     parser.add_argument("--poll-secs", type=float, default=5.0)
     parser.add_argument("--idle-timeout-secs", type=float, default=None)
@@ -482,13 +515,19 @@ def config_from_argv(argv: list[str] | None) -> LearnerConfig:
     """Fresh run: flags as given. Existing ``current.pt`` in --run-dir:
     stored settings, overridden only by explicitly typed flags."""
     args = build_parser().parse_args(argv)
+    explicit = explicit_cli_args(build_parser, argv)
+    if "max_iterations" in explicit and "extra_iterations" in explicit:
+        raise SystemExit(
+            "error: --max-iterations (run total) and --extra-iterations are mutually exclusive"
+        )
     if (args.run_dir / CURRENT_CHECKPOINT).exists():
-        explicit = explicit_cli_args(build_parser, argv)
         if "epochs" in explicit:
             explicit["epochs_per_iteration"] = explicit.pop("epochs")
         return resumed_learner_config(args.run_dir, explicit)
+    if args.extra_iterations is not None:
+        raise SystemExit("error: --extra-iterations needs an existing current.pt in --run-dir")
     if args.checkpoint is None:
-        raise SystemExit("--checkpoint is required for a fresh run")
+        raise SystemExit("error: --checkpoint is required for a fresh run")
     return LearnerConfig(
         run_dir=args.run_dir, checkpoint=args.checkpoint, anchor=args.anchor,
         games_per_step=args.games_per_step, window_steps=args.window_steps,
