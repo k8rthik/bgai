@@ -62,6 +62,9 @@ class TrainConfig:
     value_simplex: bool = False
     """Softmax the value head over seats (see ModelConfig.value_simplex).
     Stored in the checkpoint config so agents rebuild the same head."""
+    arch: dict | None = None
+    """``ModelConfig`` overrides (torso, hidden, depth, ...) for the
+    architecture sweep; ``value_simplex`` comes from its own field."""
     weight_power: float = 1.0
     """Exponent applied to the per-record strength weight at load time.
     The baked-in weights span only 0.6-1.0 (1.67x), so training imitates
@@ -214,7 +217,9 @@ def train(cfg: TrainConfig) -> dict[str, float]:
         num_workers=cfg.num_workers,
     )
 
-    net = PolicyValueNet(ModelConfig(value_simplex=cfg.value_simplex)).to(device)
+    net = PolicyValueNet(ModelConfig(**(cfg.arch or {}), value_simplex=cfg.value_simplex)).to(
+        device
+    )
     opt = torch.optim.AdamW(net.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
 
     step = 0
@@ -330,6 +335,23 @@ def train(cfg: TrainConfig) -> dict[str, float]:
     return last
 
 
+_ARCH_FLAGS = ("value_simplex", "aux_head")
+
+
+def parse_arch(text: str) -> dict:
+    """``key=value,...`` -> ``ModelConfig`` overrides, typed by the field's default."""
+    out: dict = {}
+    for item in filter(None, (part.strip() for part in text.split(","))):
+        key, _, raw = item.partition("=")
+        field = ModelConfig.__dataclass_fields__.get(key)
+        if field is None:
+            raise ValueError(f"unknown ModelConfig field {key!r}")
+        if key in _ARCH_FLAGS:
+            raise ValueError(f"{key} has its own flag; not settable via --arch")
+        out[key] = type(field.default)(raw)
+    return out
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Train the imitation policy/value net.")
     parser.add_argument("--shards", type=Path, default=Path("data/datasets/imitation"))
@@ -349,6 +371,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--rank-weight", type=float, default=0.0)
     parser.add_argument("--weight-power", type=float, default=1.0)
     parser.add_argument("--value-simplex", action="store_true")
+    parser.add_argument("--arch", default="", help="ModelConfig overrides: torso=hexgnn,depth=4")
     args = parser.parse_args(argv)
     train(
         TrainConfig(
@@ -369,6 +392,7 @@ def main(argv: list[str] | None = None) -> None:
             rank_weight=args.rank_weight,
             weight_power=args.weight_power,
             value_simplex=args.value_simplex,
+            arch=parse_arch(args.arch),
         )
     )
 

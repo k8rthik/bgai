@@ -20,6 +20,7 @@ from torch import nn
 
 from bgai.training.encode_move import MOVE_FIELDS
 from bgai.training.encode_state import GLOBAL_DIM, HEX_FEAT_DIM
+from bgai.training.torsos import build_torso
 from bgai.training.vocab import FACTION_NAMES, HEXES
 
 # Every move field's id space (max id + 1); fields share one embedding
@@ -46,6 +47,16 @@ class ModelConfig:
     C11's diagnosis (cult-hoarding, town deficit, no surplus economy)
     is that blindness. Only training reads this head; ``forward`` and
     every search/checkpoint consumer are untouched."""
+    torso: str = "mlp"
+    """State torso (``torsos.TORSOS``). ``mlp`` is the original; the others
+    are the 2026-10 architecture sweep's candidates."""
+    depth: int = 2
+    """Residual blocks (``resmlp``) or message-passing / attention layers
+    (``hexgnn``/``hexformer``). Ignored by ``mlp``, whose two layers are fixed."""
+    hex_dim: int = 64
+    """Per-hex token width for ``hexgnn``/``hexformer``."""
+    heads: int = 4
+    """Attention heads for ``hexformer``."""
     value_simplex: bool = False
     """Softmax the value head over the 4 seats.
 
@@ -69,16 +80,10 @@ class PolicyValueNet(nn.Module):
         state_dim = len(HEXES) * HEX_FEAT_DIM + GLOBAL_DIM + c.faction_embed
 
         self.faction_embed = nn.Embedding(len(FACTION_NAMES), c.faction_embed)
-        self.torso = nn.Sequential(
-            nn.Linear(state_dim, c.hidden),
-            nn.LayerNorm(c.hidden),
-            nn.SiLU(),
-            nn.Dropout(c.dropout),
-            nn.Linear(c.hidden, c.hidden),
-            nn.LayerNorm(c.hidden),
-            nn.SiLU(),
-            nn.Linear(c.hidden, c.embed),
-        )
+        if c.torso != "mlp":
+            self.torso = build_torso(c, state_dim)
+        else:
+            self.torso = self._mlp_torso(c, state_dim)
 
         offsets = torch.tensor(
             [sum(_FIELD_SIZES[:i]) for i in range(MOVE_FIELDS)], dtype=torch.long
@@ -101,12 +106,28 @@ class PolicyValueNet(nn.Module):
             )
         self.logit_scale = nn.Parameter(torch.tensor(1.0 / (c.embed**0.5)))
 
+    @staticmethod
+    def _mlp_torso(c: ModelConfig, state_dim: int) -> nn.Sequential:
+        """The original torso; its layer indices are every checkpoint's keys."""
+        return nn.Sequential(
+            nn.Linear(state_dim, c.hidden),
+            nn.LayerNorm(c.hidden),
+            nn.SiLU(),
+            nn.Dropout(c.dropout),
+            nn.Linear(c.hidden, c.hidden),
+            nn.LayerNorm(c.hidden),
+            nn.SiLU(),
+            nn.Linear(c.hidden, c.embed),
+        )
+
     def state_embedding(
         self, hex_planes: torch.Tensor, globals_: torch.Tensor, faction: torch.Tensor
     ) -> torch.Tensor:
+        faction_vec = self.faction_embed(faction)
+        if self.cfg.torso != "mlp":
+            return self.torso(hex_planes, globals_, faction_vec)
         flat = hex_planes.flatten(start_dim=1)
-        x = torch.cat([flat, globals_, self.faction_embed(faction)], dim=-1)
-        return self.torso(x)
+        return self.torso(torch.cat([flat, globals_, faction_vec], dim=-1))
 
     def move_embedding(self, candidates: torch.Tensor) -> torch.Tensor:
         ids = candidates.clamp(min=0) + self.field_offsets

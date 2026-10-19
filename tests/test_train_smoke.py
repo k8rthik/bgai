@@ -48,3 +48,29 @@ def test_train_runs_and_checkpoints(tmp_path: Path) -> None:
 def test_pick_device_respects_explicit_request() -> None:
     assert pick_device("cpu").type == "cpu"
     assert pick_device("auto").type in {"cpu", "mps", "cuda"}
+
+
+def test_parse_arch_overrides_types_and_rejects_unknown_fields() -> None:
+    from bgai.training.train import parse_arch
+
+    assert parse_arch("") == {}
+    assert parse_arch("torso=hexgnn,hex_dim=64,depth=4,dropout=0.05") == {
+        "torso": "hexgnn", "hex_dim": 64, "depth": 4, "dropout": 0.05,
+    }
+    import pytest
+
+    with pytest.raises(ValueError, match="nope"):
+        parse_arch("nope=1")
+    with pytest.raises(ValueError, match="value_simplex"):
+        parse_arch("value_simplex=1")  # has its own flag; one source of truth
+
+
+def test_train_builds_the_requested_architecture(tmp_path: Path) -> None:
+    shards = tmp_path / "shards"
+    build(shards, game_ids=["4pLeague_S1_D1L1_G1", "4pLeague_S70_D3L1_G4"])
+    out = tmp_path / "run"
+    train(TrainConfig(shards=shards, out=out, epochs=1, batch_size=16, device="cpu",
+                      max_steps=2, log_every=1000,
+                      arch={"torso": "resmlp", "hidden": 64, "depth": 2}))
+    cfg = torch.load(out / "last.pt", weights_only=False)["config"]["model_config"]
+    assert (cfg["torso"], cfg["hidden"], cfg["depth"]) == ("resmlp", 64, 2)
