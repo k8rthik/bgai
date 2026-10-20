@@ -6,6 +6,7 @@
 #
 #   tools/arch_sweep.sh [lanes] [steps] [seed]      (run inside tmux on the GPU box)
 #
+# --epochs is a cap only: --max-steps sets the budget.
 # Runs LANES trainings at once; a run whose out dir already has last.pt at
 # the full step count is skipped, so the queue is resumable. Results:
 # data/checkpoints/arch/<name>/{metrics.jsonl,last.pt,best.pt}, logs in
@@ -39,7 +40,7 @@ run_one() {
   rm -rf "$out"
   echo "$(date -Is) start $name arch=[$arch]"
   uv run python -u -m bgai.training.train --shards data/datasets/imitation_v2 --out "$out" \
-    --epochs 2 --max-steps "$STEPS" --val-every-steps "$VAL" --rank-weight 1.0 \
+    --epochs 1000 --max-steps "$STEPS" --val-every-steps "$VAL" --rank-weight 1.0 \
     --value-simplex --seed "$SEED" --device cuda --arch "$arch" \
     > "scratch/arch_${name}_s${SEED}.log" 2>&1
   echo "$(date -Is) end $name exit=$? $(tail -n 1 "$out/metrics.jsonl" 2>/dev/null | cut -c1-200)"
