@@ -20,7 +20,7 @@
 # see tools/run_watchdog.sh) and data/evals/<suite>/summary.md is rewritten
 # (python -m bgai.arena.compare). A run that already has its .json is skipped,
 # so re-launching a suite resumes it. Re-read results any time with:
-#   uv run -q python -m bgai.arena.compare --baseline <label> data/evals/<suite>/*.json
+#   uv run -q python -m bgai.arena.compare --baseline <label> data/evals/<suite>/*_s*.json
 set -euo pipefail
 host="${1:?eval host}"; suite="${2:?suite name}"; shift 2
 [ "$#" -ge 2 ] || { echo "harness: need baseline=ckpt and at least one label=ckpt" >&2; exit 2; }
@@ -97,12 +97,12 @@ for seed in "${seeds[@]}"; do
       echo "$(date -Is) FAILED $tag (see $dir/$tag.log)"; tail -5 "$dir/$tag.log"
       notify "eval $suite: $tag FAILED" "$(tail -3 "$dir/$tag.log")"
     fi
-    uv run -q python -m bgai.arena.compare --baseline "$base_label" "$dir"/*.json \
+    uv run -q python -m bgai.arena.compare --baseline "$base_label" "$dir"/*_s*.json \
       --json "$dir/summary.json" > "$dir/summary.md" 2>&1 || true
   done
 done
 notify "eval $suite: finished ($failed failed)" \
-  "$(uv run -q python -m bgai.arena.compare --brief --baseline "$base_label" "$dir"/*.json 2>&1)"
+  "$(uv run -q python -m bgai.arena.compare --brief --baseline "$base_label" "$dir"/*_s*.json 2>&1)"
 echo "$(date -Is) finished, $failed failed"
 BODY
 } > "$queue"
