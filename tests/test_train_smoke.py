@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 import torch
 
 from bgai.training.dataset_build import build
@@ -74,3 +75,22 @@ def test_train_builds_the_requested_architecture(tmp_path: Path) -> None:
                       arch={"torso": "resmlp", "hidden": 64, "depth": 2}))
     cfg = torch.load(out / "last.pt", weights_only=False)["config"]["model_config"]
     assert (cfg["torso"], cfg["hidden"], cfg["depth"]) == ("resmlp", 64, 2)
+
+
+def test_lr_schedule_constant_and_cosine() -> None:
+    from bgai.training.train import lr_at
+
+    assert lr_at(0, 1e-3, "constant", 100, 10) == lr_at(99, 1e-3, "constant", 100, 10) == 1e-3
+    # cosine: linear warmup, peak at warmup end, decays to the floor at max_steps
+    assert lr_at(0, 1e-3, "cosine", 100, 10) < lr_at(5, 1e-3, "cosine", 100, 10) < 1e-3
+    assert lr_at(10, 1e-3, "cosine", 100, 10) == 1e-3
+    mid, end = lr_at(55, 1e-3, "cosine", 100, 10), lr_at(100, 1e-3, "cosine", 100, 10)
+    assert 0.4e-3 < mid < 0.6e-3 and end == pytest.approx(1e-5)
+    assert lr_at(500, 1e-3, "cosine", 100, 10) == pytest.approx(1e-5)  # past the end: floor
+
+
+def test_cosine_schedule_needs_a_step_budget(tmp_path: Path) -> None:
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError, match="max_steps"):
+        train(TrainConfig(shards=tmp_path, out=tmp_path / "o", lr_schedule="cosine"))
