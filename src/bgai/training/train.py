@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -62,6 +63,10 @@ class TrainConfig:
     value_simplex: bool = False
     """Softmax the value head over seats (see ModelConfig.value_simplex).
     Stored in the checkpoint config so agents rebuild the same head."""
+    lr_schedule: str = "constant"
+    """``constant`` (the original recipe) or ``cosine``: linear warmup over
+    ``warmup_steps``, then cosine decay to ``LR_FLOOR`` x lr at ``max_steps``."""
+    warmup_steps: int = 2000
     arch: dict | None = None
     """``ModelConfig`` overrides (torso, hidden, depth, ...) for the
     architecture sweep; ``value_simplex`` comes from its own field."""
@@ -180,7 +185,27 @@ def evaluate(
     }
 
 
+LR_SCHEDULES = ("constant", "cosine")
+LR_FLOOR = 0.01
+
+
+def lr_at(step: int, base: float, schedule: str, max_steps: int | None, warmup: int) -> float:
+    """Learning rate for optimizer step ``step`` (0-based). A pure function of
+    the step, so a resumed run lands on exactly the schedule it left."""
+    if schedule == "constant":
+        return base
+    if schedule != "cosine":
+        raise ValueError(f"unknown lr_schedule {schedule!r}; expected one of {LR_SCHEDULES}")
+    if max_steps is None:
+        raise ValueError("lr_schedule='cosine' needs max_steps (the decay horizon)")
+    if step < warmup:
+        return base * (step + 1) / (warmup + 1)
+    progress = min(1.0, (step - warmup) / max(1, max_steps - warmup))
+    return base * (LR_FLOOR + (1 - LR_FLOOR) * 0.5 * (1 + math.cos(math.pi * progress)))
+
+
 def train(cfg: TrainConfig) -> dict[str, float]:
+    lr_at(0, cfg.lr, cfg.lr_schedule, cfg.max_steps, cfg.warmup_steps)  # fail fast on bad config
     torch.manual_seed(cfg.seed)
     device = pick_device(cfg.device)
     cfg.out.mkdir(parents=True, exist_ok=True)
@@ -261,7 +286,8 @@ def train(cfg: TrainConfig) -> dict[str, float]:
         overwritten by whatever happens to validate last, so an early stop
         would keep the *worst* of its final validations.
         """
-        row = {"epoch": epoch, "step": step, "secs": time.perf_counter() - t0, **val}
+        row = {"epoch": epoch, "step": step, "secs": time.perf_counter() - t0,
+               "lr": opt.param_groups[0]["lr"], **val}
         print(f"[val] {json.dumps(row)}", flush=True)
         with metrics_path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(row) + "\n")
@@ -293,6 +319,8 @@ def train(cfg: TrainConfig) -> dict[str, float]:
             opt.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(net.parameters(), 5.0)
+            for group in opt.param_groups:
+                group["lr"] = lr_at(step, cfg.lr, cfg.lr_schedule, cfg.max_steps, cfg.warmup_steps)
             opt.step()
             step += 1
             if step % cfg.log_every == 0:
@@ -371,6 +399,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--rank-weight", type=float, default=0.0)
     parser.add_argument("--weight-power", type=float, default=1.0)
     parser.add_argument("--value-simplex", action="store_true")
+    parser.add_argument("--lr-schedule", choices=LR_SCHEDULES, default="constant")
+    parser.add_argument("--warmup-steps", type=int, default=2000)
     parser.add_argument("--arch", default="", help="ModelConfig overrides: torso=hexgnn,depth=4")
     args = parser.parse_args(argv)
     train(
@@ -393,6 +423,8 @@ def main(argv: list[str] | None = None) -> None:
             weight_power=args.weight_power,
             value_simplex=args.value_simplex,
             arch=parse_arch(args.arch),
+            lr_schedule=args.lr_schedule,
+            warmup_steps=args.warmup_steps,
         )
     )
 
