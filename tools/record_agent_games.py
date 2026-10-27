@@ -19,14 +19,15 @@ from pathlib import Path
 _W: dict[str, object] = {}
 
 
-def _init(checkpoint: str, sims: int) -> None:
+def _init(checkpoint: str, sims: int, c_puct: float) -> None:
     import torch
 
     from bgai.agents.mcts import MCTSAgent
 
     torch.set_num_threads(1)
     _W["agent"] = MCTSAgent(
-        Path(checkpoint), simulations=sims, top_k=8, max_depth=48, leaf_batch=16
+        Path(checkpoint), simulations=sims, top_k=8, max_depth=48, leaf_batch=16,
+        c_puct=c_puct,
     )
 
 
@@ -49,6 +50,9 @@ def main() -> None:
     parser.add_argument("--games", type=int, default=200)
     parser.add_argument("--sims", type=int, default=256)
     parser.add_argument("--workers", type=int, default=10)
+    parser.add_argument(
+        "--c-puct", type=float, default=1.5, help="2.5 = champion eval config (C16)"
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--batch", required=True, help="batch name; also the game-id prefix")
     parser.add_argument("--store", type=Path, default=Path("data/agent_games"))
@@ -59,7 +63,9 @@ def main() -> None:
     ctx = get_context("spawn")
     games = []
     with ctx.Pool(
-        processes=args.workers, initializer=_init, initargs=(args.checkpoint, args.sims)
+        processes=args.workers,
+        initializer=_init,
+        initargs=(args.checkpoint, args.sims, args.c_puct),
     ) as pool:
         seeds = [args.seed * 1_000_000 + i for i in range(args.games)]
         for i, traced in enumerate(pool.imap_unordered(_one, seeds)):
