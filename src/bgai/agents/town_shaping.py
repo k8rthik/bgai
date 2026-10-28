@@ -9,10 +9,14 @@ non-terminal leaf's VP-share vector and renormalises, so search prefers
 lines that build toward a town. Terminal leaves are never shaped -- towns
 are already in the final score.
 
-``town_progress`` is the best unfinished cluster's distance to a town:
+``town_progress`` is a potential that never drops when a town is founded:
+towns founded so far plus the best unfinished cluster's distance to a town,
 ``min(1, power / threshold) * min(1, structures / 4)`` (SA counts twice,
-threshold 7 or 6 with FAV5), 0 once no town tile is left. Mermaids'
-river-skip towns are not modelled here (plain clusters only).
+threshold 7 or 6 with FAV5; the open-cluster part is 0 once no town tile is
+left). A first version counted only the open cluster, so founding a town
+dropped the bonus from ~1 to ~0 and search saw completing a town as a loss
+of shaping value. Mermaids' river-skip towns are not modelled (plain
+clusters only).
 """
 
 from __future__ import annotations
@@ -27,9 +31,9 @@ TOWN_STRUCTURES = 4
 
 
 def town_progress(state: GameState, faction: str) -> float:
-    if not any(count > 0 for count in state.towns_pool.values()):
-        return 0.0
     founded = state.founded_towns.get(faction, ())
+    if not any(count > 0 for count in state.towns_pool.values()):
+        return float(len(founded))
     threshold = _town_threshold(state.factions[faction])
     best = 0.0
     for cluster in clusters(state, faction):
@@ -37,7 +41,7 @@ def town_progress(state: GameState, faction: str) -> float:
             continue
         power, count = _cluster_power_and_count(state, cluster)
         best = max(best, min(1.0, power / threshold) * min(1.0, count / TOWN_STRUCTURES))
-    return best
+    return len(founded) + best
 
 
 def shape(value: np.ndarray, state: GameState, strength: float) -> np.ndarray:

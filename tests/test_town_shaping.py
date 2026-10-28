@@ -68,17 +68,23 @@ def test_progress_grows_with_power_and_structures_and_caps_at_one() -> None:
     assert full == 1.0
 
 
-def test_founded_town_hexes_do_not_count() -> None:
+def test_founding_a_town_never_lowers_the_potential() -> None:
+    # regression: the first version scored only open clusters, so founding
+    # dropped the bonus ~1 -> 0 and search saw a finished town as a loss
     state, faction = _with_cluster(["D", "TP", "TP", "TE"])
+    before = town_progress(state, faction)
     founded = frozenset(_chain(4))
-    state = replace(state, founded_towns={**state.founded_towns, faction: (founded,)})
-    assert town_progress(state, faction) == 0.0
+    after_state = replace(state, founded_towns={**state.founded_towns, faction: (founded,)})
+    assert town_progress(after_state, faction) == 1.0  # one town, no open cluster
+    assert town_progress(after_state, faction) >= before
 
 
-def test_no_progress_once_town_tiles_run_out() -> None:
+def test_open_progress_stops_once_town_tiles_run_out_but_towns_still_count() -> None:
     state, faction = _with_cluster(["D", "D", "TP"])
-    state = replace(state, towns_pool={k: 0 for k in state.towns_pool})
-    assert town_progress(state, faction) == 0.0
+    empty = replace(state, towns_pool={k: 0 for k in state.towns_pool})
+    assert town_progress(empty, faction) == 0.0
+    founded = replace(empty, founded_towns={**empty.founded_towns, faction: (frozenset(),)})
+    assert town_progress(founded, faction) == 1.0
 
 
 def test_shape_is_identity_at_zero_and_keeps_a_share_vector() -> None:
