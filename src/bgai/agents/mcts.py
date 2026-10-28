@@ -31,6 +31,7 @@ import numpy as np
 import torch
 
 from bgai.agents.leaf_eval import blend, computed_value
+from bgai.agents.town_shaping import shape
 from bgai.arena.driver import SimState, advance, decision
 from bgai.data.ledger_parser import ParsedCommand
 from bgai.engine.tm.apply import EngineError
@@ -133,6 +134,7 @@ class MCTSAgent:
         top_k: int = 0,
         late_sims: int = 0,
         root_choice: str = "visits",
+        town_shaping: float = 0.0,
         evaluator=None,
         eval_table: int = 0,
     ) -> None:
@@ -142,6 +144,9 @@ class MCTSAgent:
         self.temperature = temperature
         self.max_depth = max_depth
         self.value_blend_w = value_blend_w
+        self.town_shaping = town_shaping
+        """Strength of the town-progress bonus on non-terminal leaf values
+        (``town_shaping.shape``); 0.0 leaves the learned value untouched."""
         self.leaf_batch = leaf_batch
         """Leaves evaluated per forward pass. 0/1 keeps the sequential
         path exactly. Higher batches amortise the network call that
@@ -417,9 +422,9 @@ class MCTSAgent:
         blend in the engine-computed projection per ``value_blend_w``
         (D6.9; a no-op at the default 0.0)."""
         abs_value = self._rebase(value_rel, seat_of, faction, game)
-        if self.value_blend_w <= 0:
-            return abs_value
-        return blend(abs_value, game, self.value_blend_w)
+        if self.value_blend_w > 0:
+            abs_value = blend(abs_value, game, self.value_blend_w)
+        return shape(abs_value, game, self.town_shaping)
 
     def _allowed(self, node: _Node) -> np.ndarray | None:
         """Indices selection may consider, or None when every move is open.
