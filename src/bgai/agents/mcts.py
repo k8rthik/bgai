@@ -139,6 +139,7 @@ class MCTSAgent:
         root_noise: float = 0.0,
         root_alpha: float = 0.3,
         root_top_k: int = -1,
+        vp_weight: float = 0.0,
         evaluator=None,
         eval_table: int = 0,
     ) -> None:
@@ -162,6 +163,12 @@ class MCTSAgent:
         """Prior pruning at the root only: -1 follows ``top_k``, 0 opens
         every legal move, k > 0 keeps the k highest (noised) priors."""
         self._noise_rng = np.random.default_rng()
+        self.vp_weight = vp_weight
+        """Each seat's objective becomes ``share + vp_weight * VP/150``:
+        exact at terminal leaves, the aux head's final-VP prediction
+        elsewhere. 0.0 is the pure VP-share objective. Share alone is
+        indifferent to the size of the economy everyone builds; the
+        absolute term rewards building one."""
         self.leaf_batch = leaf_batch
         """Leaves evaluated per forward pass. 0/1 keeps the sequential
         path exactly. Higher batches amortise the network call that
@@ -216,6 +223,8 @@ class MCTSAgent:
         ~85 us and the misses' key/table/GC cost exceeds that
         (docs/decisions.md C18); the arithmetic flips with a bigger net."""
         self.device = torch.device(device)
+        if vp_weight > 0 and evaluator is not None:
+            raise ValueError("vp_weight needs a local net with an aux head")
         if evaluator is not None:
             self.net = None  # type: ignore[assignment]
             return
@@ -233,6 +242,8 @@ class MCTSAgent:
             self.net = PolicyValueNet(model_config_from_checkpoint(ckpt))
             self.net.load_state_dict(ckpt["model"])
         self.net.to(self.device).eval()
+        if vp_weight > 0 and not self.net.cfg.aux_head:
+            raise ValueError("vp_weight needs a net trained with aux_head")
 
     # -- net access -------------------------------------------------------
 
@@ -252,7 +263,7 @@ class MCTSAgent:
                 return hit
         enc = encode_state(game, faction)
         cand = np.stack([encode_move(m, game, faction) for m in offer])
-        logits, value = self.net(
+        logits, value = self._forward(
             torch.from_numpy(enc.hex_planes.astype(np.float32))[None].to(self.device),
             torch.from_numpy(enc.globals.astype(np.float32))[None].to(self.device),
             torch.tensor([FACTION_INDEX[faction]], device=self.device),
@@ -266,6 +277,12 @@ class MCTSAgent:
         if key is not None:
             self._remember(key, offer, result)
         return result
+
+    def _forward(self, *inputs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.vp_weight <= 0:
+            return self.net(*inputs)
+        logits, value, aux = self.net.forward_with_aux(*inputs)
+        return logits, value + self.vp_weight * aux[..., :4]
 
     def _lookup(
         self, key: tuple, offer: tuple[ParsedCommand, ...]
@@ -348,7 +365,7 @@ class MCTSAgent:
                 (np.array(priors[i, : len(items[i][2])]), np.array(values[i]))
                 for i in range(n)
             ]
-        logits, value = self.net(
+        logits, value = self._forward(
             torch.from_numpy(np.stack(hex_planes)).to(self.device),
             torch.from_numpy(np.stack(globals_)).to(self.device),
             torch.tensor(factions, device=self.device),
@@ -409,7 +426,8 @@ class MCTSAgent:
         seats = sim.game.setup.factions
         vps = np.array([sim.game.factions[f].vp for f in seats], dtype=np.float32)
         total = float(vps.sum())
-        return vps / total if total > 0 else np.full(len(seats), 0.25, dtype=np.float32)
+        shares = vps / total if total > 0 else np.full(len(seats), 0.25, dtype=np.float32)
+        return (shares + self.vp_weight * vps / 150.0).astype(np.float32)
 
     def _rebase(
         self,

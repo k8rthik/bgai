@@ -94,6 +94,7 @@ def _build_net_agent(name: str, label: str, options: dict[str, object]) -> Agent
         town_shaping=float(options.get("town", 0.0)),
         root_noise=float(options.get("noise", 0.0)),
         root_top_k=int(options.get("root_k", -1)),
+        vp_weight=float(options.get("vpw", 0.0)),
         device=device,
     )
 

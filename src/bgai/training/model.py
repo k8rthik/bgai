@@ -159,8 +159,8 @@ class PolicyValueNet(nn.Module):
         candidates: torch.Tensor,
         cand_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-        """``forward`` plus the auxiliary economy predictions (training
-        only -- search never calls this)."""
+        """``forward`` plus the auxiliary economy predictions (training,
+        and search with ``MCTSAgent.vp_weight``)."""
         state = self.state_embedding(hex_planes, globals_, faction)
         moves = self.move_embedding(candidates)
         logits = torch.einsum("be,bce->bc", state, moves) * self.logit_scale
