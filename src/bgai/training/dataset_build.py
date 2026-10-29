@@ -69,9 +69,14 @@ def build(
     limit: int | None = None,
     raw_dir: Path | None = None,
     game_ids: Sequence[str] | None = None,
+    part: tuple[int, int] | None = None,
 ) -> ShardStats:
     """Extract ``game_ids`` (default: every clean corpus game, optionally
     the first ``limit`` of them) into shards under ``out_dir``.
+
+    ``part=(i, n)`` builds only shards whose index is ``i`` mod ``n`` and
+    writes ``manifest.part{i}.json``; ``merge_parts`` joins the parts into
+    the manifest a full build would have written.
     """
     moves_df = pl.read_parquet("data/datasets/moves.parquet")
     deltas_df = pl.read_parquet("data/datasets/deltas.parquet")
@@ -99,6 +104,8 @@ def build(
     train_total = val_total = 0
 
     for shard_index, start in enumerate(range(0, len(game_ids), GAMES_PER_SHARD)):
+        if part is not None and shard_index % part[1] != part[0]:
+            continue
         batch = game_ids[start : start + GAMES_PER_SHARD]
         records: list[DecisionRecord] = []
         n_val = 0
@@ -138,7 +145,8 @@ def build(
         "uncatalogued_games": uncatalogued,
         "failed_games": failed,
     }
-    (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    name = "manifest.json" if part is None else f"manifest.part{part[0]}.json"
+    (out_dir / name).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return ShardStats(
         shard_count=len(shards),
         record_count=train_total + val_total,
@@ -149,12 +157,52 @@ def build(
     )
 
 
+_SUMMED = ("record_count", "train_records", "val_records", "unmatched_commands")
+_CONCATENATED = ("shards", "uncatalogued_games", "failed_games")
+
+
+def merge_parts(out_dir: Path) -> dict[str, object]:
+    """Join ``manifest.part*.json`` into ``manifest.json`` and delete the parts."""
+    paths = sorted(out_dir.glob("manifest.part*.json"))
+    if not paths:
+        raise FileNotFoundError(f"no manifest parts in {out_dir}")
+    parts = [json.loads(p.read_text(encoding="utf-8")) for p in paths]
+    fixed = {k: v for k, v in parts[0].items() if k not in _SUMMED + _CONCATENATED}
+    for other in parts[1:]:
+        if any(other[k] != v for k, v in fixed.items()):
+            raise ValueError(f"manifest parts in {out_dir} disagree on {sorted(fixed)}")
+    merged = dict(fixed)
+    for key in _SUMMED:
+        merged[key] = sum(p[key] for p in parts)
+    for key in _CONCATENATED:
+        merged[key] = [x for p in parts for x in p[key]]
+    merged["shards"] = sorted(merged["shards"], key=lambda s: s["file"])
+    merged["uncatalogued_games"] = sorted(set(merged["uncatalogued_games"]))
+    (out_dir / "manifest.json").write_text(json.dumps(merged, indent=2), encoding="utf-8")
+    for p in paths:
+        p.unlink()
+    return merged
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Build imitation training shards.")
     parser.add_argument("--out", type=Path, default=Path("data/datasets/imitation"))
     parser.add_argument("--limit", type=int, default=None, help="first N clean games")
+    parser.add_argument("--part", default=None, metavar="I/N",
+                        help="build only shards with index I mod N (run N of these, then --merge)")
+    parser.add_argument("--merge", action="store_true", help="join the parts' manifests")
     args = parser.parse_args(argv)
-    stats = build(args.out, args.limit)
+    if args.merge:
+        merged = merge_parts(args.out)
+        print(f"{len(merged['shards'])} shards, {merged['record_count']} records")
+        return
+    part = None
+    if args.part is not None:
+        i, n = (int(x) for x in args.part.split("/"))
+        if not 0 <= i < n:
+            raise SystemExit(f"--part {args.part}: need 0 <= I < N")
+        part = (i, n)
+    stats = build(args.out, args.limit, part=part)
     print(
         f"{stats.shard_count} shards, {stats.record_count} records "
         f"({stats.train_records} train / {stats.val_records} val), "

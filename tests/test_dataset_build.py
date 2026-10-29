@@ -76,3 +76,22 @@ def test_mover_mu_is_stored_and_min_mover_mu_keeps_only_stronger_movers(tmp_path
     (tmp_path / "manifest.json").write_text(json.dumps(manifest))
     with pytest.raises(ValueError, match="format"):
         ImitationDataset(tmp_path, "train")
+
+
+def test_parts_merge_into_the_full_build(tmp_path: Path, monkeypatch) -> None:
+    import bgai.training.dataset_build as db
+
+    monkeypatch.setattr(db, "GAMES_PER_SHARD", 2)
+    full, parted = tmp_path / "full", tmp_path / "parted"
+    db.build(full, limit=5)
+    for i in range(2):
+        db.build(parted, limit=5, part=(i, 2))
+    db.merge_parts(parted)
+
+    want = json.loads((full / "manifest.json").read_text())
+    got = json.loads((parted / "manifest.json").read_text())
+    assert got == want
+    assert not list(parted.glob("manifest.part*.json"))
+    for shard in want["shards"]:
+        a, b = np.load(full / shard["file"]), np.load(parted / shard["file"])
+        assert all(np.array_equal(a[k], b[k], equal_nan=k == "mover_mu") for k in a.files)
