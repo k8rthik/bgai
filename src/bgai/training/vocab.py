@@ -14,6 +14,20 @@ from bgai.engine.tm.tiles import BONUS_TILES, FAVOR_TILES, POWER_ACTIONS, TOWN_T
 
 ENCODING_VERSION = 1
 
+
+def require_checkpoint_encoding(version: object) -> None:
+    """Raise ``ValueError`` unless a checkpoint stamped with encoding
+    ``version`` can run under this code.
+
+    Datasets and shards must match ``ENCODING_VERSION`` exactly, but a
+    checkpoint may be older: encodings from v2 on only append to the
+    ``globals`` vector, and the net reads the prefix it was trained on
+    (``ModelConfig.global_dim``). Every future layout change must stay
+    append-only or tighten this check.
+    """
+    if not isinstance(version, int) or not 1 <= version <= ENCODING_VERSION:
+        raise ValueError(f"checkpoint encoding v{version} not loadable by code v{ENCODING_VERSION}")
+
 SHARD_FORMAT = 2
 """Shard *field layout*, versioned separately from the encoders. v2 added
 per-record ``period``/``weight`` so population games -- which carry no

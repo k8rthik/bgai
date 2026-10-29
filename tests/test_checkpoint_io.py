@@ -50,6 +50,9 @@ def test_load_checkpoint_validates(tmp_path: Path) -> None:
     torch.save({"model": {}, "encoding_version": 999}, path)
     with pytest.raises(ValueError, match="encoding"):
         cio.load_checkpoint(path)
+    torch.save({"model": {}}, path)
+    with pytest.raises(ValueError, match="encoding"):
+        cio.load_checkpoint(path)
     torch.save({"encoding_version": 1}, path)
     with pytest.raises(ValueError, match="model"):
         cio.load_checkpoint(path)
@@ -76,3 +79,15 @@ def test_load_if_newer_only_fires_on_mtime_change(tmp_path: Path) -> None:
 def test_load_if_newer_missing_file(tmp_path: Path) -> None:
     payload, stamp = cio.load_if_newer(tmp_path / "nope.pt", None)
     assert payload is None and stamp is None
+
+
+def test_older_checkpoint_encodings_load_newer_ones_do_not(tmp_path: Path) -> None:
+    from bgai.training.vocab import ENCODING_VERSION
+
+    path = tmp_path / "ckpt.pt"
+    for version in range(1, ENCODING_VERSION + 1):
+        torch.save({"model": {}, "encoding_version": version}, path)
+        assert cio.load_checkpoint(path)["encoding_version"] == version
+    torch.save({"model": {}, "encoding_version": ENCODING_VERSION + 1}, path)
+    with pytest.raises(ValueError, match="encoding"):
+        cio.load_checkpoint(path)

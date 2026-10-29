@@ -23,15 +23,12 @@ from bgai.training.model import (
     model_config_from_checkpoint,
 )
 from bgai.training.train import pick_device
-from bgai.training.vocab import ENCODING_VERSION, FACTION_NAMES, VERBS
+from bgai.training.vocab import FACTION_NAMES, VERBS, require_checkpoint_encoding
 
 
 def _load(checkpoint: Path, device: torch.device) -> PolicyValueNet:
     ckpt = torch.load(checkpoint, map_location=device, weights_only=False)
-    if ckpt.get("encoding_version") != ENCODING_VERSION:
-        raise ValueError(
-            f"checkpoint encoding v{ckpt.get('encoding_version')} != code v{ENCODING_VERSION}"
-        )
+    require_checkpoint_encoding(ckpt.get("encoding_version"))
     net = PolicyValueNet(model_config_from_checkpoint(ckpt))
     net.load_state_dict(ckpt["model"])
     return net.to(device).eval()

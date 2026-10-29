@@ -33,16 +33,14 @@ from typing import Any
 
 import torch
 
-from bgai.training.vocab import ENCODING_VERSION
+from bgai.training.vocab import require_checkpoint_encoding
 
 
 def validate_checkpoint(payload: Any) -> dict:
     """Raise ``ValueError`` unless ``payload`` looks like one of ours."""
     if not isinstance(payload, dict):
         raise ValueError(f"checkpoint payload is {type(payload).__name__}, not a dict")
-    version = payload.get("encoding_version")
-    if version != ENCODING_VERSION:
-        raise ValueError(f"checkpoint encoding v{version} != code v{ENCODING_VERSION}")
+    require_checkpoint_encoding(payload.get("encoding_version"))
     if not isinstance(payload.get("model"), dict):
         raise ValueError("checkpoint has no 'model' state dict")
     if not isinstance(payload.get("iteration", 0), int):

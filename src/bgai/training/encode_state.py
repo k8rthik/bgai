@@ -75,7 +75,11 @@ _SCORE_TILE_DIM = len(CULTS4) + 1 + 1  # cult one-hot + CULT_P flag folded + req
 _CTX_BON_POOL = _CTX_SCORE + 6 * _SCORE_TILE_DIM
 _CTX_ACTS = _CTX_BON_POOL + len(_BON_IDS)
 _CTX_PENDING = _CTX_ACTS + 6
-GLOBAL_DIM = _CTX_PENDING + 1
+GLOBAL_DIM_V1 = _CTX_PENDING + 1
+"""Width of the v1 globals vector. Later encodings only append, so a net
+trained at this width reads the leading ``GLOBAL_DIM_V1`` entries of any
+later encoding (``ModelConfig.global_dim``)."""
+GLOBAL_DIM = GLOBAL_DIM_V1
 
 
 @dataclass(frozen=True)

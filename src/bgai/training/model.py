@@ -19,7 +19,7 @@ import torch
 from torch import nn
 
 from bgai.training.encode_move import MOVE_FIELDS
-from bgai.training.encode_state import GLOBAL_DIM, HEX_FEAT_DIM
+from bgai.training.encode_state import GLOBAL_DIM, GLOBAL_DIM_V1, HEX_FEAT_DIM
 from bgai.training.torsos import build_torso
 from bgai.training.vocab import FACTION_NAMES, HEXES
 
@@ -70,6 +70,14 @@ class ModelConfig:
     ordering the ranking loss buys. Off by default: applying it to a net
     trained without it would flatten near-uniform outputs, so it belongs
     to runs trained (or fine-tuned) with it on."""
+    global_dim: int = GLOBAL_DIM
+    """Leading entries of the encoded ``globals`` vector the net reads.
+
+    Encodings only append to ``globals``, so a net trained on an older,
+    narrower encoding still runs on today's by reading its prefix. A
+    checkpoint saved before this field existed restores as
+    ``GLOBAL_DIM_V1`` (``model_config_from_checkpoint``); a fresh config
+    reads the whole current vector."""
 
 
 class PolicyValueNet(nn.Module):
@@ -77,7 +85,9 @@ class PolicyValueNet(nn.Module):
         super().__init__()
         self.cfg = cfg or ModelConfig()
         c = self.cfg
-        state_dim = len(HEXES) * HEX_FEAT_DIM + GLOBAL_DIM + c.faction_embed
+        if not 0 < c.global_dim <= GLOBAL_DIM:
+            raise ValueError(f"global_dim {c.global_dim} outside 1..{GLOBAL_DIM}")
+        state_dim = len(HEXES) * HEX_FEAT_DIM + c.global_dim + c.faction_embed
 
         self.faction_embed = nn.Embedding(len(FACTION_NAMES), c.faction_embed)
         if c.torso != "mlp":
@@ -124,6 +134,7 @@ class PolicyValueNet(nn.Module):
         self, hex_planes: torch.Tensor, globals_: torch.Tensor, faction: torch.Tensor
     ) -> torch.Tensor:
         faction_vec = self.faction_embed(faction)
+        globals_ = globals_[..., : self.cfg.global_dim]
         if self.cfg.torso != "mlp":
             return self.torso(hex_planes, globals_, faction_vec)
         flat = hex_planes.flatten(start_dim=1)
@@ -182,6 +193,9 @@ def model_config_from_checkpoint(checkpoint: dict) -> ModelConfig:
     present, so a hand-edited flag cannot disagree with the dict silently:
     loading simplex-trained weights into an unconstrained head produces
     plausible-looking wrong values rather than an error.
+
+    A checkpoint whose stored config has no ``global_dim`` predates
+    encoding v2 and was trained on the v1 globals width.
     """
     stored = (checkpoint or {}).get("config") or {}
     arch = stored.get("model_config") or {}
@@ -190,6 +204,7 @@ def model_config_from_checkpoint(checkpoint: dict) -> ModelConfig:
     known = {k: v for k, v in arch.items() if k in ModelConfig.__dataclass_fields__}
     return ModelConfig(
         **{
+            "global_dim": GLOBAL_DIM_V1,
             **known,
             "value_simplex": bool(stored.get("value_simplex", known.get("value_simplex", False))),
             "aux_head": bool(stored.get("aux_head", known.get("aux_head", False))),

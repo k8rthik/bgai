@@ -26,10 +26,10 @@ import torch
 from torch.utils.data import DataLoader
 
 from bgai.training.dataset import ImitationDataset, collate
-from bgai.training.model import ModelConfig, PolicyValueNet
+from bgai.training.model import ModelConfig, PolicyValueNet, model_config_from_checkpoint
 from bgai.training.rank_loss import ordering_stats, pairwise_rank_loss
 from bgai.training.sampler import ShardBlockSampler
-from bgai.training.vocab import ENCODING_VERSION
+from bgai.training.vocab import ENCODING_VERSION, require_checkpoint_encoding
 
 
 @dataclass(frozen=True)
@@ -242,19 +242,23 @@ def train(cfg: TrainConfig) -> dict[str, float]:
         num_workers=cfg.num_workers,
     )
 
-    net = PolicyValueNet(ModelConfig(**(cfg.arch or {}), value_simplex=cfg.value_simplex)).to(
-        device
+    resumed = None
+    if cfg.resume is not None:
+        resumed = torch.load(cfg.resume, map_location=device, weights_only=False)
+        require_checkpoint_encoding(resumed.get("encoding_version"))
+    # a resumed run keeps the architecture its weights were trained with
+    # (an older checkpoint reads a narrower globals prefix)
+    model_cfg = (
+        model_config_from_checkpoint(resumed)
+        if resumed is not None
+        else ModelConfig(**(cfg.arch or {}), value_simplex=cfg.value_simplex)
     )
+    net = PolicyValueNet(model_cfg).to(device)
     opt = torch.optim.AdamW(net.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
 
     step = 0
-    if cfg.resume is not None:
-        state = torch.load(cfg.resume, map_location=device, weights_only=False)
-        if state.get("encoding_version") != ENCODING_VERSION:
-            raise ValueError(
-                f"checkpoint has encoding v{state.get('encoding_version')}, code is "
-                f"v{ENCODING_VERSION} -- weights are not compatible"
-            )
+    if resumed is not None:
+        state = resumed
         net.load_state_dict(state["model"])
         opt.load_state_dict(state["optimizer"])
         step = int(state.get("step", 0))
