@@ -84,6 +84,11 @@ class SelfPlayConfig:
     """PUCT exploration constant. 1.5 is the MCTSAgent default every
     self-play leg so far generated with; the arena champion config uses
     2.5 (decision C16). Threaded through explicitly so a run can choose."""
+    root_noise: float = 0.0
+    root_alpha: float = 0.3
+    root_top_k: int = -1
+    """Root exploration (``MCTSAgent.root_noise``/``root_alpha``/
+    ``root_top_k``). Defaults keep every earlier leg's generation exactly."""
     temperature: float = 1.0
     temp_decisions: int = 30
     """Sample moves ∝ visits for this many recorded decisions per game,
@@ -306,6 +311,15 @@ def regularized_loss(
     }
 
 
+def search_kwargs(cfg: SelfPlayConfig) -> dict[str, object]:
+    """The ``MCTSAgent`` search settings a self-play config fixes."""
+    return {
+        "simulations": cfg.simulations, "max_depth": cfg.max_depth, "top_k": cfg.top_k,
+        "leaf_batch": cfg.leaf_batch, "c_puct": cfg.c_puct, "root_noise": cfg.root_noise,
+        "root_alpha": cfg.root_alpha, "root_top_k": cfg.root_top_k,
+    }
+
+
 def generate(
     checkpoint: Path,
     games: int,
@@ -317,15 +331,7 @@ def generate(
     corpus-sampled, exactly as the arena does, so self-play stays on the
     distribution the agent is evaluated on."""
     cfg = cfg or SelfPlayConfig()
-    agent = MCTSAgent(
-        checkpoint,
-        simulations=cfg.simulations,
-        max_depth=cfg.max_depth,
-        top_k=cfg.top_k,
-        leaf_batch=cfg.leaf_batch,
-        c_puct=cfg.c_puct,
-        device=device,
-    )
+    agent = MCTSAgent(checkpoint, device=device, **search_kwargs(cfg))
     rng = random.Random(seed)
     out: list[SelfPlayRecord] = []
     for _ in range(games):

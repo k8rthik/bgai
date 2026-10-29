@@ -76,7 +76,7 @@ import torch
 
 from bgai.training import shards as sh
 from bgai.training.checkpoint_io import checkpoint_mtime_ns, load_checkpoint
-from bgai.training.selfplay import SelfPlayConfig, SelfPlayRecord, play_game
+from bgai.training.selfplay import SelfPlayConfig, SelfPlayRecord, play_game, search_kwargs
 from bgai.training.stop_signal import StopSignal
 from bgai.training.worker_env import pin_single_thread_env
 from bgai.training.worker_pool import shielded_pool
@@ -250,15 +250,7 @@ def _actor_worker_init(checkpoint: str, cfg: SelfPlayConfig) -> None:
     payload = load_checkpoint(path)
     net = PolicyValueNet(model_config_from_checkpoint(payload))
     net.load_state_dict(payload["model"])
-    agent = MCTSAgent(
-        net=net,
-        simulations=cfg.simulations,
-        max_depth=cfg.max_depth,
-        top_k=cfg.top_k,
-        leaf_batch=cfg.leaf_batch,
-        c_puct=cfg.c_puct,
-        device="cpu",
-    )
+    agent = MCTSAgent(net=net, device="cpu", **search_kwargs(cfg))
     _WORKER.update(
         agent=agent, cfg=cfg, mtime_ns=checkpoint_mtime_ns(path),
         ckpt_iteration=int(payload.get("iteration", 0)),
@@ -505,13 +497,17 @@ def add_search_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--fast-prior", type=float, default=0.95)
     parser.add_argument("--c-puct", type=float, default=1.5,
                         help="PUCT exploration constant (arena champion uses 2.5, C16)")
+    parser.add_argument("--root-noise", type=float, default=0.0)
+    parser.add_argument("--root-alpha", type=float, default=0.3)
+    parser.add_argument("--root-top-k", type=int, default=-1)
 
 
 def selfplay_config_from_args(args: argparse.Namespace) -> SelfPlayConfig:
     return SelfPlayConfig(
         simulations=args.simulations, top_k=args.top_k, max_depth=args.max_depth,
         leaf_batch=args.leaf_batch, temp_decisions=args.temp_decisions,
-        fast_prior=args.fast_prior, c_puct=args.c_puct,
+        fast_prior=args.fast_prior, c_puct=args.c_puct, root_noise=args.root_noise,
+        root_alpha=args.root_alpha, root_top_k=args.root_top_k,
     )
 
 

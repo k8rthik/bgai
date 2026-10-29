@@ -76,7 +76,7 @@ import torch
 from bgai.training.checkpoint_io import load_checkpoint, save_atomic
 from bgai.training.cli_util import config_kwargs_from_stored, explicit_cli_args
 from bgai.training.run_provenance import CodeProvenance, code_provenance
-from bgai.training.selfplay import SelfPlayConfig, SelfPlayRecord, play_game
+from bgai.training.selfplay import SelfPlayConfig, SelfPlayRecord, play_game, search_kwargs
 from bgai.training.selfplay_finetune import (
     FineTuneConfig,
     TrainableNets,
@@ -119,6 +119,9 @@ class SelfPlayTrainConfig:
     c_puct: float = 1.5
     """PUCT constant for generation. Default keeps every existing leg
     comparable; the arena champion config uses 2.5 (decision C16)."""
+    root_noise: float = 0.0
+    root_alpha: float = 0.3
+    root_top_k: int = -1
     lambda_kl: float = 1.0
     rank_weight: float = 1.0
     winner_pair_weight: float = 3.0
@@ -152,6 +155,9 @@ class SelfPlayTrainConfig:
             temp_decisions=self.temp_decisions,
             fast_prior=self.fast_prior,
             c_puct=self.c_puct,
+            root_noise=self.root_noise,
+            root_alpha=self.root_alpha,
+            root_top_k=self.root_top_k,
             lambda_kl=self.lambda_kl,
             rank_weight=self.rank_weight,
             winner_pair_weight=self.winner_pair_weight,
@@ -205,12 +211,8 @@ def _worker_init(checkpoint: str, cfg: SelfPlayConfig, infer=None) -> None:
     _WORKER["agent"] = MCTSAgent(
         checkpoint_path=None if evaluator is not None else Path(checkpoint),
         evaluator=evaluator,
-        simulations=cfg.simulations,
-        max_depth=cfg.max_depth,
-        top_k=cfg.top_k,
-        leaf_batch=cfg.leaf_batch,
-        c_puct=cfg.c_puct,
         device="cpu",
+        **search_kwargs(cfg),
     )
     _WORKER["cfg"] = cfg
 
@@ -481,6 +483,11 @@ def build_parser() -> argparse.ArgumentParser:
                         help="skip search when the policy is at least this sure (1.0 disables)")
     parser.add_argument("--c-puct", type=float, default=1.5,
                         help="PUCT exploration constant (arena champion uses 2.5, C16)")
+    parser.add_argument("--root-noise", type=float, default=0.0,
+                        help="Dirichlet weight mixed into root priors (AlphaZero: 0.25)")
+    parser.add_argument("--root-alpha", type=float, default=0.3)
+    parser.add_argument("--root-top-k", type=int, default=-1,
+                        help="root-only prior pruning: -1 follows --top-k, 0 opens every move")
     parser.add_argument("--lambda-kl", type=float, default=1.0)
     parser.add_argument("--rank-weight", type=float, default=1.0)
     parser.add_argument("--winner-pair-weight", type=float, default=3.0)

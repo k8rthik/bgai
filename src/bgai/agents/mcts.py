@@ -75,6 +75,7 @@ class _Node:
     own_value: np.ndarray | None = None  # view: action_value[:, seat]
     priors_list: list[float] | None = None
     allowed_list: list[int] | None = None  # ``allowed`` sorted ascending
+    noised: bool = False  # root priors already mixed with Dirichlet noise
 
     def __post_init__(self) -> None:
         n = len(self.offer)
@@ -135,6 +136,9 @@ class MCTSAgent:
         late_sims: int = 0,
         root_choice: str = "visits",
         town_shaping: float = 0.0,
+        root_noise: float = 0.0,
+        root_alpha: float = 0.3,
+        root_top_k: int = -1,
         evaluator=None,
         eval_table: int = 0,
     ) -> None:
@@ -147,6 +151,17 @@ class MCTSAgent:
         self.town_shaping = town_shaping
         """Strength of the town-progress bonus on non-terminal leaf values
         (``town_shaping.shape``); 0.0 leaves the learned value untouched."""
+        self.root_noise = root_noise
+        self.root_alpha = root_alpha
+        """AlphaZero root exploration: the root's priors become
+        ``(1-root_noise)*priors + root_noise*Dirichlet(root_alpha)``.
+        0.0 (the default, and what arena play uses) leaves them untouched.
+        Self-play without it can only re-rank moves the net already
+        likes, since ``top_k`` hides the rest from the search."""
+        self.root_top_k = root_top_k
+        """Prior pruning at the root only: -1 follows ``top_k``, 0 opens
+        every legal move, k > 0 keeps the k highest (noised) priors."""
+        self._noise_rng = np.random.default_rng()
         self.leaf_batch = leaf_batch
         """Leaves evaluated per forward pass. 0/1 keeps the sequential
         path exactly. Higher batches amortise the network call that
@@ -436,11 +451,12 @@ class MCTSAgent:
         is good enough to put the right move in that set: top1 is 58% and
         top3 84%.
         """
+        if node.allowed is not None:  # cached, or set at the root by _explore_root
+            return node.allowed
         if not self.top_k or len(node.offer) <= self.top_k:
             return None
-        if node.allowed is None:
-            node.allowed = np.argsort(-node.priors)[: self.top_k]
-            node.allowed_list = sorted(node.allowed.tolist())
+        node.allowed = np.argsort(-node.priors)[: self.top_k]
+        node.allowed_list = sorted(node.allowed.tolist())
         return node.allowed
 
     def _select(self, node: _Node) -> int:
@@ -748,6 +764,7 @@ class MCTSAgent:
             root, _ = self._expand(sim)
         if root is None:
             return None
+        self._explore_root(root)
         budget = (
             self.late_sims
             if self.late_sims and sim.game.round >= 5
@@ -765,6 +782,20 @@ class MCTSAgent:
                 self._simulate(root)
         self._reuse_root = root
         return root
+
+    def _explore_root(self, root: _Node) -> None:
+        if self.root_noise > 0 and not root.noised:
+            noise = self._noise_rng.dirichlet([self.root_alpha] * len(root.offer))
+            root.priors = (
+                (1 - self.root_noise) * np.asarray(root.priors) + self.root_noise * noise
+            ).astype(np.float32)
+            root.priors_list = root.priors.tolist()
+            root.noised = True
+            root.allowed = root.allowed_list = None  # re-rank on the noised priors
+        if self.root_top_k >= 0:
+            k = self.root_top_k or len(root.offer)
+            root.allowed = np.argsort(-np.asarray(root.priors))[:k]
+            root.allowed_list = sorted(root.allowed.tolist())
 
     def choose_sim(
         self, sim: SimState, faction: str, offer: tuple[ParsedCommand, ...], rng: random.Random

@@ -92,6 +92,8 @@ def _build_net_agent(name: str, label: str, options: dict[str, object]) -> Agent
         late_sims=int(options.get("late", 0)),
         root_choice=str(options.get("root", "visits")),
         town_shaping=float(options.get("town", 0.0)),
+        root_noise=float(options.get("noise", 0.0)),
+        root_top_k=int(options.get("root_k", -1)),
         device=device,
     )
 

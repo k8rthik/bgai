@@ -81,6 +81,9 @@ def actor_argv(cfg: SelfPlayTrainConfig, actor_id: int, workers: int) -> list[st
         "--temp-decisions", str(sp.temp_decisions),
         "--fast-prior", str(sp.fast_prior),
         "--c-puct", str(sp.c_puct),
+        "--root-noise", str(sp.root_noise),
+        "--root-alpha", str(sp.root_alpha),
+        "--root-top-k", str(sp.root_top_k),
         "--checkpoint-wait-secs", str(ACTOR_CHECKPOINT_WAIT_SECS),
     ]
 
