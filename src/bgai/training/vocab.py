@@ -28,11 +28,13 @@ def require_checkpoint_encoding(version: object) -> None:
     if not isinstance(version, int) or not 1 <= version <= ENCODING_VERSION:
         raise ValueError(f"checkpoint encoding v{version} not loadable by code v{ENCODING_VERSION}")
 
-SHARD_FORMAT = 2
+SHARD_FORMAT = 3
 """Shard *field layout*, versioned separately from the encoders. v2 added
 per-record ``period``/``weight`` so population games -- which carry no
-league season or division -- can be split and weighted. The loader refuses
-older shards rather than guessing their weights."""
+league season or division -- can be split and weighted. v3 added
+per-record ``mover_mu``, the moving player's TrueSkill mean, so training
+can keep strong players' decisions only. The loader refuses older shards
+rather than guessing the missing fields."""
 
 HEXES: tuple[str, ...] = tuple(sorted(base_board().hexes))
 HEX_INDEX: dict[str, int] = {h: i for i, h in enumerate(HEXES)}

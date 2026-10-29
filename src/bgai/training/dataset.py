@@ -46,6 +46,7 @@ class ImitationDataset(Dataset):
         split: Split,
         max_cached_shards: int = DEFAULT_CACHED_SHARDS,
         weight_power: float = 1.0,
+        min_mover_mu: float | None = None,
     ) -> None:
         self.shard_dir = Path(shard_dir)
         if max_cached_shards < 1:
@@ -63,8 +64,8 @@ class ImitationDataset(Dataset):
         if manifest.get("shard_format") != SHARD_FORMAT:
             raise ValueError(
                 f"shards are format v{manifest.get('shard_format', 1)}, code is "
-                f"v{SHARD_FORMAT} -- they predate per-record period/weight "
-                f"and cannot be split or weighted correctly; rebuild the dataset"
+                f"v{SHARD_FORMAT} -- they lack per-record fields the loader reads "
+                f"(period/weight from v2, mover_mu from v3); rebuild the dataset"
             )
         self.val_season_min = int(manifest["val_season_min"])
         self.val_period_min = int(manifest["val_period_min"])
@@ -78,13 +79,18 @@ class ImitationDataset(Dataset):
         for shard_index, path in enumerate(self._files):
             with np.load(path) as data:
                 seasons, periods = data["season"], data["period"]
+                mover_mu = data["mover_mu"] if min_mover_mu is not None else None
             # league games split on season exactly as they always did;
             # population games split on the date that boundary implies
             is_league = seasons != NO_SEASON
             is_val = np.where(
                 is_league, seasons >= self.val_season_min, periods >= self.val_period_min
             )
-            keep = np.flatnonzero(is_val if split == "val" else ~is_val)
+            mask = is_val if split == "val" else ~is_val
+            if mover_mu is not None:
+                # NaN (an unrated mover) compares False, so it is dropped
+                mask = mask & (mover_mu >= min_mover_mu)
+            keep = np.flatnonzero(mask)
             self.index.extend((shard_index, int(row)) for row in keep)
 
     def __len__(self) -> int:

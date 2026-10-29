@@ -47,3 +47,32 @@ def test_weight_power_sharpens_strength_weighting(tmp_path) -> None:
     assert np.allclose(sw, fw**8)
     if fw.max() > fw.min():
         assert (sw.max() / max(sw.min(), 1e-9)) > (fw.max() / max(fw.min(), 1e-9))
+
+
+def test_mover_mu_is_stored_and_min_mover_mu_keeps_only_stronger_movers(tmp_path) -> None:
+    import pytest
+
+    from bgai.training.dataset import ImitationDataset
+    from bgai.training.vocab import SHARD_FORMAT
+
+    build(tmp_path, limit=4)
+    manifest = json.loads((tmp_path / "manifest.json").read_text())
+    assert manifest["shard_format"] == SHARD_FORMAT
+    mus = np.concatenate(
+        [np.load(tmp_path / s["file"])["mover_mu"] for s in manifest["shards"]]
+    )
+    assert mus.dtype == np.float32 and np.isfinite(mus).any()
+    assert ((mus > 0) | np.isnan(mus)).all()
+
+    everyone = ImitationDataset(tmp_path, "train")
+    cut = float(np.nanmedian(mus))
+    strong = ImitationDataset(tmp_path, "train", min_mover_mu=cut)
+    assert 0 < len(strong) < len(everyone)
+    shards = [np.load(tmp_path / s["file"])["mover_mu"] for s in manifest["shards"]]
+    assert all(shards[s][r] >= cut for s, r in strong.index)
+    assert set(strong.index) <= set(everyone.index)
+
+    manifest["shard_format"] = SHARD_FORMAT - 1
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="format"):
+        ImitationDataset(tmp_path, "train")

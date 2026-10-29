@@ -60,6 +60,7 @@ def _pack(records: list[DecisionRecord]) -> dict[str, np.ndarray]:
         "period": np.array([r.period for r in records], dtype=np.int32),
         "weight": np.array([r.weight for r in records], dtype=np.float32),
         "mover_faction": np.array([r.mover_faction_id for r in records], dtype=np.int8),
+        "mover_mu": np.array([r.mover_mu for r in records], dtype=np.float32),
     }
 
 
