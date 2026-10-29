@@ -138,8 +138,7 @@ def build_provenance(
     scoped = population.filter(pl.col("game_id").is_in(wanted))
     seat_mu = _seat_mu(scoped, ratings)
     months = dict(
-        population.filter(pl.col("game_id").is_in(wanted))
-        .select("game_id", "month")
+        scoped.select("game_id", "month")
         .unique(subset=["game_id"])
         .iter_rows()
     )
