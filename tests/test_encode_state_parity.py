@@ -1,15 +1,18 @@
-"""The batched-index state encoder must reproduce the original per-element
-encoder bit for bit -- the checkpoints were trained on the original layout,
-so any drift here silently changes what the net sees."""
+"""The state encoder's v1 prefix must reproduce the original per-element
+v1 encoder bit for bit -- the v1 checkpoints were trained on that layout and
+read exactly that prefix of every later encoding, so any drift here silently
+changes what they see."""
 
 from __future__ import annotations
 
 import random
 
 import numpy as np
+import polars as pl
 
 from bgai.arena.driver import advance, decision, new_game
 from bgai.arena.setups import load_setup
+from bgai.engine.tm.replay import replay_game
 from bgai.engine.tm.state import GameState
 from bgai.training import encode_state as es
 from bgai.training.encode_state import StateEncoding, encode_state
@@ -44,7 +47,7 @@ def _reference(state: GameState, faction: str) -> StateEncoding:
         if hx.owner is not None and hx.owner in seat_of:
             planes[row, len(COLORS) + 1 + len(BUILDINGS) + seat_of[hx.owner]] = 1
 
-    g = np.zeros(es.GLOBAL_DIM, dtype=np.int16)
+    g = np.zeros(es.GLOBAL_DIM_V1, dtype=np.int16)
     active = state.turn_order[state.active_index] if state.turn_order else None
     for seat, name in enumerate(order):
         fs = state.factions[name]
@@ -105,7 +108,28 @@ def test_encoder_matches_reference_along_a_random_game() -> None:
             assert got.hex_planes.dtype == want.hex_planes.dtype
             assert got.globals.dtype == want.globals.dtype
             assert np.array_equal(got.hex_planes, want.hex_planes)
-            assert np.array_equal(got.globals, want.globals)
+            assert np.array_equal(got.globals[: es.GLOBAL_DIM_V1], want.globals)
             checked += 1
         sim = advance(sim, rng.choice(offer), current=pending)
     assert checked > 400
+
+
+def test_v1_prefix_matches_reference_on_replayed_corpus_games() -> None:
+    moves = pl.read_parquet("data/datasets/moves.parquet")
+    deltas = pl.read_parquet("data/datasets/deltas.parquet")
+    checked = 0
+    for game_id in ("4pLeague_S10_D1L1_G1", "4pLeague_S12_D1L1_G1"):
+        states: list[GameState] = []
+        result = replay_game(
+            game_id, moves, deltas, on_decision=lambda s, f, c, out=states: out.append(s)
+        )
+        assert result.error is None
+        for state in states[::7]:
+            for mover in state.setup.factions:
+                got = encode_state(state, mover)
+                want = _reference(state, mover)
+                assert got.globals.shape == (es.GLOBAL_DIM,)
+                assert got.globals[: es.GLOBAL_DIM_V1].tobytes() == want.globals.tobytes()
+                assert got.hex_planes.tobytes() == want.hex_planes.tobytes()
+                checked += 1
+    assert checked > 150

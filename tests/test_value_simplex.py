@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import torch
 
+from bgai.training.encode_state import GLOBAL_DIM
 from bgai.training.model import ModelConfig, PolicyValueNet
 
 
@@ -26,7 +27,7 @@ def _forward(net):
     b = 3
     return net(
         torch.zeros(b, 113, 17),
-        torch.zeros(b, 294),
+        torch.zeros(b, GLOBAL_DIM),
         torch.zeros(b, dtype=torch.long),
         torch.zeros(b, 5, 12, dtype=torch.long),
         torch.ones(b, 5, dtype=torch.bool),
