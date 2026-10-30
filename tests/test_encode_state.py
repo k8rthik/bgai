@@ -19,6 +19,7 @@ from bgai.engine.tm.round_flow import start_setup
 from bgai.engine.tm.setup import load_setup
 from bgai.engine.tm.state import GameState, active_faction
 from bgai.engine.tm.terraform import spade_distance
+from bgai.engine.tm.tiles import SCORE_TILES
 from bgai.training import encode_state as es
 from bgai.training.encode_state import GLOBAL_DIM, HEX_FEAT_DIM, encode_state
 from bgai.training.vocab import HEX_INDEX
@@ -375,3 +376,21 @@ def test_projection_matches_the_ledgers_final_scoring() -> None:
                 want.get("network", 0), want.get("cult", 0), want.get("resources", 0)
             ), (game_id, name)
             assert final.factions[name].vp + network_vp + cult_vp + resource_vp == final_vp[name]
+
+
+def test_score_tile_ids_tell_apart_tiles_the_v1_cult_pair_conflates() -> None:
+    state = _blank()
+
+    def with_round_one(tile_id: str) -> np.ndarray:
+        tiles = (SCORE_TILES[tile_id], *state.setup.score_tiles[1:])
+        setup = replace(state.setup, score_tiles=tiles)
+        return encode_state(replace(state, setup=setup), "darklings").globals
+
+    d_round, tp_round = with_round_one("SCORE3"), with_round_one("SCORE6")
+    assert np.array_equal(d_round[: es.GLOBAL_DIM_V1], tp_round[: es.GLOBAL_DIM_V1])
+    ids = sorted(SCORE_TILES)
+    round_one = slice(es._CTX_SCORE_IDS, es._CTX_SCORE_IDS + len(ids))
+    assert d_round[round_one].tolist() == [int(t == "SCORE3") for t in ids]
+    assert tp_round[round_one].tolist() == [int(t == "SCORE6") for t in ids]
+    per_round = d_round[es._CTX_SCORE_IDS :].reshape(6, len(ids))
+    assert per_round.sum(axis=1).tolist() == [1] * 6

@@ -36,7 +36,10 @@ Layout (verified by tests/test_encode_state.py):
   leftover-resource VP (4) | rank on each cult track (4) | steps to the
   next power-granting cult space on each track (4) | own dwellings next
   to an opponent structure, leech power offered to this seat, leech
-  power this seat offers the others (3).
+  power this seat offers the others (3)
+  then each round's score tile id one-hot (6 x 9, SCORE1..SCORE9): the
+  v1 cult/req pair cannot tell SCORE3 (D >> 2, 4 WATER -> P) from
+  SCORE6 (TP >> 3, 4 WATER -> spade).
 
 Economy semantics:
 - income is ``income.faction_income`` summed over its base, building,
@@ -93,7 +96,7 @@ from bgai.engine.tm.memo import state_memo
 from bgai.engine.tm.scoring import compute_cult_scoring, network_awards, network_size, resource_vp
 from bgai.engine.tm.state import GameState, HexState, Phase
 from bgai.engine.tm.terraform import spade_distance
-from bgai.engine.tm.tiles import BONUS_TILES, FAVOR_TILES, TOWN_TILES
+from bgai.engine.tm.tiles import BONUS_TILES, FAVOR_TILES, SCORE_TILES, TOWN_TILES, ScoringTile
 from bgai.engine.tm.towns import _town_threshold, building_power_value, open_clusters
 from bgai.training.vocab import (
     BUILDING_INDEX,
@@ -169,7 +172,18 @@ _SCORE_CONTACT = _SCORE_CULT_STEPS + len(CULTS4)
 SCORE_SEAT_BLOCK = _SCORE_CONTACT + 3  # 15
 
 _SCORE_BASE = GLOBAL_DIM_V2
-GLOBAL_DIM = _SCORE_BASE + 4 * SCORE_SEAT_BLOCK
+_CTX_SCORE_IDS = _SCORE_BASE + 4 * SCORE_SEAT_BLOCK
+GLOBAL_DIM = _CTX_SCORE_IDS + 6 * len(SCORE_TILES)
+
+
+def _score_tile_key(tile: ScoringTile) -> tuple:
+    # the rules a tile carries; display strings vary with where it was parsed
+    return (tile.cult, tile.req, tile.vp_mode, tile.vp, tile.cult_income)
+
+
+_SCORE_TILE_INDEX = {
+    _score_tile_key(SCORE_TILES[name]): i for i, name in enumerate(sorted(SCORE_TILES))
+}
 
 _INT16 = np.iinfo(np.int16)
 
@@ -458,6 +472,8 @@ def encode_state(state: GameState, faction: str) -> StateEncoding:
             g[_CTX_ACTS + int(act[3:]) - 1] = 1
     g[_CTX_PENDING] = len(state.pending)
     derived = _economy(state, order) + _scoring(state, order)
-    g[_ECON_BASE:] = np.clip(derived, _INT16.min, _INT16.max)
+    g[_ECON_BASE:_CTX_SCORE_IDS] = np.clip(derived, _INT16.min, _INT16.max)
+    for r, tile in enumerate(state.setup.score_tiles):
+        g[_CTX_SCORE_IDS + r * len(SCORE_TILES) + _SCORE_TILE_INDEX[_score_tile_key(tile)]] = 1
 
     return StateEncoding(hex_planes=planes, globals=g)
