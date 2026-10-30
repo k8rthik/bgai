@@ -78,8 +78,10 @@ Scoring semantics (v3):
 
 from __future__ import annotations
 
+import functools
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from operator import is_
 
 import numpy as np
 
@@ -307,7 +309,7 @@ class _IdentityCache[V]:
     def get(self, objs: tuple[object, ...], scalars: tuple, compute: Callable[[], V]) -> V:
         key = (*map(id, objs), *scalars)
         hit = self._table.get(key)
-        if hit is not None and all(a is b for a, b in zip(hit[0], objs, strict=True)):
+        if hit is not None and all(map(is_, hit[0], objs)):
             return hit[1]
         value = compute()
         if len(self._table) >= self.maxsize:
@@ -360,29 +362,39 @@ def _seat_network_size(state: GameState, name: str) -> int:
     )
 
 
+@functools.lru_cache(maxsize=4096)
+def _network_awards(sizes: tuple[tuple[str, int], ...]) -> dict[str, int]:
+    return network_awards(dict(sizes))
+
+
 def _seat_resource_vp(state: GameState, name: str) -> int:
+    # keyed on what the conversion reads, not on ``fs``, which every move
+    # of this seat replaces
     fs = state.factions[name]
-    return _resource_cache.get((fs,), (name,), lambda: resource_vp(fs, name))
+    return _resource_cache.get(
+        (fs.power,), (name, fs.coins, fs.workers, fs.priests), lambda: resource_vp(fs, name)
+    )
 
 
 def clear_caches() -> None:
     """Drop the economy and scoring memo tables (benchmarks and tests)."""
     for cache in _CACHES:
         cache.clear()
+    _network_awards.cache_clear()
 
 
-def _economy(state: GameState, order: tuple[str, ...]) -> np.ndarray:
+def _economy(state: GameState, order: tuple[str, ...]) -> list[int]:
     values: list[int] = []
     for name in order:
         values += _seat_economy(state, name)
     values += [state.towns_pool.get(t, 0) for t in _TOWN_IDS]
     values += [state.favors_pool.get(t, 0) for t in _FAV_IDS]
-    return np.clip(values, _INT16.min, _INT16.max)
+    return values
 
 
-def _scoring(state: GameState, order: tuple[str, ...]) -> np.ndarray:
+def _scoring(state: GameState, order: tuple[str, ...]) -> list[int]:
     sizes = {name: _seat_network_size(state, name) for name in state.factions}
-    network_vp = network_awards(sizes)
+    network_vp = _network_awards(tuple(sizes.items()))
     keys = tuple(fs.keys for fs in state.factions.values())
     cults = _cult_cache.get((state.cults, state.cult_10), keys, lambda: _cult_standing(state))
     contact = _contact_cache.get((state.hexes, state.bridges), (), lambda: _contact(state))
@@ -392,7 +404,7 @@ def _scoring(state: GameState, order: tuple[str, ...]) -> np.ndarray:
         values += [sizes[name], network_vp.get(name, 0), cult_vp, _seat_resource_vp(state, name)]
         values += standing
         values += contact[name]
-    return np.clip(values, _INT16.min, _INT16.max)
+    return values
 
 
 def encode_state(state: GameState, faction: str) -> StateEncoding:
@@ -444,7 +456,7 @@ def encode_state(state: GameState, faction: str) -> StateEncoding:
         if act.startswith("ACT") and act[3:].isdigit():
             g[_CTX_ACTS + int(act[3:]) - 1] = 1
     g[_CTX_PENDING] = len(state.pending)
-    g[_ECON_BASE:_SCORE_BASE] = _economy(state, order)
-    g[_SCORE_BASE:] = _scoring(state, order)
+    derived = _economy(state, order) + _scoring(state, order)
+    g[_ECON_BASE:] = np.clip(derived, _INT16.min, _INT16.max)
 
     return StateEncoding(hex_planes=planes, globals=g)
