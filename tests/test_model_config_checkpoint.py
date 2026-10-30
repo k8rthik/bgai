@@ -15,7 +15,9 @@ from dataclasses import asdict
 import pytest
 import torch
 
+from bgai.training.encode_state import GLOBAL_DIM, GLOBAL_DIM_V1, HEX_FEAT_DIM
 from bgai.training.model import ModelConfig, PolicyValueNet, model_config_from_checkpoint
+from bgai.training.vocab import HEXES
 
 SMALL = ModelConfig(hidden=64, embed=32, move_hidden=32, dropout=0.0)
 
@@ -34,12 +36,63 @@ def test_non_default_sizes_round_trip_and_load() -> None:
 
 def test_legacy_checkpoint_without_model_config_gets_defaults() -> None:
     cfg = model_config_from_checkpoint({"config": {"value_simplex": True, "aux_head": True}})
-    assert cfg == ModelConfig(value_simplex=True, aux_head=True)
+    assert cfg == ModelConfig(value_simplex=True, aux_head=True, global_dim=GLOBAL_DIM_V1)
 
 
-def test_missing_config_entirely_gets_defaults() -> None:
-    assert model_config_from_checkpoint({}) == ModelConfig()
-    assert model_config_from_checkpoint({"config": None}) == ModelConfig()
+def test_missing_config_entirely_gets_v1_defaults() -> None:
+    v1 = ModelConfig(global_dim=GLOBAL_DIM_V1)
+    assert model_config_from_checkpoint({}) == v1
+    assert model_config_from_checkpoint({"config": None}) == v1
+
+
+def _forward(net: PolicyValueNet, globals_width: int) -> tuple[torch.Tensor, torch.Tensor]:
+    n, k = 3, 5
+    g = torch.Generator().manual_seed(0)
+    return net.eval()(
+        torch.rand(n, len(HEXES), HEX_FEAT_DIM, generator=g),
+        torch.rand(n, globals_width, generator=g),
+        torch.zeros(n, dtype=torch.long),
+        torch.randint(0, 8, (n, k, 12), generator=g),
+        torch.ones(n, k, dtype=torch.bool),
+    )
+
+
+def test_pre_v2_checkpoint_restores_v1_width_and_reads_the_v2_prefix() -> None:
+    v1 = ModelConfig(hidden=64, embed=32, move_hidden=32, dropout=0.0, global_dim=GLOBAL_DIM_V1)
+    stored = {k: v for k, v in asdict(v1).items() if k != "global_dim"}
+    ckpt = {"model": PolicyValueNet(v1).state_dict(), "config": {"model_config": stored}}
+    net = PolicyValueNet(model_config_from_checkpoint(ckpt))
+    net.load_state_dict(ckpt["model"])
+    assert net.cfg.global_dim == GLOBAL_DIM_V1
+    torch.manual_seed(0)
+    planes = torch.rand(3, len(HEXES), HEX_FEAT_DIM)
+    g = torch.rand(3, GLOBAL_DIM)
+    perturbed = g.clone()
+    perturbed[:, GLOBAL_DIM_V1:] += 1234.0
+    rest = (torch.zeros(3, dtype=torch.long), torch.zeros(3, 5, 12, dtype=torch.long),
+            torch.ones(3, 5, dtype=torch.bool))
+    net.eval()
+    a = net(planes, g, *rest)
+    b = net(planes, perturbed, *rest)
+    assert a[0].shape == (3, 5) and a[1].shape == (3, 4)
+    assert torch.equal(a[0], b[0]) and torch.equal(a[1], b[1])
+
+
+def test_fresh_config_reads_the_full_globals_vector() -> None:
+    net = PolicyValueNet(ModelConfig(hidden=64, embed=32, move_hidden=32))
+    first = net.torso[0]
+    assert first.in_features == len(HEXES) * HEX_FEAT_DIM + GLOBAL_DIM + net.cfg.faction_embed
+    assert model_config_from_checkpoint(
+        {"config": {"model_config": asdict(net.cfg)}}
+    ).global_dim == GLOBAL_DIM
+
+
+@pytest.mark.parametrize("torso", ["resmlp", "hexgnn", "hexformer"])
+def test_every_torso_honours_global_dim(torso: str) -> None:
+    cfg = ModelConfig(hidden=32, embed=16, move_hidden=16, hex_dim=16, depth=1, torso=torso,
+                      dropout=0.0, global_dim=GLOBAL_DIM_V1)
+    logits, value = _forward(PolicyValueNet(cfg), GLOBAL_DIM)
+    assert logits.shape == (3, 5) and torch.isfinite(value).all()
 
 
 def test_top_level_flags_win_over_the_stored_dict() -> None:

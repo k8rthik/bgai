@@ -49,9 +49,10 @@ def test_strength_weight_spans_the_division_range() -> None:
 
 def test_league_game_keeps_its_id_derived_provenance() -> None:
     population = pl.DataFrame(
-        {"game_id": ["4pLeague_S70_D1L1_G1"], "month": ["2024-03"], "player": ["a"]}
+        {"game_id": ["4pLeague_S70_D1L1_G1"], "month": ["2024-03"], "player": ["a"],
+         "faction": ["witches"]}
     )
-    ratings = pl.DataFrame({"player": ["a"], "conservative": [30.0]})
+    ratings = pl.DataFrame({"player": ["a"], "conservative": [30.0], "mu": [33.0]})
     prov = build_provenance(["4pLeague_S70_D1L1_G1"], population, ratings)
 
     entry = prov["4pLeague_S70_D1L1_G1"]
@@ -66,10 +67,12 @@ def test_population_game_gets_date_and_strength_provenance() -> None:
             "game_id": ["casual1", "casual1", "casual2", "casual2"],
             "month": ["2019-08", "2019-08", "2019-08", "2019-08"],
             "player": ["a", "b", "c", "d"],
+            "faction": ["witches", "nomads", "witches", "nomads"],
         }
     )
     ratings = pl.DataFrame(
-        {"player": ["a", "b", "c", "d"], "conservative": [10.0, 12.0, 40.0, 42.0]}
+        {"player": ["a", "b", "c", "d"], "conservative": [10.0, 12.0, 40.0, 42.0],
+         "mu": [15.0, 17.0, 45.0, 47.0]}
     )
     prov = build_provenance(["casual1", "casual2"], population, ratings)
 
@@ -85,8 +88,10 @@ def test_population_game_gets_date_and_strength_provenance() -> None:
 def test_missing_catalogue_row_is_not_silently_dropped() -> None:
     """A game with no catalogue entry must be absent, so the caller can
     count it rather than train on a fabricated weight."""
-    population = pl.DataFrame({"game_id": ["known"], "month": ["2020-01"], "player": ["a"]})
-    ratings = pl.DataFrame({"player": ["a"], "conservative": [25.0]})
+    population = pl.DataFrame(
+        {"game_id": ["known"], "month": ["2020-01"], "player": ["a"], "faction": ["witches"]}
+    )
+    ratings = pl.DataFrame({"player": ["a"], "conservative": [25.0], "mu": [28.0]})
     prov = build_provenance(["known", "orphan"], population, ratings)
     assert "orphan" not in prov
     assert "known" in prov
@@ -105,3 +110,21 @@ def test_val_rule_preserves_the_league_boundary() -> None:
     early = GameProvenance(season=-1, division=-1, period=100, weight=0.8)
     assert late.is_val(val_period_min=400) is True
     assert early.is_val(val_period_min=400) is False
+
+
+def test_each_seat_carries_its_players_rating() -> None:
+    """Per-seat skill, so training can keep strong players' decisions only;
+    an unrated player (or a seat with no player name) has no entry."""
+    population = pl.DataFrame(
+        {
+            "game_id": ["g"] * 4,
+            "month": ["2021-05"] * 4,
+            "player": ["strong", "weak", "unrated", None],
+            "faction": ["witches", "nomads", "halflings", "giants"],
+        }
+    )
+    ratings = pl.DataFrame(
+        {"player": ["strong", "weak"], "conservative": [30.0, 5.0], "mu": [31.5, 12.25]}
+    )
+    seat_mu = build_provenance(["g"], population, ratings)["g"].seat_mu
+    assert dict(seat_mu) == {"witches": 31.5, "nomads": 12.25}

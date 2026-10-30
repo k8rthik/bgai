@@ -23,9 +23,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from bgai.engine.tm.connectivity import clusters
 from bgai.engine.tm.state import GameState
-from bgai.engine.tm.towns import _cluster_power_and_count, _town_threshold
+from bgai.engine.tm.towns import _town_threshold, open_clusters
 
 TOWN_STRUCTURES = 4
 
@@ -35,12 +34,13 @@ def town_progress(state: GameState, faction: str) -> float:
     if not any(count > 0 for count in state.towns_pool.values()):
         return float(len(founded))
     threshold = _town_threshold(state.factions[faction])
-    best = 0.0
-    for cluster in clusters(state, faction):
-        if any(cluster & town for town in founded):
-            continue
-        power, count = _cluster_power_and_count(state, cluster)
-        best = max(best, min(1.0, power / threshold) * min(1.0, count / TOWN_STRUCTURES))
+    best = max(
+        (
+            min(1.0, power / threshold) * min(1.0, count / TOWN_STRUCTURES)
+            for power, count in open_clusters(state, faction)
+        ),
+        default=0.0,
+    )
     return len(founded) + best
 
 

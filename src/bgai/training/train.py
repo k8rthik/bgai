@@ -26,10 +26,10 @@ import torch
 from torch.utils.data import DataLoader
 
 from bgai.training.dataset import ImitationDataset, collate
-from bgai.training.model import ModelConfig, PolicyValueNet
+from bgai.training.model import ModelConfig, PolicyValueNet, model_config_from_checkpoint
 from bgai.training.rank_loss import ordering_stats, pairwise_rank_loss
 from bgai.training.sampler import ShardBlockSampler
-from bgai.training.vocab import ENCODING_VERSION
+from bgai.training.vocab import ENCODING_VERSION, require_checkpoint_encoding
 
 
 @dataclass(frozen=True)
@@ -76,6 +76,10 @@ class TrainConfig:
     the average population player rather than a strong one -- and the
     agent measures at the 16th percentile of human play. Sharpening here
     avoids rebuilding a 2.5 GB shard set to change the weighting."""
+    min_mover_mu: float | None = None
+    """Train only on decisions whose mover's TrueSkill mu is at least this
+    (unrated movers dropped). None keeps every record. Validation stays
+    unfiltered so val loss is comparable across cuts."""
     rank_weight: float = 0.0
     """Weight on the pairwise ranking term over the value vector. MSE
     optimises the share's magnitude; MCTS only uses the ordering, and the
@@ -221,7 +225,7 @@ def train(cfg: TrainConfig) -> dict[str, float]:
 
     train_ds = ImitationDataset(
         cfg.shards, "train", max_cached_shards=cfg.shards_per_block + 2,
-        weight_power=cfg.weight_power,
+        weight_power=cfg.weight_power, min_mover_mu=cfg.min_mover_mu,
     )
     val_ds = ImitationDataset(cfg.shards, "val", max_cached_shards=cfg.shards_per_block + 2)
     # block sampling rather than a global shuffle: see sampler module --
@@ -242,19 +246,23 @@ def train(cfg: TrainConfig) -> dict[str, float]:
         num_workers=cfg.num_workers,
     )
 
-    net = PolicyValueNet(ModelConfig(**(cfg.arch or {}), value_simplex=cfg.value_simplex)).to(
-        device
+    resumed = None
+    if cfg.resume is not None:
+        resumed = torch.load(cfg.resume, map_location=device, weights_only=False)
+        require_checkpoint_encoding(resumed.get("encoding_version"))
+    # a resumed run keeps the architecture its weights were trained with
+    # (an older checkpoint reads a narrower globals prefix)
+    model_cfg = (
+        model_config_from_checkpoint(resumed)
+        if resumed is not None
+        else ModelConfig(**(cfg.arch or {}), value_simplex=cfg.value_simplex)
     )
+    net = PolicyValueNet(model_cfg).to(device)
     opt = torch.optim.AdamW(net.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
 
     step = 0
-    if cfg.resume is not None:
-        state = torch.load(cfg.resume, map_location=device, weights_only=False)
-        if state.get("encoding_version") != ENCODING_VERSION:
-            raise ValueError(
-                f"checkpoint has encoding v{state.get('encoding_version')}, code is "
-                f"v{ENCODING_VERSION} -- weights are not compatible"
-            )
+    if resumed is not None:
+        state = resumed
         net.load_state_dict(state["model"])
         opt.load_state_dict(state["optimizer"])
         step = int(state.get("step", 0))
@@ -398,6 +406,10 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--allow-dirty-out", action="store_true")
     parser.add_argument("--rank-weight", type=float, default=0.0)
     parser.add_argument("--weight-power", type=float, default=1.0)
+    parser.add_argument(
+        "--min-mover-mu", type=float, default=None,
+        help="train only on movers rated at least this TrueSkill mu",
+    )
     parser.add_argument("--value-simplex", action="store_true")
     parser.add_argument("--lr-schedule", choices=LR_SCHEDULES, default="constant")
     parser.add_argument("--warmup-steps", type=int, default=2000)
@@ -421,6 +433,7 @@ def main(argv: list[str] | None = None) -> None:
             allow_dirty_out=args.allow_dirty_out,
             rank_weight=args.rank_weight,
             weight_power=args.weight_power,
+            min_mover_mu=args.min_mover_mu,
             value_simplex=args.value_simplex,
             arch=parse_arch(args.arch),
             lr_schedule=args.lr_schedule,

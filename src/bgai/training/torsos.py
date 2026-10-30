@@ -26,7 +26,7 @@ import torch
 from torch import nn
 
 from bgai.engine.tm.board import base_board
-from bgai.training.encode_state import GLOBAL_DIM, HEX_FEAT_DIM
+from bgai.training.encode_state import HEX_FEAT_DIM
 from bgai.training.vocab import HEXES
 
 if TYPE_CHECKING:
@@ -77,7 +77,7 @@ class _HexTokens(nn.Module):
         d = cfg.hex_dim
         self.feat = nn.Linear(HEX_FEAT_DIM, d)
         self.pos = nn.Parameter(torch.randn(len(HEXES), d) * 0.02)
-        self.ctx = nn.Sequential(nn.Linear(GLOBAL_DIM + cfg.faction_embed, d), nn.SiLU())
+        self.ctx = nn.Sequential(nn.Linear(cfg.global_dim + cfg.faction_embed, d), nn.SiLU())
 
     def forward(self, hex_planes, globals_, faction_vec) -> tuple[torch.Tensor, torch.Tensor]:
         ctx = self.ctx(torch.cat([globals_, faction_vec], dim=-1))

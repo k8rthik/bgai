@@ -24,7 +24,8 @@ C4/C5/C6 measurements would stop being comparable to anything new.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 
 import polars as pl
 
@@ -53,6 +54,9 @@ class GameProvenance:
     division: int
     period: int
     weight: float
+    seat_mu: Mapping[str, float] = field(default_factory=dict)
+    """Faction -> the TrueSkill ``mu`` of the player who sat it. A seat
+    whose player is unrated (or unnamed) has no entry."""
 
     @property
     def is_league(self) -> bool:
@@ -109,6 +113,17 @@ def _strength_deciles(strength: pl.DataFrame) -> pl.DataFrame:
     return ranked.with_columns(decile.cast(pl.Int32).alias("decile")).select("game_id", "decile")
 
 
+def _seat_mu(population: pl.DataFrame, ratings: pl.DataFrame) -> dict[str, dict[str, float]]:
+    """game_id -> {faction: mu} for every rated seat in ``population``."""
+    rated = population.select("game_id", "player", "faction").join(
+        ratings.select("player", "mu"), on="player", how="inner"
+    )
+    out: dict[str, dict[str, float]] = {}
+    for game_id, faction, mu in rated.select("game_id", "faction", "mu").iter_rows():
+        out.setdefault(game_id, {})[faction] = float(mu)
+    return out
+
+
 def build_provenance(
     game_ids: list[str],
     population: pl.DataFrame,
@@ -120,9 +135,10 @@ def build_provenance(
     caller can count them instead of training on a fabricated weight.
     """
     wanted = set(game_ids)
+    scoped = population.filter(pl.col("game_id").is_in(wanted))
+    seat_mu = _seat_mu(scoped, ratings)
     months = dict(
-        population.filter(pl.col("game_id").is_in(wanted))
-        .select("game_id", "month")
+        scoped.select("game_id", "month")
         .unique(subset=["game_id"])
         .iter_rows()
     )
@@ -148,6 +164,7 @@ def build_provenance(
             division=division,
             period=month_to_period(month),
             weight=weight,
+            seat_mu=seat_mu.get(game_id, {}),
         )
     return resolved
 

@@ -40,7 +40,7 @@ from bgai.engine.tm.state_key import game_key
 from bgai.training.encode_move import MOVE_FIELDS, encode_move
 from bgai.training.encode_state import encode_state
 from bgai.training.model import PolicyValueNet, model_config_from_checkpoint
-from bgai.training.vocab import ENCODING_VERSION, FACTION_INDEX
+from bgai.training.vocab import FACTION_INDEX, require_checkpoint_encoding
 
 
 @dataclass
@@ -234,11 +234,7 @@ class MCTSAgent:
             if checkpoint_path is None:
                 raise ValueError("either checkpoint_path or net must be given")
             ckpt = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
-            if ckpt.get("encoding_version") != ENCODING_VERSION:
-                raise ValueError(
-                    f"checkpoint encoding v{ckpt.get('encoding_version')} != code "
-                    f"v{ENCODING_VERSION}"
-                )
+            require_checkpoint_encoding(ckpt.get("encoding_version"))
             self.net = PolicyValueNet(model_config_from_checkpoint(ckpt))
             self.net.load_state_dict(ckpt["model"])
         self.net.to(self.device).eval()
@@ -723,8 +719,7 @@ class MCTSAgent:
             raise ValueError("reload needs a local net; evaluator-backed agents have none")
         ckpt = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
         version = ckpt.get("encoding_version") if isinstance(ckpt, dict) else None
-        if version != ENCODING_VERSION:
-            raise ValueError(f"checkpoint encoding v{version} != code v{ENCODING_VERSION}")
+        require_checkpoint_encoding(version)
         cfg = model_config_from_checkpoint(ckpt)
         if cfg != self.net.cfg:
             raise ValueError(f"checkpoint architecture {cfg} != agent net {self.net.cfg}")
