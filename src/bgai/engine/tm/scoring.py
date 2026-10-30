@@ -283,10 +283,15 @@ def network_size(state: GameState, faction: str) -> int:
     return max((len(c) for c in components), default=0)
 
 
+def network_awards(sizes: Mapping[str, int]) -> dict[str, int]:
+    """``{faction: vp}`` for final network scoring given every faction's
+    ``network_size``, 18/12/6 points."""
+    return _score_type_rankings(sizes, _NETWORK_POINTS)
+
+
 def compute_network_scoring(state: GameState) -> dict[str, int]:
     """``{faction: vp}`` for final network scoring, 18/12/6 points."""
-    levels = {faction: network_size(state, faction) for faction in state.factions}
-    return _score_type_rankings(levels, _NETWORK_POINTS)
+    return network_awards({faction: network_size(state, faction) for faction in state.factions})
 
 
 def _exchange_rate_c_to_vp(faction: str) -> int:
@@ -318,6 +323,11 @@ def _apply_score_resources(fs: FactionState, faction: str) -> FactionState:
     return replace(fs, power=power, coins=coins, priests=0, workers=0, vp=fs.vp + vp_gained)
 
 
+def resource_vp(fs: FactionState, faction: str) -> int:
+    """VP that final scoring's leftover-resource conversion would add to ``fs``."""
+    return _apply_score_resources(fs, faction).vp - fs.vp
+
+
 def projected_vp(state: GameState) -> dict[str, int]:
     """Per-faction VP **if the game ended right now**: current
     ``fs.vp`` plus cult standings, network standings, and leftover-
@@ -342,8 +352,7 @@ def projected_vp(state: GameState) -> dict[str, int]:
         vp = fs.vp
         vp += sum(cult_scores[cult].get(faction, 0) for cult in CULTS)
         vp += network_scores.get(faction, 0)
-        converted = _apply_score_resources(fs, faction)
-        vp += converted.vp - fs.vp
+        vp += resource_vp(fs, faction)
         projected[faction] = vp
     return projected
 

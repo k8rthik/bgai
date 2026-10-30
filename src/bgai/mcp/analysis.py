@@ -14,10 +14,10 @@ from bgai.data.ledger_parser import parse_command
 from bgai.engine.tm.apply import EngineError, apply
 from bgai.engine.tm.factions_data import CULTS
 from bgai.engine.tm.scoring import (
-    _apply_score_resources,
     compute_cult_scoring,
     compute_network_scoring,
     network_size,
+    resource_vp,
 )
 from bgai.engine.tm.state import GameState
 from bgai.engine.tm.tiles import BONUS_TILES, FAVOR_TILES
@@ -114,8 +114,7 @@ def _resource_conversion(state: GameState) -> list[str]:
     lines = ["leftover-resource VP conversion IF the game ended now:"]
     for faction in state.setup.factions:
         fs = state.factions[faction]
-        converted = _apply_score_resources(fs, faction)
-        lines.append(f"  {faction}: +{converted.vp - fs.vp} VP")
+        lines.append(f"  {faction}: +{resource_vp(fs, faction)} VP")
     return lines
 
 
