@@ -263,7 +263,8 @@ def _contact(state: GameState) -> dict[str, list[int]]:
                     for hx in (state.hexes[n] for n in directly_adjacent(state, hex_key))
                     if hx.building is not None and hx.color != color
                 ]
-                touching += building == "D" and bool(rivals)
+                if building == "D" and rivals:
+                    touching += 1
                 offered_to += power * len(rivals)
                 offered_by += sum(rivals)
         out[name] = [touching, offered_to, offered_by]
