@@ -65,10 +65,12 @@ def test_terminal_child_is_advanced_once(monkeypatch) -> None:
         assert root is not None
         terminal_edges = [a for a, (kind, _v) in root.leaf_values.items() if kind == "terminal"]
         assert terminal_edges, "a pass with everyone else passed must end the game"
+        # which terminal edges the seeded random net revisits depends on its
+        # input width; the claim needs at least one revisited edge
+        assert any(root.visits[a] >= 2 for a in terminal_edges)
         for a in terminal_edges:
             assert root.children[a] is None
-            assert root.visits[a] >= 2  # re-selected...
-            # ...but the engine ran that edge exactly once
+            # however often it was selected, the engine ran that edge once
             assert calls.count((id(root.sim), root.offer[a])) == 1
         calls.clear()
 
