@@ -13,6 +13,7 @@ the corpus containment sweep predicts 0).
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 
 import numpy as np
@@ -42,6 +43,7 @@ class DecisionRecord:
     period: int  # months since year 0 -- defined for every game
     weight: float  # table-quality sample weight
     mover_faction_id: int
+    mover_mu: float  # the moving player's TrueSkill mu, NaN when unrated
 
 
 def _final_vps_by_faction(game_id: str, meta_df: pl.DataFrame) -> dict[str, int]:
@@ -98,6 +100,7 @@ def extract_game(
                 period=provenance.period,
                 weight=provenance.weight,
                 mover_faction_id=FACTION_INDEX[faction],
+                mover_mu=provenance.seat_mu.get(faction, math.nan),
             )
         )
 

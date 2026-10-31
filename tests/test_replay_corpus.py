@@ -265,7 +265,9 @@ def test_full_corpus_has_only_documented_exclusions() -> None:
         if game_id in KNOWN_ANOMALIES:
             anomaly_hits.add(game_id)
             continue
-        unexpected_failures.append(f"{game_id}: error={result.error} mismatches={result.mismatches}")
+        unexpected_failures.append(
+            f"{game_id}: error={result.error} mismatches={result.mismatches}"
+        )
 
     assert unexpected_failures == [], (
         f"{len(unexpected_failures)} undocumented failure(s):\n" + "\n".join(unexpected_failures)
@@ -277,3 +279,20 @@ def test_full_corpus_has_only_documented_exclusions() -> None:
     )
     assert nofaction_count == 10
     assert clean_count == len(game_ids) - nofaction_count - len(KNOWN_ANOMALIES)
+
+
+@pytest.mark.parametrize(
+    "game_id",
+    [
+        "4pLeague_S13_D6L17_G7",  # takes one of the two TE favors, declines the other
+        "4pLeague_S41_D6L11_G6",  # declines both
+    ],
+)
+def test_chaos_magicians_can_decline_temple_favors(
+    game_id: str, frames: tuple[pl.DataFrame, pl.DataFrame]
+) -> None:
+    """``lose_marker reason=GAIN_FAVOR`` gives up one untaken favor pick."""
+    moves_df, deltas_df = frames
+    result = replay_game(game_id, moves_df, deltas_df)
+    assert result.error is None
+    assert result.mismatches == ()

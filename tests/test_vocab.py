@@ -46,7 +46,7 @@ def test_color_normalization_handles_corpus_spelling() -> None:
 def test_faction_vocab_and_version() -> None:
     assert len(FACTION_NAMES) == 14
     assert all(FACTION_NAMES[FACTION_INDEX[f]] == f for f in FACTION_NAMES)
-    assert ENCODING_VERSION == 1
+    assert ENCODING_VERSION == 4
 
 
 def test_canonical_moves_is_public_and_sorted() -> None:

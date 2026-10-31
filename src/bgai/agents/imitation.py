@@ -22,7 +22,7 @@ from bgai.training.model import (
     PolicyValueNet,
     model_config_from_checkpoint,
 )
-from bgai.training.vocab import ENCODING_VERSION, FACTION_INDEX
+from bgai.training.vocab import FACTION_INDEX, require_checkpoint_encoding
 
 DEFAULT_TEMPERATURE = 0.0
 """Take the policy's argmax.
@@ -66,11 +66,7 @@ class ImitationAgent:
             if checkpoint_path is None:
                 raise ValueError("either checkpoint_path or net must be given")
             ckpt = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
-            if ckpt.get("encoding_version") != ENCODING_VERSION:
-                raise ValueError(
-                    f"checkpoint encoding v{ckpt.get('encoding_version')} != code "
-                    f"v{ENCODING_VERSION} -- retrain or check out the matching commit"
-                )
+            require_checkpoint_encoding(ckpt.get("encoding_version"))
             self.net = PolicyValueNet(model_config_from_checkpoint(ckpt))
             self.net.load_state_dict(ckpt["model"])
         self.net.to(self.device).eval()

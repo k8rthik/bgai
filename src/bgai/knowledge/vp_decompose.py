@@ -37,9 +37,9 @@ from bgai.arena.driver import SimState, advance, decision, new_game
 from bgai.data.ledger_parser import ParsedCommand
 from bgai.engine.tm.apply import EngineError
 from bgai.engine.tm.scoring import (
-    _apply_score_resources,
     compute_cult_scoring,
     compute_network_scoring,
+    resource_vp,
 )
 from bgai.engine.tm.setup import GameSetup
 from bgai.engine.tm.state import GameState, Phase
@@ -147,11 +147,10 @@ def _endgame_components(pre: GameState) -> dict[str, dict[str, int]]:
     network = compute_network_scoring(pre)
     out: dict[str, dict[str, int]] = {}
     for faction, fs in pre.factions.items():
-        converted = _apply_score_resources(fs, faction)
         out[faction] = {
             "endgame_cult": sum(cult[track].get(faction, 0) for track in cult),
             "endgame_network": network.get(faction, 0),
-            "endgame_resources": converted.vp - fs.vp,
+            "endgame_resources": resource_vp(fs, faction),
         }
     return out
 

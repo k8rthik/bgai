@@ -12,13 +12,29 @@ from bgai.engine.tm.board import base_board
 from bgai.engine.tm.factions_data import CULTS, FACTION_SPECIAL_ACTIONS, FACTIONS
 from bgai.engine.tm.tiles import BONUS_TILES, FAVOR_TILES, POWER_ACTIONS, TOWN_TILES
 
-ENCODING_VERSION = 1
+ENCODING_VERSION = 4
 
-SHARD_FORMAT = 2
+
+def require_checkpoint_encoding(version: object) -> None:
+    """Raise ``ValueError`` unless a checkpoint stamped with encoding
+    ``version`` can run under this code.
+
+    Datasets and shards must match ``ENCODING_VERSION`` exactly, but a
+    checkpoint may be older: encodings from v2 on only append to the
+    ``globals`` vector, and the net reads the prefix it was trained on
+    (``ModelConfig.global_dim``). Every future layout change must stay
+    append-only or tighten this check.
+    """
+    if not isinstance(version, int) or not 1 <= version <= ENCODING_VERSION:
+        raise ValueError(f"checkpoint encoding v{version} not loadable by code v{ENCODING_VERSION}")
+
+SHARD_FORMAT = 3
 """Shard *field layout*, versioned separately from the encoders. v2 added
 per-record ``period``/``weight`` so population games -- which carry no
-league season or division -- can be split and weighted. The loader refuses
-older shards rather than guessing their weights."""
+league season or division -- can be split and weighted. v3 added
+per-record ``mover_mu``, the moving player's TrueSkill mean, so training
+can keep strong players' decisions only. The loader refuses older shards
+rather than guessing the missing fields."""
 
 HEXES: tuple[str, ...] = tuple(sorted(base_board().hexes))
 HEX_INDEX: dict[str, int] = {h: i for i, h in enumerate(HEXES)}

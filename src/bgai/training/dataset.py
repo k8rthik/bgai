@@ -8,6 +8,7 @@ model uses to blank out padding before the softmax.
 from __future__ import annotations
 
 import json
+import math
 from collections import OrderedDict
 from collections.abc import Sequence
 from pathlib import Path
@@ -46,6 +47,9 @@ class ImitationDataset(Dataset):
         split: Split,
         max_cached_shards: int = DEFAULT_CACHED_SHARDS,
         weight_power: float = 1.0,
+        min_mover_mu: float | None = None,
+        mover_mu_center: float | None = None,
+        mover_mu_scale: float = 1.0,
     ) -> None:
         self.shard_dir = Path(shard_dir)
         if max_cached_shards < 1:
@@ -54,6 +58,10 @@ class ImitationDataset(Dataset):
         if weight_power <= 0:
             raise ValueError(f"weight_power must be > 0, got {weight_power}")
         self.weight_power = weight_power
+        if mover_mu_scale <= 0:
+            raise ValueError(f"mover_mu_scale must be > 0, got {mover_mu_scale}")
+        self.mover_mu_center = mover_mu_center
+        self.mover_mu_scale = mover_mu_scale
         manifest = json.loads((self.shard_dir / "manifest.json").read_text())
         if manifest["encoding_version"] != ENCODING_VERSION:
             raise ValueError(
@@ -63,8 +71,8 @@ class ImitationDataset(Dataset):
         if manifest.get("shard_format") != SHARD_FORMAT:
             raise ValueError(
                 f"shards are format v{manifest.get('shard_format', 1)}, code is "
-                f"v{SHARD_FORMAT} -- they predate per-record period/weight "
-                f"and cannot be split or weighted correctly; rebuild the dataset"
+                f"v{SHARD_FORMAT} -- they lack per-record fields the loader reads "
+                f"(period/weight from v2, mover_mu from v3); rebuild the dataset"
             )
         self.val_season_min = int(manifest["val_season_min"])
         self.val_period_min = int(manifest["val_period_min"])
@@ -78,13 +86,18 @@ class ImitationDataset(Dataset):
         for shard_index, path in enumerate(self._files):
             with np.load(path) as data:
                 seasons, periods = data["season"], data["period"]
+                mover_mu = data["mover_mu"] if min_mover_mu is not None else None
             # league games split on season exactly as they always did;
             # population games split on the date that boundary implies
             is_league = seasons != NO_SEASON
             is_val = np.where(
                 is_league, seasons >= self.val_season_min, periods >= self.val_period_min
             )
-            keep = np.flatnonzero(is_val if split == "val" else ~is_val)
+            mask = is_val if split == "val" else ~is_val
+            if mover_mu is not None:
+                # NaN (an unrated mover) compares False, so it is dropped
+                mask = mask & (mover_mu >= min_mover_mu)
+            keep = np.flatnonzero(mask)
             self.index.extend((shard_index, int(row)) for row in keep)
 
     def __len__(self) -> int:
@@ -121,9 +134,20 @@ class ImitationDataset(Dataset):
             "candidates": torch.from_numpy(shard["cand_flat"][start:end].astype(np.int64)),
             "chosen": int(shard["chosen"][row]),
             "value": torch.from_numpy(share),
-            "weight": float(shard["weight"][row]) ** self.weight_power,
+            "weight": float(shard["weight"][row]) ** self.weight_power * self._skill(shard, row),
             "faction": int(shard["mover_faction"][row]),
         }
+
+
+    def _skill(self, shard: dict[str, np.ndarray], row: int) -> float:
+        """Soft mover-skill weight ``sigmoid((mu - center) / scale)``; 1.0
+        when no center is set, 0.0 for an unrated mover."""
+        if self.mover_mu_center is None:
+            return 1.0
+        mu = float(shard["mover_mu"][row])
+        if np.isnan(mu):
+            return 0.0
+        return 1.0 / (1.0 + math.exp(-(mu - self.mover_mu_center) / self.mover_mu_scale))
 
 
 def collate(batch: Sequence[dict[str, Any]]) -> dict[str, torch.Tensor]:

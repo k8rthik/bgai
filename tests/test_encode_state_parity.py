@@ -1,15 +1,20 @@
-"""The batched-index state encoder must reproduce the original per-element
-encoder bit for bit -- the checkpoints were trained on the original layout,
-so any drift here silently changes what the net sees."""
+"""The state encoder's v1 prefix must reproduce the original per-element
+v1 encoder bit for bit, and its v2 and v3 prefixes the v2 and v3 encoders -- checkpoints
+trained on an older layout read exactly that prefix of every later
+encoding, so any drift here silently changes what they see."""
 
 from __future__ import annotations
 
+import functools
+import hashlib
 import random
 
 import numpy as np
+import polars as pl
 
 from bgai.arena.driver import advance, decision, new_game
 from bgai.arena.setups import load_setup
+from bgai.engine.tm.replay import replay_game
 from bgai.engine.tm.state import GameState
 from bgai.training import encode_state as es
 from bgai.training.encode_state import StateEncoding, encode_state
@@ -44,7 +49,7 @@ def _reference(state: GameState, faction: str) -> StateEncoding:
         if hx.owner is not None and hx.owner in seat_of:
             planes[row, len(COLORS) + 1 + len(BUILDINGS) + seat_of[hx.owner]] = 1
 
-    g = np.zeros(es.GLOBAL_DIM, dtype=np.int16)
+    g = np.zeros(es.GLOBAL_DIM_V1, dtype=np.int16)
     active = state.turn_order[state.active_index] if state.turn_order else None
     for seat, name in enumerate(order):
         fs = state.factions[name]
@@ -105,7 +110,73 @@ def test_encoder_matches_reference_along_a_random_game() -> None:
             assert got.hex_planes.dtype == want.hex_planes.dtype
             assert got.globals.dtype == want.globals.dtype
             assert np.array_equal(got.hex_planes, want.hex_planes)
-            assert np.array_equal(got.globals, want.globals)
+            assert np.array_equal(got.globals[: es.GLOBAL_DIM_V1], want.globals)
             checked += 1
         sim = advance(sim, rng.choice(offer), current=pending)
     assert checked > 400
+
+
+_CORPUS_GAMES = ("4pLeague_S10_D1L1_G1", "4pLeague_S12_D1L1_G1")
+
+
+@functools.cache
+def _replayed(game_id: str) -> tuple[GameState, ...]:
+    states: list[GameState] = []
+    result = replay_game(
+        game_id,
+        pl.read_parquet("data/datasets/moves.parquet"),
+        pl.read_parquet("data/datasets/deltas.parquet"),
+        on_decision=lambda s, f, c: states.append(s),
+    )
+    assert result.error is None
+    return tuple(states)
+
+
+def test_v1_prefix_matches_reference_on_replayed_corpus_games() -> None:
+    checked = 0
+    for game_id in _CORPUS_GAMES:
+        for state in _replayed(game_id)[::7]:
+            for mover in state.setup.factions:
+                got = encode_state(state, mover)
+                want = _reference(state, mover)
+                assert got.globals.shape == (es.GLOBAL_DIM,)
+                assert got.globals[: es.GLOBAL_DIM_V1].tobytes() == want.globals.tobytes()
+                assert got.hex_planes.tobytes() == want.hex_planes.tobytes()
+                checked += 1
+    assert checked > 150
+
+
+# sha256 over the v2 globals of every 5th decision state, each seat as the
+# mover, written by the v2 encoder (commit 8302164) before v3 existed.
+_V2_DIGESTS = {
+    "4pLeague_S10_D1L1_G1": "aa7fe1f0f03e6d74adc1178118f68fe418d6274db92fe36481a056a250625885",
+    "4pLeague_S12_D1L1_G1": "3ab779514eac7c51f9b5dbcfecf54e0e3b4f96db024e08f6c24b039d6c02c76d",
+}
+
+
+def test_v2_prefix_matches_the_v2_encoder_on_replayed_corpus_games() -> None:
+    assert es.GLOBAL_DIM_V2 == 382
+    for game_id in _CORPUS_GAMES:
+        digest = hashlib.sha256()
+        for state in _replayed(game_id)[::5]:
+            for mover in state.setup.factions:
+                digest.update(encode_state(state, mover).globals[: es.GLOBAL_DIM_V2].tobytes())
+        assert digest.hexdigest() == _V2_DIGESTS[game_id]
+
+
+# The same digest over the v3 globals, written by the v3 encoder (commit
+# 58fb572) before v4 existed.
+_V3_DIGESTS = {
+    "4pLeague_S10_D1L1_G1": "5885b392fb57e298c606447d2ca7ffa571c1330514f0689c3eb5dc4a4d29cb6d",
+    "4pLeague_S12_D1L1_G1": "a5d8fd4562dd948fc502a9a9c4b83b3c47481aa96c443091f1338fe6d8148f5a",
+}
+
+
+def test_v3_prefix_matches_the_v3_encoder_on_replayed_corpus_games() -> None:
+    assert es.GLOBAL_DIM_V3 == 496
+    for game_id in _CORPUS_GAMES:
+        digest = hashlib.sha256()
+        for state in _replayed(game_id)[::5]:
+            for mover in state.setup.factions:
+                digest.update(encode_state(state, mover).globals[: es.GLOBAL_DIM_V3].tobytes())
+        assert digest.hexdigest() == _V3_DIGESTS[game_id]

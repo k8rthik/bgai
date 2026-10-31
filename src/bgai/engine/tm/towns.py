@@ -145,6 +145,19 @@ def _overlaps_founded(cluster: frozenset[str], founded: tuple[frozenset[str], ..
     return any(cluster & prior for prior in founded)
 
 
+def open_town_clusters(state: GameState, faction: str) -> tuple[frozenset[str], ...]:
+    """``faction``'s plain clusters that are not (part of) a founded town --
+    the clusters a town could still come from. Mermaids' river-skip
+    connections are not included."""
+    founded = state.founded_towns.get(faction, ())
+    return tuple(c for c in clusters(state, faction) if not _overlaps_founded(c, founded))
+
+
+def open_clusters(state: GameState, faction: str) -> tuple[tuple[int, int], ...]:
+    """``(power, structures)`` of each of ``open_town_clusters``, in order."""
+    return tuple(_cluster_power_and_count(state, c) for c in open_town_clusters(state, faction))
+
+
 def _plain_candidates(state: GameState, faction: str) -> tuple[frozenset[str], ...]:
     """towns.pm ``detect_towns_from``: plain direct-adjacency (+bridge) clusters."""
     if not _town_tiles_available(state):

@@ -40,7 +40,7 @@ from bgai.engine.tm.state_key import game_key
 from bgai.training.encode_move import MOVE_FIELDS, encode_move
 from bgai.training.encode_state import encode_state
 from bgai.training.model import PolicyValueNet, model_config_from_checkpoint
-from bgai.training.vocab import ENCODING_VERSION, FACTION_INDEX
+from bgai.training.vocab import FACTION_INDEX, require_checkpoint_encoding
 
 
 @dataclass
@@ -75,6 +75,7 @@ class _Node:
     own_value: np.ndarray | None = None  # view: action_value[:, seat]
     priors_list: list[float] | None = None
     allowed_list: list[int] | None = None  # ``allowed`` sorted ascending
+    noised: bool = False  # root priors already mixed with Dirichlet noise
 
     def __post_init__(self) -> None:
         n = len(self.offer)
@@ -135,6 +136,10 @@ class MCTSAgent:
         late_sims: int = 0,
         root_choice: str = "visits",
         town_shaping: float = 0.0,
+        root_noise: float = 0.0,
+        root_alpha: float = 0.3,
+        root_top_k: int = -1,
+        vp_weight: float = 0.0,
         evaluator=None,
         eval_table: int = 0,
     ) -> None:
@@ -147,6 +152,23 @@ class MCTSAgent:
         self.town_shaping = town_shaping
         """Strength of the town-progress bonus on non-terminal leaf values
         (``town_shaping.shape``); 0.0 leaves the learned value untouched."""
+        self.root_noise = root_noise
+        self.root_alpha = root_alpha
+        """AlphaZero root exploration: the root's priors become
+        ``(1-root_noise)*priors + root_noise*Dirichlet(root_alpha)``.
+        0.0 (the default, and what arena play uses) leaves them untouched.
+        Self-play without it can only re-rank moves the net already
+        likes, since ``top_k`` hides the rest from the search."""
+        self.root_top_k = root_top_k
+        """Prior pruning at the root only: -1 follows ``top_k``, 0 opens
+        every legal move, k > 0 keeps the k highest (noised) priors."""
+        self._noise_rng = np.random.default_rng()
+        self.vp_weight = vp_weight
+        """Each seat's objective becomes ``share + vp_weight * VP/150``:
+        exact at terminal leaves, the aux head's final-VP prediction
+        elsewhere. 0.0 is the pure VP-share objective. Share alone is
+        indifferent to the size of the economy everyone builds; the
+        absolute term rewards building one."""
         self.leaf_batch = leaf_batch
         """Leaves evaluated per forward pass. 0/1 keeps the sequential
         path exactly. Higher batches amortise the network call that
@@ -201,6 +223,8 @@ class MCTSAgent:
         ~85 us and the misses' key/table/GC cost exceeds that
         (docs/decisions.md C18); the arithmetic flips with a bigger net."""
         self.device = torch.device(device)
+        if vp_weight > 0 and evaluator is not None:
+            raise ValueError("vp_weight needs a local net with an aux head")
         if evaluator is not None:
             self.net = None  # type: ignore[assignment]
             return
@@ -210,14 +234,12 @@ class MCTSAgent:
             if checkpoint_path is None:
                 raise ValueError("either checkpoint_path or net must be given")
             ckpt = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
-            if ckpt.get("encoding_version") != ENCODING_VERSION:
-                raise ValueError(
-                    f"checkpoint encoding v{ckpt.get('encoding_version')} != code "
-                    f"v{ENCODING_VERSION}"
-                )
+            require_checkpoint_encoding(ckpt.get("encoding_version"))
             self.net = PolicyValueNet(model_config_from_checkpoint(ckpt))
             self.net.load_state_dict(ckpt["model"])
         self.net.to(self.device).eval()
+        if vp_weight > 0 and not self.net.cfg.aux_head:
+            raise ValueError("vp_weight needs a net trained with aux_head")
 
     # -- net access -------------------------------------------------------
 
@@ -237,7 +259,7 @@ class MCTSAgent:
                 return hit
         enc = encode_state(game, faction)
         cand = np.stack([encode_move(m, game, faction) for m in offer])
-        logits, value = self.net(
+        logits, value = self._forward(
             torch.from_numpy(enc.hex_planes.astype(np.float32))[None].to(self.device),
             torch.from_numpy(enc.globals.astype(np.float32))[None].to(self.device),
             torch.tensor([FACTION_INDEX[faction]], device=self.device),
@@ -251,6 +273,12 @@ class MCTSAgent:
         if key is not None:
             self._remember(key, offer, result)
         return result
+
+    def _forward(self, *inputs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.vp_weight <= 0:
+            return self.net(*inputs)
+        logits, value, aux = self.net.forward_with_aux(*inputs)
+        return logits, value + self.vp_weight * aux[..., :4]
 
     def _lookup(
         self, key: tuple, offer: tuple[ParsedCommand, ...]
@@ -333,7 +361,7 @@ class MCTSAgent:
                 (np.array(priors[i, : len(items[i][2])]), np.array(values[i]))
                 for i in range(n)
             ]
-        logits, value = self.net(
+        logits, value = self._forward(
             torch.from_numpy(np.stack(hex_planes)).to(self.device),
             torch.from_numpy(np.stack(globals_)).to(self.device),
             torch.tensor(factions, device=self.device),
@@ -394,7 +422,8 @@ class MCTSAgent:
         seats = sim.game.setup.factions
         vps = np.array([sim.game.factions[f].vp for f in seats], dtype=np.float32)
         total = float(vps.sum())
-        return vps / total if total > 0 else np.full(len(seats), 0.25, dtype=np.float32)
+        shares = vps / total if total > 0 else np.full(len(seats), 0.25, dtype=np.float32)
+        return (shares + self.vp_weight * vps / 150.0).astype(np.float32)
 
     def _rebase(
         self,
@@ -436,11 +465,12 @@ class MCTSAgent:
         is good enough to put the right move in that set: top1 is 58% and
         top3 84%.
         """
+        if node.allowed is not None:  # cached, or set at the root by _explore_root
+            return node.allowed
         if not self.top_k or len(node.offer) <= self.top_k:
             return None
-        if node.allowed is None:
-            node.allowed = np.argsort(-node.priors)[: self.top_k]
-            node.allowed_list = sorted(node.allowed.tolist())
+        node.allowed = np.argsort(-node.priors)[: self.top_k]
+        node.allowed_list = sorted(node.allowed.tolist())
         return node.allowed
 
     def _select(self, node: _Node) -> int:
@@ -689,8 +719,7 @@ class MCTSAgent:
             raise ValueError("reload needs a local net; evaluator-backed agents have none")
         ckpt = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
         version = ckpt.get("encoding_version") if isinstance(ckpt, dict) else None
-        if version != ENCODING_VERSION:
-            raise ValueError(f"checkpoint encoding v{version} != code v{ENCODING_VERSION}")
+        require_checkpoint_encoding(version)
         cfg = model_config_from_checkpoint(ckpt)
         if cfg != self.net.cfg:
             raise ValueError(f"checkpoint architecture {cfg} != agent net {self.net.cfg}")
@@ -748,6 +777,7 @@ class MCTSAgent:
             root, _ = self._expand(sim)
         if root is None:
             return None
+        self._explore_root(root)
         budget = (
             self.late_sims
             if self.late_sims and sim.game.round >= 5
@@ -765,6 +795,20 @@ class MCTSAgent:
                 self._simulate(root)
         self._reuse_root = root
         return root
+
+    def _explore_root(self, root: _Node) -> None:
+        if self.root_noise > 0 and not root.noised:
+            noise = self._noise_rng.dirichlet([self.root_alpha] * len(root.offer))
+            root.priors = (
+                (1 - self.root_noise) * np.asarray(root.priors) + self.root_noise * noise
+            ).astype(np.float32)
+            root.priors_list = root.priors.tolist()
+            root.noised = True
+            root.allowed = root.allowed_list = None  # re-rank on the noised priors
+        if self.root_top_k >= 0:
+            k = self.root_top_k or len(root.offer)
+            root.allowed = np.argsort(-np.asarray(root.priors))[:k]
+            root.allowed_list = sorted(root.allowed.tolist())
 
     def choose_sim(
         self, sim: SimState, faction: str, offer: tuple[ParsedCommand, ...], rng: random.Random

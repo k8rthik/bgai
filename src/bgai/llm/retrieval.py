@@ -76,7 +76,9 @@ class PositionIndex:
         factions play differently enough that a Darklings precedent is
         poor advice for Swarmlings.
         """
-        vector = (encode_state(state, faction).globals - self.mean) / self.scale
+        # an index built from older shards holds a prefix of today's encoding
+        width = self.mean.shape[0]
+        vector = (encode_state(state, faction).globals[:width] - self.mean) / self.scale
         mask = np.ones(len(self.matrix), dtype=bool)
         if same_faction:
             mask = self.factions == FACTION_NAMES.index(faction)
