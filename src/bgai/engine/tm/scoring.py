@@ -230,6 +230,7 @@ from bgai.data.ledger_parser import ParsedCommand
 from bgai.engine.tm.apply import EngineError, register_handler
 from bgai.engine.tm.connectivity import clusters
 from bgai.engine.tm.factions_data import BASE_EXCHANGE_RATES, CULTS, FACTIONS
+from bgai.engine.tm.power import Power
 from bgai.engine.tm.state import FactionState, GameState, Phase, with_faction
 
 _CULT_POINTS: tuple[int, ...] = (8, 4, 2)
@@ -283,10 +284,15 @@ def network_size(state: GameState, faction: str) -> int:
     return max((len(c) for c in components), default=0)
 
 
+def network_awards(sizes: Mapping[str, int]) -> dict[str, int]:
+    """``{faction: vp}`` for final network scoring given every faction's
+    ``network_size``, 18/12/6 points."""
+    return _score_type_rankings(sizes, _NETWORK_POINTS)
+
+
 def compute_network_scoring(state: GameState) -> dict[str, int]:
     """``{faction: vp}`` for final network scoring, 18/12/6 points."""
-    levels = {faction: network_size(state, faction) for faction in state.factions}
-    return _score_type_rankings(levels, _NETWORK_POINTS)
+    return network_awards({faction: network_size(state, faction) for faction in state.factions})
 
 
 def _exchange_rate_c_to_vp(faction: str) -> int:
@@ -294,10 +300,11 @@ def _exchange_rate_c_to_vp(faction: str) -> int:
     return overrides.get("C", {}).get("VP", BASE_EXCHANGE_RATES["C"]["VP"])
 
 
-def _apply_score_resources(fs: FactionState, faction: str) -> FactionState:
+def _resource_conversion(fs: FactionState, faction: str) -> tuple[Power, int, int]:
     """Port of ``scoring.pm`` ``score_final_resources_for_faction`` (module
     docstring): burn floor(bowl2/2), convert all resulting bowl3/priests/
     workers to coins 1:1, then convert floor(coins/rate) coins to VP.
+    Returns the power and coins left over and the VP gained.
     """
     power = fs.power
     burn_n = power.bowl2 // 2
@@ -313,9 +320,18 @@ def _apply_score_resources(fs: FactionState, faction: str) -> FactionState:
 
     rate = _exchange_rate_c_to_vp(faction)
     vp_gained = coins // rate
-    coins -= vp_gained * rate
+    return power, coins - vp_gained * rate, vp_gained
 
+
+def _apply_score_resources(fs: FactionState, faction: str) -> FactionState:
+    """``fs`` after the final leftover-resource conversion."""
+    power, coins, vp_gained = _resource_conversion(fs, faction)
     return replace(fs, power=power, coins=coins, priests=0, workers=0, vp=fs.vp + vp_gained)
+
+
+def resource_vp(fs: FactionState, faction: str) -> int:
+    """VP that final scoring's leftover-resource conversion would add to ``fs``."""
+    return _resource_conversion(fs, faction)[2]
 
 
 def projected_vp(state: GameState) -> dict[str, int]:
@@ -342,8 +358,7 @@ def projected_vp(state: GameState) -> dict[str, int]:
         vp = fs.vp
         vp += sum(cult_scores[cult].get(faction, 0) for cult in CULTS)
         vp += network_scores.get(faction, 0)
-        converted = _apply_score_resources(fs, faction)
-        vp += converted.vp - fs.vp
+        vp += resource_vp(fs, faction)
         projected[faction] = vp
     return projected
 

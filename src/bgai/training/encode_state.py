@@ -1,4 +1,4 @@
-"""State -> numpy encoding, v2 (plan Task 3; bump ``ENCODING_VERSION`` on
+"""State -> numpy encoding, v3 (plan Task 3; bump ``ENCODING_VERSION`` on
 any layout change, and only ever append to ``globals``: a net trained on an
 older encoding reads its prefix, ``ModelConfig.global_dim``).
 
@@ -28,7 +28,18 @@ Layout (verified by tests/test_encode_state.py):
   SA (5) | unbuilt reachable land hexes at 0, 1, 2, 3 spades from home
   terrain (4)
   then town tiles left per tile id (8, sorted) | favor tiles left per
-  tile id (12, sorted).
+  tile id (12, sorted)
+  -- that is the whole v2 vector, ``GLOBAL_DIM_V2`` = 382 entries. v3
+  appends the scoring block:
+  4 scoring seat blocks of SCORE_SEAT_BLOCK (15) each, same seat order:
+  network size, end-game network VP, cult-majority VP over the 4 tracks,
+  leftover-resource VP (4) | rank on each cult track (4) | steps to the
+  next power-granting cult space on each track (4) | own dwellings next
+  to an opponent structure, leech power offered to this seat, leech
+  power this seat offers the others (3)
+  then each round's score tile id one-hot (6 x 9, SCORE1..SCORE9): the
+  v1 cult/req pair cannot tell SCORE3 (D >> 2, 4 WATER -> P) from
+  SCORE6 (TP >> 3, 4 WATER -> spade).
 
 Economy semantics:
 - income is ``income.faction_income`` summed over its base, building,
@@ -44,23 +55,49 @@ Economy semantics:
   the faction's home terrain for every faction, including Giants (who
   pay 2 spades for any transform) and Fakirs/Dwarves (whose reach counts
   carpet/tunnel range via ``connectivity.reachable``).
+
+Scoring semantics (v3):
+- the first four entries are ``scoring.projected_vp``'s parts if the
+  game ended now: ``network_size`` (shipping, tunnelling, carpet and the
+  Mermaids river skip count), its 18/12/6 award against every seat's
+  current size, the 8/4/2 cult awards with the engine's tie split, and
+  ``resource_vp``. ``projected_vp`` = VP (v1 seat block) + these three
+  awards.
+- cult rank counts the other seats at the same or a higher position, so
+  0 is alone in first and a tie ranks every tied seat below the top
+  (the engine splits tied awards and breaks no ties).
+- cult steps is the smallest number of steps ``cults.advance`` would
+  turn into power from here: 3/5/7 always, 10 only while the 10 space is
+  unclaimed and the seat holds an unspent key. 0 when no step can pay.
+- contact follows leech's geometry (``connectivity.directly_adjacent``,
+  bridges included; structure power D 1, TP/TE 2, SH/SA 3; an opponent
+  structure is any building of another colour). A dwelling next to one
+  upgrades to a trading post at the undoubled price. Offered-to-seat sums,
+  over every opponent structure, this seat's adjacent structure power --
+  what it would be offered if each of them were upgraded once.
+  Offered-by-seat is the mirror over this seat's structures. Neither is
+  capped by bowls or gated on the round, unlike a live leech offer.
 """
 
 from __future__ import annotations
 
+import functools
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from operator import is_
 
 import numpy as np
 
-from bgai.engine.tm.connectivity import reachable
+from bgai.engine.tm.connectivity import directly_adjacent, effective_shipping, reachable
+from bgai.engine.tm.cults import advance
 from bgai.engine.tm.factions_data import FACTIONS
 from bgai.engine.tm.income import faction_income
 from bgai.engine.tm.memo import state_memo
+from bgai.engine.tm.scoring import compute_cult_scoring, network_awards, network_size, resource_vp
 from bgai.engine.tm.state import GameState, HexState, Phase
 from bgai.engine.tm.terraform import spade_distance
-from bgai.engine.tm.tiles import BONUS_TILES, FAVOR_TILES, TOWN_TILES
-from bgai.engine.tm.towns import _town_threshold, open_clusters
+from bgai.engine.tm.tiles import BONUS_TILES, FAVOR_TILES, SCORE_TILES, TOWN_TILES, ScoringTile
+from bgai.engine.tm.towns import _town_threshold, building_power_value, open_clusters
 from bgai.training.vocab import (
     BUILDING_INDEX,
     BUILDINGS,
@@ -125,7 +162,28 @@ ECON_SEAT_BLOCK = _ECON_TARGETS + _MAX_SPADES + 1  # 17
 _ECON_BASE = GLOBAL_DIM_V1
 _CTX_TOWN_POOL = _ECON_BASE + 4 * ECON_SEAT_BLOCK
 _CTX_FAVOR_POOL = _CTX_TOWN_POOL + len(_TOWN_IDS)
-GLOBAL_DIM = _CTX_FAVOR_POOL + len(_FAV_IDS)
+GLOBAL_DIM_V2 = _CTX_FAVOR_POOL + len(_FAV_IDS)
+"""Width of the v2 globals vector (v1 plus the economy block)."""
+
+_SCORE_PROJECTION = 0  # network size, network VP, cult VP, resource VP
+_SCORE_CULT_RANK = _SCORE_PROJECTION + 4
+_SCORE_CULT_STEPS = _SCORE_CULT_RANK + len(CULTS4)
+_SCORE_CONTACT = _SCORE_CULT_STEPS + len(CULTS4)
+SCORE_SEAT_BLOCK = _SCORE_CONTACT + 3  # 15
+
+_SCORE_BASE = GLOBAL_DIM_V2
+_CTX_SCORE_IDS = _SCORE_BASE + 4 * SCORE_SEAT_BLOCK
+GLOBAL_DIM = _CTX_SCORE_IDS + 6 * len(SCORE_TILES)
+
+
+def _score_tile_key(tile: ScoringTile) -> tuple:
+    # the rules a tile carries; display strings vary with where it was parsed
+    return (tile.cult, tile.req, tile.vp_mode, tile.vp, tile.cult_income)
+
+
+_SCORE_TILE_INDEX = {
+    _score_tile_key(SCORE_TILES[name]): i for i, name in enumerate(sorted(SCORE_TILES))
+}
 
 _INT16 = np.iinfo(np.int16)
 
@@ -204,7 +262,56 @@ def _expansion_targets(state: GameState, name: str) -> list[int]:
     return buckets
 
 
-class _IdentityCache:
+def _contact(state: GameState) -> dict[str, list[int]]:
+    """Per faction: [own dwellings next to an opponent structure, leech
+    power offered to it, leech power it offers] (module docstring)."""
+    out: dict[str, list[int]] = {}
+    for name, fs in state.factions.items():
+        color = FACTIONS[name].color
+        touching = offered_to = offered_by = 0
+        for building, hexes in fs.buildings.items():
+            power = building_power_value(building)
+            for hex_key in hexes:
+                rivals = [
+                    building_power_value(hx.building)
+                    for hx in (state.hexes[n] for n in directly_adjacent(state, hex_key))
+                    if hx.building is not None and hx.color != color
+                ]
+                if building == "D" and rivals:
+                    touching += 1
+                offered_to += power * len(rivals)
+                offered_by += sum(rivals)
+        out[name] = [touching, offered_to, offered_by]
+    return out
+
+
+def _next_power_step(position: int, keys: int, track_open: bool) -> int:
+    for steps in range(1, 11 - position):
+        if advance(position, steps, keys, track_open).power_gained:
+            return steps
+    return 0
+
+
+def _cult_standing(state: GameState) -> dict[str, list[int]]:
+    """Per faction: [cult-majority VP now, rank per track (4), steps to the
+    next power-granting space per track (4)] (module docstring)."""
+    awards = compute_cult_scoring(state)
+    out: dict[str, list[int]] = {}
+    for name, fs in state.factions.items():
+        mine = state.cults[name]
+        vp = sum(awards[cult].get(name, 0) for cult in CULTS4)
+        ranks = [
+            sum(state.cults[other][cult] >= mine[cult] for other in state.factions if other != name)
+            for cult in CULTS4
+        ]
+        steps = [
+            _next_power_step(mine[cult], fs.keys, state.cult_10[cult] is None) for cult in CULTS4
+        ]
+        out[name] = [vp, *ranks, *steps]
+    return out
+
+
+class _IdentityCache[V]:
     """Values keyed on the identity of immutable engine objects plus
     hashable scalars. Engine objects are never mutated after construction
     (see ``engine.tm.memo``) and each entry pins the objects it keys on, so
@@ -212,14 +319,12 @@ class _IdentityCache:
 
     def __init__(self, maxsize: int) -> None:
         self.maxsize = maxsize
-        self._table: dict[tuple, tuple[tuple[object, ...], list[int]]] = {}
+        self._table: dict[tuple, tuple[tuple[object, ...], V]] = {}
 
-    def get(
-        self, objs: tuple[object, ...], scalars: tuple, compute: Callable[[], list[int]]
-    ) -> list[int]:
+    def get(self, objs: tuple[object, ...], scalars: tuple, compute: Callable[[], V]) -> V:
         key = (*map(id, objs), *scalars)
         hit = self._table.get(key)
-        if hit is not None and all(a is b for a, b in zip(hit[0], objs, strict=True)):
+        if hit is not None and all(map(is_, hit[0], objs)):
             return hit[1]
         value = compute()
         if len(self._table) >= self.maxsize:
@@ -236,8 +341,15 @@ class _IdentityCache:
 # leaf shares with its parent for every seat (and every part) its move did
 # not touch: a convert or a pass leaves the mover's buildings, and so its
 # holdings, untouched; only a build changes ``hexes`` and the targets.
-_holdings_cache = _IdentityCache(8192)
-_targets_cache = _IdentityCache(8192)
+_holdings_cache: _IdentityCache[list[int]] = _IdentityCache(8192)
+_targets_cache: _IdentityCache[list[int]] = _IdentityCache(8192)
+_network_cache: _IdentityCache[int] = _IdentityCache(8192)
+_resource_cache: _IdentityCache[int] = _IdentityCache(8192)
+_cult_cache: _IdentityCache[dict[str, list[int]]] = _IdentityCache(2048)
+_contact_cache: _IdentityCache[dict[str, list[int]]] = _IdentityCache(2048)
+_CACHES = (
+    _holdings_cache, _targets_cache, _network_cache, _resource_cache, _cult_cache, _contact_cache
+)
 
 
 def _seat_economy(state: GameState, name: str) -> list[int]:
@@ -256,19 +368,58 @@ def _seat_economy(state: GameState, name: str) -> list[int]:
     return holdings + targets
 
 
+def _seat_network_size(state: GameState, name: str) -> int:
+    fs = state.factions[name]
+    return _network_cache.get(
+        (fs.buildings, state.bridges),
+        (name, effective_shipping(state, name), fs.teleport_level),
+        lambda: network_size(state, name),
+    )
+
+
+@functools.lru_cache(maxsize=4096)
+def _network_awards(sizes: tuple[tuple[str, int], ...]) -> dict[str, int]:
+    return network_awards(dict(sizes))
+
+
+def _seat_resource_vp(state: GameState, name: str) -> int:
+    # keyed on what the conversion reads, not on ``fs``, which every move
+    # of this seat replaces
+    fs = state.factions[name]
+    return _resource_cache.get(
+        (fs.power,), (name, fs.coins, fs.workers, fs.priests), lambda: resource_vp(fs, name)
+    )
+
+
 def clear_caches() -> None:
-    """Drop the economy memo tables (benchmarks and tests)."""
-    _holdings_cache.clear()
-    _targets_cache.clear()
+    """Drop the economy and scoring memo tables (benchmarks and tests)."""
+    for cache in _CACHES:
+        cache.clear()
+    _network_awards.cache_clear()
 
 
-def _economy(state: GameState, order: tuple[str, ...]) -> np.ndarray:
+def _economy(state: GameState, order: tuple[str, ...]) -> list[int]:
     values: list[int] = []
     for name in order:
         values += _seat_economy(state, name)
     values += [state.towns_pool.get(t, 0) for t in _TOWN_IDS]
     values += [state.favors_pool.get(t, 0) for t in _FAV_IDS]
-    return np.clip(values, _INT16.min, _INT16.max)
+    return values
+
+
+def _scoring(state: GameState, order: tuple[str, ...]) -> list[int]:
+    sizes = {name: _seat_network_size(state, name) for name in state.factions}
+    network_vp = _network_awards(tuple(sizes.items()))
+    keys = tuple(fs.keys for fs in state.factions.values())
+    cults = _cult_cache.get((state.cults, state.cult_10), keys, lambda: _cult_standing(state))
+    contact = _contact_cache.get((state.hexes, state.bridges), (), lambda: _contact(state))
+    values: list[int] = []
+    for name in order:
+        cult_vp, *standing = cults[name]
+        values += [sizes[name], network_vp.get(name, 0), cult_vp, _seat_resource_vp(state, name)]
+        values += standing
+        values += contact[name]
+    return values
 
 
 def encode_state(state: GameState, faction: str) -> StateEncoding:
@@ -320,6 +471,9 @@ def encode_state(state: GameState, faction: str) -> StateEncoding:
         if act.startswith("ACT") and act[3:].isdigit():
             g[_CTX_ACTS + int(act[3:]) - 1] = 1
     g[_CTX_PENDING] = len(state.pending)
-    g[_ECON_BASE:] = _economy(state, order)
+    derived = _economy(state, order) + _scoring(state, order)
+    g[_ECON_BASE:_CTX_SCORE_IDS] = np.clip(derived, _INT16.min, _INT16.max)
+    for r, tile in enumerate(state.setup.score_tiles):
+        g[_CTX_SCORE_IDS + r * len(SCORE_TILES) + _SCORE_TILE_INDEX[_score_tile_key(tile)]] = 1
 
     return StateEncoding(hex_planes=planes, globals=g)
