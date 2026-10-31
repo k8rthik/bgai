@@ -80,6 +80,13 @@ class TrainConfig:
     """Train only on decisions whose mover's TrueSkill mu is at least this
     (unrated movers dropped). None keeps every record. Validation stays
     unfiltered so val loss is comparable across cuts."""
+    mover_mu_center: float | None = None
+    mover_mu_scale: float = 1.0
+    """Soft alternative to ``min_mover_mu``: every record's policy weight
+    is multiplied by ``sigmoid((mu - center) / scale)``. A hard cut at
+    mu 28 kept ~13% of the data and lost 5.8 VP to the cut at 26
+    (overfitting); weighting keeps all of it while leaning toward
+    strong movers. None leaves weights unchanged."""
     rank_weight: float = 0.0
     """Weight on the pairwise ranking term over the value vector. MSE
     optimises the share's magnitude; MCTS only uses the ordering, and the
@@ -226,6 +233,7 @@ def train(cfg: TrainConfig) -> dict[str, float]:
     train_ds = ImitationDataset(
         cfg.shards, "train", max_cached_shards=cfg.shards_per_block + 2,
         weight_power=cfg.weight_power, min_mover_mu=cfg.min_mover_mu,
+        mover_mu_center=cfg.mover_mu_center, mover_mu_scale=cfg.mover_mu_scale,
     )
     val_ds = ImitationDataset(cfg.shards, "val", max_cached_shards=cfg.shards_per_block + 2)
     # block sampling rather than a global shuffle: see sampler module --
@@ -410,6 +418,9 @@ def main(argv: list[str] | None = None) -> None:
         "--min-mover-mu", type=float, default=None,
         help="train only on movers rated at least this TrueSkill mu",
     )
+    parser.add_argument("--mover-mu-center", type=float, default=None,
+                        help="weight each record by sigmoid((mover mu - center) / scale)")
+    parser.add_argument("--mover-mu-scale", type=float, default=1.0)
     parser.add_argument("--value-simplex", action="store_true")
     parser.add_argument("--lr-schedule", choices=LR_SCHEDULES, default="constant")
     parser.add_argument("--warmup-steps", type=int, default=2000)
@@ -434,6 +445,8 @@ def main(argv: list[str] | None = None) -> None:
             rank_weight=args.rank_weight,
             weight_power=args.weight_power,
             min_mover_mu=args.min_mover_mu,
+            mover_mu_center=args.mover_mu_center,
+            mover_mu_scale=args.mover_mu_scale,
             value_simplex=args.value_simplex,
             arch=parse_arch(args.arch),
             lr_schedule=args.lr_schedule,

@@ -8,6 +8,7 @@ model uses to blank out padding before the softmax.
 from __future__ import annotations
 
 import json
+import math
 from collections import OrderedDict
 from collections.abc import Sequence
 from pathlib import Path
@@ -47,6 +48,8 @@ class ImitationDataset(Dataset):
         max_cached_shards: int = DEFAULT_CACHED_SHARDS,
         weight_power: float = 1.0,
         min_mover_mu: float | None = None,
+        mover_mu_center: float | None = None,
+        mover_mu_scale: float = 1.0,
     ) -> None:
         self.shard_dir = Path(shard_dir)
         if max_cached_shards < 1:
@@ -55,6 +58,10 @@ class ImitationDataset(Dataset):
         if weight_power <= 0:
             raise ValueError(f"weight_power must be > 0, got {weight_power}")
         self.weight_power = weight_power
+        if mover_mu_scale <= 0:
+            raise ValueError(f"mover_mu_scale must be > 0, got {mover_mu_scale}")
+        self.mover_mu_center = mover_mu_center
+        self.mover_mu_scale = mover_mu_scale
         manifest = json.loads((self.shard_dir / "manifest.json").read_text())
         if manifest["encoding_version"] != ENCODING_VERSION:
             raise ValueError(
@@ -127,9 +134,20 @@ class ImitationDataset(Dataset):
             "candidates": torch.from_numpy(shard["cand_flat"][start:end].astype(np.int64)),
             "chosen": int(shard["chosen"][row]),
             "value": torch.from_numpy(share),
-            "weight": float(shard["weight"][row]) ** self.weight_power,
+            "weight": float(shard["weight"][row]) ** self.weight_power * self._skill(shard, row),
             "faction": int(shard["mover_faction"][row]),
         }
+
+
+    def _skill(self, shard: dict[str, np.ndarray], row: int) -> float:
+        """Soft mover-skill weight ``sigmoid((mu - center) / scale)``; 1.0
+        when no center is set, 0.0 for an unrated mover."""
+        if self.mover_mu_center is None:
+            return 1.0
+        mu = float(shard["mover_mu"][row])
+        if np.isnan(mu):
+            return 0.0
+        return 1.0 / (1.0 + math.exp(-(mu - self.mover_mu_center) / self.mover_mu_scale))
 
 
 def collate(batch: Sequence[dict[str, Any]]) -> dict[str, torch.Tensor]:

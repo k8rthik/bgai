@@ -95,3 +95,20 @@ def test_parts_merge_into_the_full_build(tmp_path: Path, monkeypatch) -> None:
     for shard in want["shards"]:
         a, b = np.load(full / shard["file"]), np.load(parted / shard["file"])
         assert all(np.array_equal(a[k], b[k], equal_nan=k == "mover_mu") for k in a.files)
+
+
+def test_mover_mu_center_weights_stronger_movers_more(tmp_path) -> None:
+    import math
+
+    from bgai.training.dataset import ImitationDataset
+
+    build(tmp_path, limit=4)
+    plain = ImitationDataset(tmp_path, "train")
+    soft = ImitationDataset(tmp_path, "train", mover_mu_center=28.0, mover_mu_scale=1.5)
+    assert soft.index == plain.index  # soft weighting drops nothing
+    manifest = json.loads((tmp_path / "manifest.json").read_text())
+    mus = [np.load(tmp_path / s["file"])["mover_mu"] for s in manifest["shards"]]
+    for i in range(0, len(plain), max(1, len(plain) // 25)):
+        s, r = plain.index[i]
+        expected = plain[i]["weight"] / (1 + math.exp(-(float(mus[s][r]) - 28.0) / 1.5))
+        assert abs(soft[i]["weight"] - expected) < 1e-6
