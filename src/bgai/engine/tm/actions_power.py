@@ -204,6 +204,10 @@ _MARKER_GAIN_KIND: dict[str, str] = {
     "FREE_TF": "free_tf",
 }
 
+# Markers the ledger only ever removes (``lose_marker``), never grants as
+# an action reward.
+_LOSE_ONLY_MARKER_KIND: dict[str, str] = {"GAIN_FAVOR": "gain_favor"}
+
 # Gain keys that are documented no-ops here: the companion effect either
 # already has its own handler (CULT -- a following `+N<cult>` row, see
 # module docstring) or is folded into another marker's semantics
@@ -453,7 +457,8 @@ def handle_lose_marker(state: GameState, faction: str, cmd: ParsedCommand) -> Ga
     the same marker name ``_MARKER_GAIN_KIND`` maps to a pending kind.
     """
     assert cmd.reason is not None
-    kind = _MARKER_GAIN_KIND.get(cmd.reason)
+    # -GAIN_FAVOR: Chaos Magicians' second favor from a TE/SA left untaken
+    kind = _MARKER_GAIN_KIND.get(cmd.reason) or _LOSE_ONLY_MARKER_KIND.get(cmd.reason)
     if kind is None:
         raise EngineError(f"unknown marker {cmd.reason!r}", state=state, faction=faction, cmd=cmd)
 
@@ -465,6 +470,11 @@ def handle_lose_marker(state: GameState, faction: str, cmd: ParsedCommand) -> Ga
             faction=faction,
             cmd=cmd,
         )
+    entry = state.pending[idx]
+    if kind == "gain_favor" and entry.amount > 1:  # one -GAIN_FAVOR per untaken pick
+        pending = list(state.pending)
+        pending[idx] = replace(entry, amount=entry.amount - 1)
+        return replace(state, pending=tuple(pending))
     return pop_pending(state, idx)
 
 
