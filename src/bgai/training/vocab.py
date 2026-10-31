@@ -12,7 +12,7 @@ from bgai.engine.tm.board import base_board
 from bgai.engine.tm.factions_data import CULTS, FACTION_SPECIAL_ACTIONS, FACTIONS
 from bgai.engine.tm.tiles import BONUS_TILES, FAVOR_TILES, POWER_ACTIONS, TOWN_TILES
 
-ENCODING_VERSION = 3
+ENCODING_VERSION = 4
 
 
 def require_checkpoint_encoding(version: object) -> None:

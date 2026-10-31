@@ -1,4 +1,4 @@
-"""State -> numpy encoding, v3 (plan Task 3; bump ``ENCODING_VERSION`` on
+"""State -> numpy encoding, v4 (plan Task 3; bump ``ENCODING_VERSION`` on
 any layout change, and only ever append to ``globals``: a net trained on an
 older encoding reads its prefix, ``ModelConfig.global_dim``).
 
@@ -40,6 +40,21 @@ Layout (verified by tests/test_encode_state.py):
   then each round's score tile id one-hot (6 x 9, SCORE1..SCORE9): the
   v1 cult/req pair cannot tell SCORE3 (D >> 2, 4 WATER -> P) from
   SCORE6 (TP >> 3, 4 WATER -> spade).
+  -- that is the whole v3 vector, ``GLOBAL_DIM_V3`` = 496 entries. v4
+  appends the plan block, what this round and the next pay for and how
+  far each seat is from paying for it:
+  4 plan seat blocks of PLAN_SEAT_BLOCK (18) each, same seat order:
+  workers and priests per spade, spades affordable from workers/priests,
+  spades from one power action (4) | best open cluster's power and
+  structures still missing for a town (2) | empty land hexes adjacent to
+  that cluster at 0, 1, 2, 3 spades (4) | its D->TP, TP->TE, TP->SH,
+  TE->SA upgrades affordable now (4) | empty land hexes adjacent to any
+  own structure at 0, 1, 2, 3 spades (4)
+  then the current and the next round's score tile, PLAN_TILE_DIM (17)
+  each: VP per D, TP, TE, SH/SA, spade, town (6) | its end-of-round cult
+  one-hot FIRE, WATER, EARTH, AIR, CULT_P (5) | cult steps per reward
+  (1) | reward per step-multiple in C, W, P, PW, SPADE (5)
+  then rounds left after this one (1).
 
 Economy semantics:
 - income is ``income.faction_income`` summed over its base, building,
@@ -77,6 +92,29 @@ Scoring semantics (v3):
   what it would be offered if each of them were upgraded once.
   Offered-by-seat is the mirror over this seat's structures. Neither is
   capped by bowls or gated on the round, unlike a live leech offer.
+
+Plan semantics (v4):
+- per-spade cost is the faction's dig cost at its dig level
+  (``FactionData.dig``; Darklings pay a priest). Spades from resources
+  is how many digs that cost covers now. Spades from power is the most
+  one open spade power action (ACT5, ACT6) yields with bowl 3 plus
+  everything bowl 2 can burn; it is not gated on the seat having passed.
+- the cluster is the one v2's town progress picks. Missing power and
+  structures are 0 once it is big enough. Adjacent hexes use
+  ``connectivity.directly_adjacent`` (bridges included), which is how a
+  new building joins a cluster. An upgrade counts when the seat has the
+  building in supply and holds its cost now; a trading post costs double
+  coins with no other colour adjacent (``leech.has_leechable_neighbor``).
+  Each upgrade is priced alone, not jointly with the others.
+- spade buckets here are what the seat pays to make the hex home terrain
+  (``spade_transform_cost``: Giants pay 2 for any change), unlike v2's
+  colour-wheel buckets.
+- score tile VP is ``tiles.scored_vp`` for the event's mode (build for
+  structures, gain for spades and towns); a tile pays for one of them.
+  Round 0 (setup) has no current tile; round 6 has no next tile. Both
+  read as zeros.
+- ACT1-ACT6 availability is not encoded again: it is the complement of
+  v1's taken flags, and their power costs never change.
 """
 
 from __future__ import annotations
@@ -88,16 +126,33 @@ from operator import is_
 
 import numpy as np
 
+from bgai.engine.tm import actions_terraform as _registers_giants_hooks  # noqa: F401
 from bgai.engine.tm.connectivity import directly_adjacent, effective_shipping, reachable
 from bgai.engine.tm.cults import advance
+from bgai.engine.tm.factions.hooks import hooks_for
 from bgai.engine.tm.factions_data import FACTIONS
 from bgai.engine.tm.income import faction_income
+from bgai.engine.tm.leech import has_leechable_neighbor
+from bgai.engine.tm.legal_shared import affordable, resource_amount
 from bgai.engine.tm.memo import state_memo
 from bgai.engine.tm.scoring import compute_cult_scoring, network_awards, network_size, resource_vp
 from bgai.engine.tm.state import GameState, HexState, Phase
 from bgai.engine.tm.terraform import spade_distance
-from bgai.engine.tm.tiles import BONUS_TILES, FAVOR_TILES, SCORE_TILES, TOWN_TILES, ScoringTile
-from bgai.engine.tm.towns import _town_threshold, building_power_value, open_clusters
+from bgai.engine.tm.tiles import (
+    BONUS_TILES,
+    FAVOR_TILES,
+    POWER_ACTIONS,
+    SCORE_TILES,
+    TOWN_TILES,
+    ScoringTile,
+    scored_vp,
+)
+from bgai.engine.tm.towns import (
+    _town_threshold,
+    building_power_value,
+    open_clusters,
+    open_town_clusters,
+)
 from bgai.training.vocab import (
     BUILDING_INDEX,
     BUILDINGS,
@@ -173,7 +228,40 @@ SCORE_SEAT_BLOCK = _SCORE_CONTACT + 3  # 15
 
 _SCORE_BASE = GLOBAL_DIM_V2
 _CTX_SCORE_IDS = _SCORE_BASE + 4 * SCORE_SEAT_BLOCK
-GLOBAL_DIM = _CTX_SCORE_IDS + 6 * len(SCORE_TILES)
+GLOBAL_DIM_V3 = _CTX_SCORE_IDS + 6 * len(SCORE_TILES)
+"""Width of the v3 globals vector (v2 plus the scoring block)."""
+
+_UPGRADES: tuple[tuple[str, str], ...] = (("D", "TP"), ("TP", "TE"), ("TP", "SH"), ("TE", "SA"))
+_PLAN_SPADES = 0  # W per spade, P per spade, spades from resources, spades from power
+_PLAN_TOWN_NEEDS = _PLAN_SPADES + 4
+_PLAN_TOWN_EDGE = _PLAN_TOWN_NEEDS + 2
+_PLAN_UPGRADES = _PLAN_TOWN_EDGE + _MAX_SPADES + 1
+_PLAN_TARGETS = _PLAN_UPGRADES + len(_UPGRADES)
+PLAN_SEAT_BLOCK = _PLAN_TARGETS + _MAX_SPADES + 1  # 18
+
+# (event types, scoring mode): the tile pays the best of the types
+_TILE_EVENTS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("D",), "build"),
+    (("TP",), "build"),
+    (("TE",), "build"),
+    (("SH", "SA"), "build"),
+    (("SPADE",), "gain"),
+    (_TOWN_IDS, "gain"),
+)
+_TILE_CULTS = (*CULTS4, "CULT_P")
+_TILE_REWARDS = ("C", "W", "P", "PW", "SPADE")
+PLAN_TILE_DIM = len(_TILE_EVENTS) + len(_TILE_CULTS) + 1 + len(_TILE_REWARDS)  # 17
+
+_PLAN_BASE = GLOBAL_DIM_V3
+_CTX_PLAN_TILES = _PLAN_BASE + 4 * PLAN_SEAT_BLOCK
+_CTX_ROUNDS_LEFT = _CTX_PLAN_TILES + 2 * PLAN_TILE_DIM
+GLOBAL_DIM = _CTX_ROUNDS_LEFT + 1
+
+_SPADE_ACTIONS: tuple[tuple[str, int, int], ...] = tuple(
+    (name, act.cost_power, act.gain["SPADE"])
+    for name, act in POWER_ACTIONS.items()
+    if "SPADE" in act.gain
+)
 
 
 def _score_tile_key(tile: ScoringTile) -> tuple:
@@ -233,15 +321,15 @@ def _income(state: GameState, name: str) -> list[int]:
     return [sum(b.get(r, 0) for b in buckets) for r in _INCOME_RESOURCES]
 
 
+def _closeness(cluster: tuple[int, int], threshold: int) -> tuple[float, int, int]:
+    power, count = cluster
+    return (min(1.0, power / threshold) * min(1.0, count / _TOWN_STRUCTURES), power, count)
+
+
 def _town_progress(state: GameState, name: str) -> list[int]:
     threshold = _town_threshold(state.factions[name])
     found = open_clusters(state, name)
-
-    def closeness(cluster: tuple[int, int]) -> tuple[float, int, int]:
-        power, count = cluster
-        return (min(1.0, power / threshold) * min(1.0, count / _TOWN_STRUCTURES), power, count)
-
-    power, count = max(found, key=closeness, default=(0, 0))
+    power, count = max(found, key=lambda c: _closeness(c, threshold), default=(0, 0))
     ready = sum(1 for p, _ in found if p >= threshold)
     return [power, count, threshold, ready]
 
@@ -311,6 +399,127 @@ def _cult_standing(state: GameState) -> dict[str, list[int]]:
     return out
 
 
+def _spade_economy(state: GameState, name: str) -> list[int]:
+    fs = state.factions[name]
+    dig = FACTIONS[name].dig.cost[fs.dig_level]
+    paid = [(res, amount) for res, amount in dig.items() if amount > 0]
+    from_resources = min((resource_amount(fs, res) // amount for res, amount in paid), default=0)
+    power = fs.power.bowl3 + fs.power.bowl2 // 2
+    from_power = max(
+        (
+            spades
+            for act, cost, spades in _SPADE_ACTIONS
+            if act not in state.power_actions_taken and power >= cost
+        ),
+        default=0,
+    )
+    return [dig.get("W", 0), dig.get("P", 0), from_resources, from_power]
+
+
+def _land_by_spades(state: GameState, name: str, hexes: frozenset[str]) -> list[int]:
+    home = FACTIONS[name].color
+    cost = hooks_for(name).spade_transform_cost
+    buckets = [0] * (_MAX_SPADES + 1)
+    for hex_key in hexes:
+        hx = state.hexes[hex_key]
+        if hx.building is None and hx.color in COLOR_INDEX:
+            buckets[cost(state, name, hx.color, home)] += 1
+    return buckets
+
+
+def _neighbours(state: GameState, hexes: frozenset[str]) -> frozenset[str]:
+    return frozenset().union(*(directly_adjacent(state, h) for h in hexes)) - hexes
+
+
+def _upgrade_cost(state: GameState, name: str, new: str, hex_key: str) -> dict[str, int]:
+    cost = dict(FACTIONS[name].buildings[new].cost)
+    if new == "TP" and not has_leechable_neighbor(state, name, hex_key):
+        cost["C"] = cost.get("C", 0) * 2
+    return cost
+
+
+@dataclass(frozen=True)
+class _PlanShape:
+    """What a seat's own buildings, favors and the bridges fix: the town
+    shortfall of the best open cluster, the hexes next to it and next to
+    any own structure, and the cluster's upgrades in supply as
+    (``_UPGRADES`` index, new building, hex)."""
+
+    needs: list[int]
+    cluster_edge: frozenset[str]
+    own_edge: frozenset[str]
+    upgrades: tuple[tuple[int, str, str], ...]
+
+
+def _plan_shape(state: GameState, name: str) -> _PlanShape:
+    fs = state.factions[name]
+    threshold = _town_threshold(fs)
+    found = list(zip(open_town_clusters(state, name), open_clusters(state, name), strict=True))
+    cluster, (power, count) = max(
+        found, key=lambda c: _closeness(c[1], threshold), default=(frozenset(), (0, 0))
+    )
+    tracks = FACTIONS[name].buildings
+    return _PlanShape(
+        needs=[max(0, threshold - power), max(0, _TOWN_STRUCTURES - count)],
+        cluster_edge=_neighbours(state, cluster),
+        own_edge=_neighbours(state, frozenset().union(*fs.buildings.values())),
+        upgrades=tuple(
+            (i, new, hex_key)
+            for i, (old, new) in enumerate(_UPGRADES)
+            if len(fs.buildings.get(new, ())) < tracks[new].max_count
+            for hex_key in cluster
+            if state.hexes[hex_key].building == old
+        ),
+    )
+
+
+@dataclass(frozen=True)
+class _PlanGeometry:
+    """``_PlanShape`` read against the board: the town shortfall and the
+    cluster-edge land buckets, upgrade costs, own-edge land buckets."""
+
+    town: list[int]
+    upgrades: tuple[tuple[int, dict[str, int]], ...]
+    targets: list[int]
+
+
+def _plan_geometry(state: GameState, name: str, shape: _PlanShape) -> _PlanGeometry:
+    return _PlanGeometry(
+        town=shape.needs + _land_by_spades(state, name, shape.cluster_edge),
+        upgrades=tuple(
+            (i, _upgrade_cost(state, name, new, hex_key)) for i, new, hex_key in shape.upgrades
+        ),
+        targets=_land_by_spades(state, name, shape.own_edge),
+    )
+
+
+def _affordable_upgrades(state: GameState, name: str, geometry: _PlanGeometry) -> list[int]:
+    fs = state.factions[name]
+    counts = [0] * len(_UPGRADES)
+    for i, cost in geometry.upgrades:
+        counts[i] += affordable(fs, cost)
+    return counts
+
+
+def _plan_tile(tile: ScoringTile | None) -> list[int]:
+    if tile is None:
+        return [0] * PLAN_TILE_DIM
+    vp = [max(scored_vp(tile, t, mode) for t in types) for types, mode in _TILE_EVENTS]
+    reward = dict(tile.cult_income)
+    return (
+        vp
+        + [int(tile.cult == cult) for cult in _TILE_CULTS]
+        + [tile.req]
+        + [reward.get(r, 0) for r in _TILE_REWARDS]
+    )
+
+
+def _plan_context(tiles: tuple[ScoringTile, ...], round_: int) -> list[int]:
+    current = tiles[round_ - 1] if round_ >= 1 else None
+    upcoming = tiles[round_] if round_ < len(tiles) else None
+    return _plan_tile(current) + _plan_tile(upcoming) + [len(tiles) - round_]
+
+
 class _IdentityCache[V]:
     """Values keyed on the identity of immutable engine objects plus
     hashable scalars. Engine objects are never mutated after construction
@@ -347,8 +556,25 @@ _network_cache: _IdentityCache[int] = _IdentityCache(8192)
 _resource_cache: _IdentityCache[int] = _IdentityCache(8192)
 _cult_cache: _IdentityCache[dict[str, list[int]]] = _IdentityCache(2048)
 _contact_cache: _IdentityCache[dict[str, list[int]]] = _IdentityCache(2048)
+_seat_plan_cache: _IdentityCache[tuple[int, ...]] = _IdentityCache(8192)
+_spade_cache: _IdentityCache[list[int]] = _IdentityCache(8192)
+_shape_cache: _IdentityCache[_PlanShape] = _IdentityCache(8192)
+_geometry_cache: _IdentityCache[_PlanGeometry] = _IdentityCache(8192)
+_upgrade_cache: _IdentityCache[list[int]] = _IdentityCache(8192)
+_plan_context_cache: _IdentityCache[list[int]] = _IdentityCache(64)
 _CACHES = (
-    _holdings_cache, _targets_cache, _network_cache, _resource_cache, _cult_cache, _contact_cache
+    _holdings_cache,
+    _targets_cache,
+    _network_cache,
+    _resource_cache,
+    _cult_cache,
+    _contact_cache,
+    _seat_plan_cache,
+    _spade_cache,
+    _shape_cache,
+    _geometry_cache,
+    _upgrade_cache,
+    _plan_context_cache,
 )
 
 
@@ -422,6 +648,51 @@ def _scoring(state: GameState, order: tuple[str, ...]) -> list[int]:
     return values
 
 
+def _seat_plan_parts(state: GameState, name: str) -> tuple[int, ...]:
+    fs = state.factions[name]
+    spades = _spade_cache.get(
+        (fs.power, state.power_actions_taken),
+        (name, fs.dig_level, fs.workers, fs.priests),
+        lambda: _spade_economy(state, name),
+    )
+    # an opponent's build changes ``hexes`` but not this seat's shape
+    shape = _shape_cache.get(
+        (fs.buildings, fs.favors, state.bridges, state.founded_towns.get(name, ())),
+        (name,),
+        lambda: _plan_shape(state, name),
+    )
+    geometry = _geometry_cache.get(
+        (shape, state.hexes), (name,), lambda: _plan_geometry(state, name, shape)
+    )
+    upgrades = _upgrade_cache.get(
+        (geometry,),
+        (fs.coins, fs.workers, fs.priests),
+        lambda: _affordable_upgrades(state, name, geometry),
+    )
+    return (*spades, *geometry.town, *upgrades, *geometry.targets)
+
+
+def _seat_plan(state: GameState, name: str) -> tuple[int, ...]:
+    # a leaf shares every seat but the mover's FactionState with its parent
+    fs = state.factions[name]
+    return _seat_plan_cache.get(
+        (fs, state.hexes, state.bridges, state.power_actions_taken, state.founded_towns),
+        (name,),
+        lambda: _seat_plan_parts(state, name),
+    )
+
+
+def _plan(state: GameState, order: tuple[str, ...]) -> list[int]:
+    values: list[int] = []
+    for name in order:
+        values += _seat_plan(state, name)
+    tiles = state.setup.score_tiles
+    values += _plan_context_cache.get(
+        (tiles,), (state.round,), lambda: _plan_context(tiles, state.round)
+    )
+    return values
+
+
 def encode_state(state: GameState, faction: str) -> StateEncoding:
     order = _seat_order(state, faction)
     # Read-only shared array: consumers copy (astype/np.stack) before use.
@@ -475,5 +746,6 @@ def encode_state(state: GameState, faction: str) -> StateEncoding:
     g[_ECON_BASE:_CTX_SCORE_IDS] = np.clip(derived, _INT16.min, _INT16.max)
     for r, tile in enumerate(state.setup.score_tiles):
         g[_CTX_SCORE_IDS + r * len(SCORE_TILES) + _SCORE_TILE_INDEX[_score_tile_key(tile)]] = 1
+    g[_PLAN_BASE:] = _plan(state, order)
 
     return StateEncoding(hex_planes=planes, globals=g)
