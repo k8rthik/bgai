@@ -265,7 +265,9 @@ def test_full_corpus_has_only_documented_exclusions() -> None:
         if game_id in KNOWN_ANOMALIES:
             anomaly_hits.add(game_id)
             continue
-        unexpected_failures.append(f"{game_id}: error={result.error} mismatches={result.mismatches}")
+        unexpected_failures.append(
+            f"{game_id}: error={result.error} mismatches={result.mismatches}"
+        )
 
     assert unexpected_failures == [], (
         f"{len(unexpected_failures)} undocumented failure(s):\n" + "\n".join(unexpected_failures)
