@@ -14,6 +14,7 @@ from bgai.engine.tm.apply import apply
 from bgai.engine.tm.board import RIVER, base_board
 from bgai.engine.tm.factions_data import FACTIONS
 from bgai.engine.tm.legal import legal_moves
+from bgai.engine.tm.power import Power
 from bgai.engine.tm.replay import replay_game
 from bgai.engine.tm.round_flow import start_setup
 from bgai.engine.tm.setup import load_setup
@@ -392,5 +393,161 @@ def test_score_tile_ids_tell_apart_tiles_the_v1_cult_pair_conflates() -> None:
     round_one = slice(es._CTX_SCORE_IDS, es._CTX_SCORE_IDS + len(ids))
     assert d_round[round_one].tolist() == [int(t == "SCORE3") for t in ids]
     assert tp_round[round_one].tolist() == [int(t == "SCORE6") for t in ids]
-    per_round = d_round[es._CTX_SCORE_IDS :].reshape(6, len(ids))
+    per_round = d_round[es._CTX_SCORE_IDS : es.GLOBAL_DIM_V3].reshape(6, len(ids))
     assert per_round.sum(axis=1).tolist() == [1] * 6
+
+
+# -- plan block (encoding v4) -------------------------------------------------
+
+
+def _plan(globals_: np.ndarray, seat: int) -> dict[str, list[int]]:
+    block = globals_[es._PLAN_BASE + seat * es.PLAN_SEAT_BLOCK :][: es.PLAN_SEAT_BLOCK].tolist()
+    return {
+        # W per spade, P per spade, spades from resources, spades from power
+        "spades": block[es._PLAN_SPADES : es._PLAN_TOWN_NEEDS],
+        # power and structures the best open cluster still lacks
+        "needs": block[es._PLAN_TOWN_NEEDS : es._PLAN_TOWN_EDGE],
+        "edge": block[es._PLAN_TOWN_EDGE : es._PLAN_UPGRADES],
+        # affordable D->TP, TP->TE, TP->SH, TE->SA in that cluster
+        "upgrades": block[es._PLAN_UPGRADES : es._PLAN_TARGETS],
+        "targets": block[es._PLAN_TARGETS :],
+    }
+
+
+def _plan_tiles(globals_: np.ndarray) -> tuple[list[int], list[int], int]:
+    tiles = globals_[es._CTX_PLAN_TILES : es._CTX_ROUNDS_LEFT].reshape(2, es.PLAN_TILE_DIM)
+    return tiles[0].tolist(), tiles[1].tolist(), int(globals_[es._CTX_ROUNDS_LEFT])
+
+
+def _with(state: GameState, faction: str, **fields: object) -> GameState:
+    fs = replace(state.factions[faction], **fields)
+    return replace(state, factions={**state.factions, faction: fs})
+
+
+def test_plan_block_on_a_replayed_round_four_state() -> None:
+    state = next(
+        s for s, _, c in _decisions("4pLeague_S10_D1L1_G1") if c.raw == "upgrade loc=G5 building=TP"
+    )
+    assert state.round == 4 and state.power_actions_taken == {"ACT1", "ACT4"}
+    g = encode_state(state, "darklings").globals
+    darklings, nomads, mermaids, engineers = (_plan(g, seat) for seat in range(4))
+    # darklings dig with a priest (1 held); power 0/7/0 burns to 3, short of
+    # ACT5's 4. Best cluster G5 D, G6 TP, H7 D, I10 D: power 5, four
+    # structures, FAV5's threshold 6. Its edge: F7 brown 1, G7 yellow and I11
+    # green 2, H6 and H8 gray 3 spades from black. 13 C, 7 W buy each D->TP
+    # (3 or 6 C) and G6 to TE or SH; the sanctuary is already built.
+    assert darklings == {
+        "spades": [0, 1, 1, 0],
+        "needs": [1, 0],
+        "edge": [0, 1, 2, 2],
+        "upgrades": [3, 1, 1, 0],
+        "targets": [0, 2, 2, 3],
+    }
+    assert nomads["spades"] == [3, 0, 2, 0]  # 6 W at 3 W per spade; 0/5/1 burns to 3
+    assert mermaids["spades"] == [2, 0, 3, 0]  # dig level 1: 2 W per spade, 6 W
+    # engineers' cluster C2 D, D4 D (bridged), E7 TE, F4 D: power 5 of 7.
+    # 5 C buys their 2 C (4 C isolated) trading posts, not a 6 C sanctuary.
+    # Edge: B2 and E6 brown, B3 black are 3 spades from gray, E8 yellow 2.
+    assert engineers == {
+        "spades": [3, 0, 1, 0],
+        "needs": [2, 0],
+        "edge": [0, 0, 1, 3],
+        "upgrades": [3, 0, 0, 0],
+        "targets": [0, 1, 1, 4],
+    }
+    # round 4 TOWN >> 5, 4 EARTH -> 1 SPADE; round 5 SA/SH >> 5, 2 AIR -> 1 W
+    current, upcoming, left = _plan_tiles(g)
+    assert current == [0, 0, 0, 0, 0, 5, 0, 0, 1, 0, 0, 4, 0, 0, 0, 0, 1]
+    assert upcoming == [0, 0, 0, 5, 0, 0, 0, 0, 0, 1, 0, 2, 0, 1, 0, 0, 0]
+    assert left == 2
+
+
+def test_plan_tiles_follow_the_round() -> None:
+    state = _blank()
+    tiles = [
+        _plan_tiles(encode_state(replace(state, round=r), "darklings").globals) for r in range(7)
+    ]
+    # this game: TP >> 3, SPADE >> 2, SA/SH >> 5, TOWN >> 5, SA/SH >> 5, D >> 2
+    assert [tiles[r][1][:6] for r in range(6)] == [
+        [0, 3, 0, 0, 0, 0],
+        [0, 0, 0, 0, 2, 0],
+        [0, 0, 0, 5, 0, 0],
+        [0, 0, 0, 0, 0, 5],
+        [0, 0, 0, 5, 0, 0],
+        [2, 0, 0, 0, 0, 0],
+    ]
+    assert tiles[0][0] == [0] * es.PLAN_TILE_DIM  # setup has no current tile
+    assert tiles[6][1] == [0] * es.PLAN_TILE_DIM  # round 6 has no next one
+    assert all(tiles[r][0] == tiles[r - 1][1] for r in range(1, 7))
+    assert [t[2] for t in tiles] == [6, 5, 4, 3, 2, 1, 0]
+
+
+def test_spades_from_power_need_an_open_action_and_count_burn() -> None:
+    state = _blank()
+
+    def spades(bowls: tuple[int, int, int], taken: set[str]) -> int:
+        powered = _with(state, "nomads", power=Power(*bowls))
+        s = replace(powered, power_actions_taken=frozenset(taken))
+        return _plan(encode_state(s, "nomads").globals, 0)["spades"][3]
+
+    assert spades((0, 0, 6), set()) == 2
+    assert spades((0, 4, 4), set()) == 2  # burning 2 reaches ACT6
+    assert spades((0, 3, 4), set()) == 1
+    assert spades((0, 0, 6), {"ACT6"}) == 1
+    assert spades((0, 0, 6), {"ACT5", "ACT6"}) == 0
+
+
+def _build_home(state: GameState, faction: str, hex_key: str, building: str) -> GameState:
+    state = _place(state, faction, hex_key, building)
+    hexes = {**state.hexes, hex_key: replace(state.hexes[hex_key], color=FACTIONS[faction].color)}
+    return replace(state, hexes=hexes)
+
+
+def test_cluster_upgrades_price_isolation_and_respect_supply() -> None:
+    board = base_board()
+    chain = _land_chain(3)
+    state = replace(_blank(), round=1)  # leech geometry, and so TP pricing, is off in setup
+    for hex_key, building in zip(chain, ["D", "TP", "TE"], strict=True):
+        state = _build_home(state, "darklings", hex_key, building)
+    rich_state = _with(state, "darklings", coins=30, workers=10)
+    rich = _plan(encode_state(rich_state, "darklings").globals, 0)
+    assert rich["needs"] == [2, 1]  # power 1 + 2 + 2 of 7, three structures
+    assert rich["upgrades"] == [1, 1, 1, 1]
+    # 5 C: the isolated dwelling's trading post costs double (6 C), a temple 5 C
+    poor = _with(state, "darklings", coins=5, workers=10)
+    assert _plan(encode_state(poor, "darklings").globals, 0)["upgrades"] == [0, 1, 0, 0]
+    neighbour = next(
+        h for h in sorted(board.adjacent[chain[0]])
+        if board.hexes[h].color != RIVER and h not in chain
+    )
+    touching = _build_home(poor, "engineers", neighbour, "D")
+    assert _plan(encode_state(touching, "darklings").globals, 0)["upgrades"] == [1, 1, 0, 0]
+    far = next(
+        h for h in sorted(board.land_hexes())
+        if all(h != c and h not in board.adjacent[c] for c in chain)
+    )
+    sh_built = _place(rich_state, "darklings", far, "SH")
+    assert _plan(encode_state(sh_built, "darklings").globals, 0)["upgrades"] == [1, 1, 0, 1]
+
+
+def test_edges_skip_built_hexes_and_price_giants_transforms_at_two_spades() -> None:
+    board = base_board()
+    home = _land_chain(1)[0]
+    state = _place(_blank(), "darklings", home, "D")
+    neighbours = sorted(h for h in board.adjacent[home] if board.hexes[h].color != RIVER)
+    want = [0, 0, 0, 0]
+    for h in neighbours:
+        want[spade_distance(board.hexes[h].color, "black")] += 1
+    plan = _plan(encode_state(state, "darklings").globals, 0)
+    assert plan["edge"] == plan["targets"] == want
+    blocked = _place(state, "engineers", neighbours[0], "D")
+    want[spade_distance(board.hexes[neighbours[0]].color, "black")] -= 1
+    assert _plan(encode_state(blocked, "darklings").globals, 0)["targets"] == want
+
+    giants_state = GameState.initial(load_setup("001Stedda"))
+    giants_home = next(h for h in sorted(board.land_hexes()) if board.hexes[h].color == "red")
+    giants_state = _place(giants_state, "giants", giants_home, "D")
+    ring = [h for h in board.adjacent[giants_home] if board.hexes[h].color != RIVER]
+    red = sum(board.hexes[h].color == "red" for h in ring)
+    targets = _plan(encode_state(giants_state, "giants").globals, 0)["targets"]
+    assert targets == [red, 0, len(ring) - red, 0]

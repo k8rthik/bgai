@@ -15,7 +15,13 @@ from dataclasses import asdict
 import pytest
 import torch
 
-from bgai.training.encode_state import GLOBAL_DIM, GLOBAL_DIM_V1, GLOBAL_DIM_V2, HEX_FEAT_DIM
+from bgai.training.encode_state import (
+    GLOBAL_DIM,
+    GLOBAL_DIM_V1,
+    GLOBAL_DIM_V2,
+    GLOBAL_DIM_V3,
+    HEX_FEAT_DIM,
+)
 from bgai.training.model import ModelConfig, PolicyValueNet, model_config_from_checkpoint
 from bgai.training.vocab import HEXES
 
@@ -82,14 +88,17 @@ def test_pre_v2_checkpoint_restores_v1_width_and_reads_the_current_prefix() -> N
     _reads_only_its_prefix(net, GLOBAL_DIM_V1)
 
 
-def test_v2_checkpoint_keeps_its_width_and_reads_the_current_prefix() -> None:
-    assert GLOBAL_DIM_V2 < GLOBAL_DIM
-    v2 = ModelConfig(hidden=64, embed=32, move_hidden=32, dropout=0.0, global_dim=GLOBAL_DIM_V2)
-    ckpt = {"model": PolicyValueNet(v2).state_dict(), "config": {"model_config": asdict(v2)}}
+@pytest.mark.parametrize(("width", "want"), [(GLOBAL_DIM_V2, 382), (GLOBAL_DIM_V3, 496)])
+def test_v2_and_v3_checkpoints_keep_their_width_and_read_the_current_prefix(
+    width: int, want: int
+) -> None:
+    assert width == want < GLOBAL_DIM
+    cfg = ModelConfig(hidden=64, embed=32, move_hidden=32, dropout=0.0, global_dim=width)
+    ckpt = {"model": PolicyValueNet(cfg).state_dict(), "config": {"model_config": asdict(cfg)}}
     net = PolicyValueNet(model_config_from_checkpoint(ckpt))
     net.load_state_dict(ckpt["model"])
-    assert net.cfg.global_dim == GLOBAL_DIM_V2 == 382
-    _reads_only_its_prefix(net, GLOBAL_DIM_V2)
+    assert net.cfg.global_dim == width
+    _reads_only_its_prefix(net, width)
 
 
 def test_fresh_config_reads_the_full_globals_vector() -> None:
