@@ -1,5 +1,5 @@
 """The state encoder's v1 prefix must reproduce the original per-element
-v1 encoder bit for bit, and its v2 prefix the v2 encoder -- checkpoints
+v1 encoder bit for bit, and its v2 and v3 prefixes the v2 and v3 encoders -- checkpoints
 trained on an older layout read exactly that prefix of every later
 encoding, so any drift here silently changes what they see."""
 
@@ -162,3 +162,21 @@ def test_v2_prefix_matches_the_v2_encoder_on_replayed_corpus_games() -> None:
             for mover in state.setup.factions:
                 digest.update(encode_state(state, mover).globals[: es.GLOBAL_DIM_V2].tobytes())
         assert digest.hexdigest() == _V2_DIGESTS[game_id]
+
+
+# The same digest over the v3 globals, written by the v3 encoder (commit
+# 58fb572) before v4 existed.
+_V3_DIGESTS = {
+    "4pLeague_S10_D1L1_G1": "5885b392fb57e298c606447d2ca7ffa571c1330514f0689c3eb5dc4a4d29cb6d",
+    "4pLeague_S12_D1L1_G1": "a5d8fd4562dd948fc502a9a9c4b83b3c47481aa96c443091f1338fe6d8148f5a",
+}
+
+
+def test_v3_prefix_matches_the_v3_encoder_on_replayed_corpus_games() -> None:
+    assert es.GLOBAL_DIM_V3 == 496
+    for game_id in _CORPUS_GAMES:
+        digest = hashlib.sha256()
+        for state in _replayed(game_id)[::5]:
+            for mover in state.setup.factions:
+                digest.update(encode_state(state, mover).globals[: es.GLOBAL_DIM_V3].tobytes())
+        assert digest.hexdigest() == _V3_DIGESTS[game_id]
